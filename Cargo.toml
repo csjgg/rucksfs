@@ -1,0 +1,9 @@
+[package]
+name = "rucksfs"
+version = "0.1.0"
+edition = "2021"
+authors = ["csjgg"]
+description = "Filesystem metadata manager (FUSE + RocksDB)"
+license = "MIT"
+repository = "https://github.com/csjgg/rucksfs"
+
