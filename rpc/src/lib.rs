@@ -2,14 +2,14 @@ pub mod auth;
 pub mod client;
 pub mod tls;
 
-pub mod proto {
-    tonic::include_proto!("fuse");
+pub mod rucksfs {
+    tonic::include_proto!("rucksfs");
 }
 
 pub mod server;
 
 pub use client::RpcClientOps;
-pub use proto::fuse::file_system_service_server::FileSystemServiceServer;
+pub use rucksfs::file_system_service_server::FileSystemServiceServer;
 pub use server::{serve, ServerConfig};
 pub use tls::{ClientTlsConfig, TlsConfig};
 

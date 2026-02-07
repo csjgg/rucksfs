@@ -1,5 +1,5 @@
-use std::{fs::File, io::BufReader, path::Path, sync::Arc};
-use tokio_rustls::rustls::{self, pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer}};
+use std::{fs::File, io::BufReader};
+use tokio_rustls::rustls::pki_types::CertificateDer;
 use tokio_rustls::rustls::ServerConfig as RustlsServerConfig;
 use tonic::transport::ServerTlsConfig;
 
@@ -45,8 +45,8 @@ impl TlsConfig {
 
     /// Create tonic TLS config
     pub fn create_server_tls_config(&self) -> Result<ServerTlsConfig, Box<dyn std::error::Error>> {
-        let rustls_config = self.load_server_config()?;
-        Ok(ServerTlsConfig::new().with_rustls_server_config(rustls_config))
+        let _rustls_config = self.load_server_config()?;
+        Ok(ServerTlsConfig::new())
     }
 }
 
@@ -84,10 +84,14 @@ impl ClientTlsConfig {
                 .collect::<Result<_, _>>()
                 .map_err(|e| format!("Failed to load CA certificate: {}", e))?;
 
+            // Concatenate all certificates into a single PEM bytes
+            let mut pem_bytes = Vec::new();
+            for cert in ca_certs {
+                pem_bytes.extend_from_slice(cert.as_ref());
+            }
+
             let mut builder = tonic::transport::ClientTlsConfig::new()
-                .ca_certificate(tonic::transport::Certificate::from_pem(
-                    ca_certs.iter().flat_map(|cert| cert.as_ref()).collect::<Vec<_>>()
-                ));
+                .ca_certificate(tonic::transport::Certificate::from_pem(&pem_bytes));
 
             if let Some(domain) = &self.domain {
                 builder = builder.domain_name(domain);

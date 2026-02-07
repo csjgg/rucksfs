@@ -1,6 +1,5 @@
 use std::sync::Arc;
-use tonic::Request;
-use tower_http::validate_request::ValidateRequestHeaderLayer;
+use tonic::{Request, Status, service::Interceptor};
 
 /// API Token authentication for gRPC
 #[derive(Debug, Clone)]
@@ -20,31 +19,12 @@ impl ApiToken {
     }
 }
 
-/// Create a middleware layer for API token authentication
-pub fn auth_layer(token: Arc<String>) -> ValidateRequestHeaderLayer<impl Fn(&Request<()>) -> Result<(), tonic::Status> + Clone> {
-    ValidateRequestHeaderLayer::custom(move |req: &Request<()>| {
-        let auth_header = req
-            .metadata()
-            .get("authorization")
-            .and_then(|v| v.to_str().ok());
-
-        match auth_header {
-            Some(header) if header.starts_with("Bearer ") => {
-                let token = &header[7..];
-                if constant_time_eq::constant_time_eq(token.as_bytes(), token.as_bytes()) {
-                    Ok(())
-                } else {
-                    Err(tonic::Status::unauthenticated("Invalid API token"))
-                }
-            }
-            _ => Err(tonic::Status::unauthenticated("Missing or invalid authorization header")),
-        }
-    })
-}
-
-pub fn create_auth_layer(token: String) -> ValidateRequestHeaderLayer<impl Fn(&Request<()>) -> Result<(), tonic::Status> + Clone> {
+/// Create an authentication interceptor for Bearer token authentication
+pub fn create_auth_interceptor(token: String) -> impl Interceptor {
     let token = Arc::new(token);
-    ValidateRequestHeaderLayer::custom(move |req: &Request<()>| {
+    
+    move |req: Request<()>| {
+        let token = token.clone();
         let auth_header = req
             .metadata()
             .get("authorization")
@@ -54,12 +34,12 @@ pub fn create_auth_layer(token: String) -> ValidateRequestHeaderLayer<impl Fn(&R
             Some(header) if header.starts_with("Bearer ") => {
                 let provided_token = &header[7..];
                 if constant_time_eq::constant_time_eq(provided_token.as_bytes(), token.as_bytes()) {
-                    Ok(())
+                    Ok(req)
                 } else {
-                    Err(tonic::Status::unauthenticated("Invalid API token"))
+                    Err(Status::unauthenticated("Invalid API token"))
                 }
             }
-            _ => Err(tonic::Status::unauthenticated("Missing or invalid authorization header (expected: Bearer <token>)")),
+            _ => Err(Status::unauthenticated("Missing or invalid authorization header (expected: Bearer <token>)")),
         }
-    })
+    }
 }

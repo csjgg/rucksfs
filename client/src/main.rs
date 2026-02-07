@@ -135,24 +135,25 @@ fn main() {
     }
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let rpc_client = rt.block_on(RpcClientOps::connect_secure(&server_addr, tls_config, auth_token));
+    let addr_for_print = server_addr.clone();
+    let rpc_client = rt.block_on(RpcClientOps::connect_secure(server_addr, tls_config, auth_token));
     
     let rpc_client = match rpc_client {
         Ok(c) => {
-            println!("Successfully connected to {}", server_addr);
+            println!("Successfully connected to {}", addr_for_print);
             c
         }
         Err(e) => {
-            eprintln!("Failed to connect to {}: {}", server_addr, e);
+            eprintln!("Failed to connect to {}: {}", addr_for_print, e);
             std::process::exit(1);
         }
     };
 
-    let client = build_client(Arc::new(rpc_client));
+    let _client = build_client(Arc::new(rpc_client));
 
     #[cfg(target_os = "linux")]
     if let Some(mount) = mount_point {
-        if let Err(e) = rucksfs_client::mount_fuse(&mount, Arc::new(client)) {
+        if let Err(e) = rucksfs_client::mount_fuse(&mount, _client.clone()) {
             eprintln!("Mount failed: {}", e);
             std::process::exit(1);
         }
@@ -170,9 +171,10 @@ fn main() {
 
     // Keep the runtime alive
     rt.block_on(async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen for Ctrl+C");
-        println!("Received shutdown signal, exiting...");
+        let result = tokio::signal::ctrl_c().await;
+        match result {
+            Ok(()) => println!("Received shutdown signal, exiting..."),
+            Err(e) => eprintln!("Failed to listen for Ctrl+C: {}", e),
+        }
     });
 }
