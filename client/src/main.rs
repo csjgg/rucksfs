@@ -5,7 +5,7 @@
 //! Example:
 //!   rucksfs-client --server 127.0.0.1:9000 --mount /tmp/rucksfs
 
-use rucksfs_client::{build_client, mount_fuse};
+use rucksfs_client::build_client;
 use rucksfs_rpc::RpcClientOps;
 use std::sync::Arc;
 
@@ -53,14 +53,21 @@ fn main() {
         }
     };
 
-    let client = build_client(Arc::new(rpc_client));
+    let _client = build_client(Arc::new(rpc_client));
 
+    #[cfg(target_os = "linux")]
     if let Some(mount) = mount_point {
-        if let Err(e) = mount_fuse(&mount, Arc::new(client)) {
+        if let Err(e) = rucksfs_client::mount_fuse(&mount, Arc::new(client)) {
             eprintln!("Mount failed: {}", e);
             std::process::exit(1);
         }
     } else {
         println!("Connected to {}. Pass --mount <path> to mount.", addr);
     }
+
+    #[cfg(not(target_os = "linux"))]
+    if let Some(mount) = mount_point {
+        eprintln!("Mount is only supported on Linux, ignoring mount point: {}", mount);
+    }
+    println!("Connected to {}. Pass --mount <path> to mount.", addr);
 }
