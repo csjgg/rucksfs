@@ -9,3 +9,4 @@ authors = { workspace = true }
 [dependencies]
 thiserror = "1"
 async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }

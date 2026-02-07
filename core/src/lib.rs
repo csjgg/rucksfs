@@ -1,10 +1,11 @@
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub type FileId = u64;
 pub type Inode = u64;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct FileAttr {
     pub inode: Inode,
     pub size: u64,
@@ -16,7 +17,7 @@ pub struct FileAttr {
     pub ctime: u64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct StatFs {
     pub blocks: u64,
     pub bfree: u64,
@@ -27,14 +28,14 @@ pub struct StatFs {
     pub namelen: u32,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DirEntry {
     pub name: String,
     pub inode: Inode,
     pub kind: u32,
 }
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Serialize, Deserialize)]
 pub enum FsError {
     #[error("not implemented")]
     NotImplemented,
