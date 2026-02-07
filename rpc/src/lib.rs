@@ -1,11 +1,17 @@
+pub mod auth;
 pub mod client;
-pub mod framing;
-pub mod message;
+pub mod tls;
+
+pub mod proto {
+    tonic::include_proto!("fuse");
+}
+
 pub mod server;
 
 pub use client::RpcClientOps;
-pub use message::{Request, Response};
-pub use server::serve;
+pub use proto::fuse::file_system_service_server::FileSystemServiceServer;
+pub use server::{serve, ServerConfig};
+pub use tls::{ClientTlsConfig, TlsConfig};
 
 // ---- Legacy trait aliases (for compatibility) ----
 
