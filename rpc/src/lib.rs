@@ -312,7 +312,7 @@ async fn handle_stream(backend: Arc<dyn ClientOps>, mut stream: TcpStream) -> Fs
                 }
             }
         };
-        if let Err(e) = send_frame(&mut stream, &resp).await {
+        if let Err(_e) = send_frame(&mut stream, &resp).await {
             break;
         }
     }

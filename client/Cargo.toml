@@ -10,7 +10,7 @@ authors = { workspace = true }
 rucksfs-core = { path = "../core" }
 rucksfs-rpc = { path = "../rpc" }
 async-trait = "0.1"
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = "0.15"

@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
 use fuser::{
-    FileAttr as FuseAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory,
-    ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request,
+    FileAttr as FuseAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyCreate, ReplyData,
+    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request,
 };
 #[cfg(target_os = "linux")]
 use libc::{EACCES, EINVAL, EIO, ENOENT, EOPNOTSUPP};
@@ -142,7 +142,7 @@ where
         }
     }
 
-    fn getattr(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyAttr) {
+    fn getattr(&mut self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
         let client = self.client.clone();
         let result = futures::executor::block_on(async move { client.getattr(ino).await });
         match result {
@@ -182,7 +182,17 @@ where
         }
     }
 
-    fn read(&mut self, _req: &Request<'_>, ino: u64, _fh: u64, offset: i64, size: u32, reply: ReplyData) {
+    fn read(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        size: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: ReplyData,
+    ) {
         let client = self.client.clone();
         let result = futures::executor::block_on(async move {
             client.read(ino, offset as u64, size).await
@@ -223,7 +233,8 @@ where
         name: &OsStr,
         _mode: u32,
         _umask: u32,
-        reply: ReplyEntry,
+        _flags: i32,
+        reply: ReplyCreate,
     ) {
         let name = name.to_string_lossy().to_string();
         let client = self.client.clone();
@@ -231,7 +242,11 @@ where
             client.create(parent, &name, libc::S_IFREG as u32 | 0o644).await
         });
         match result {
-            Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
+            Ok(attr) => {
+                let ino = attr.inode;
+                let fuse_attr = to_fuse_attr(attr);
+                reply.created(&Duration::from_secs(1), &fuse_attr, 0, ino, 0);
+            }
             Err(e) => reply.error(fs_error_to_errno(e)),
         }
     }
