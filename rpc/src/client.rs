@@ -1,142 +1,308 @@
 use async_trait::async_trait;
+use tonic::transport::{Channel, ClientTlsConfig};
+use tonic::Request;
+
 use rucksfs_core::{ClientOps, DirEntry, FileAttr, FsError, FsResult, Inode, StatFs};
-use tokio::net::TcpStream;
+use crate::proto::fuse::file_system_service_client::FileSystemServiceClient;
+use crate::proto::fuse::*;
+use crate::tls::ClientTlsConfig as TlsConfig;
 
-use crate::{framing::recv_frame, framing::send_frame, message::Request, message::Response};
-
-/// RPC client that implements ClientOps over TCP.
+/// gRPC client that implements ClientOps
 pub struct RpcClientOps {
-    stream: tokio::sync::Mutex<TcpStream>,
+    client: FileSystemServiceClient<Channel>,
 }
 
 impl RpcClientOps {
+    /// Connect to the gRPC server
     pub async fn connect(addr: &str) -> FsResult<Self> {
-        let stream = TcpStream::connect(addr).await.map_err(|e| FsError::Io(e.to_string()))?;
+        let channel = Channel::from_static(addr)
+            .connect()
+            .await
+            .map_err(|e| FsError::Io(e.to_string()))?;
+        
         Ok(Self {
-            stream: tokio::sync::Mutex::new(stream),
+            client: FileSystemServiceClient::new(channel),
         })
     }
 
-    async fn roundtrip(&self, req: Request) -> FsResult<Response> {
-        let mut stream = self.stream.lock().await;
-        send_frame(&mut stream, &req).await?;
-        let resp: Response = recv_frame(&mut stream).await?;
-        if let Response::Err(e) = resp {
-            return Err(e);
+    /// Connect with TLS and authentication
+    pub async fn connect_secure(
+        addr: &str,
+        tls_config: Option<TlsConfig>,
+        auth_token: Option<String>,
+    ) -> FsResult<Self> {
+        let mut endpoint = Channel::from_static(addr);
+
+        // Configure TLS
+        if let Some(tls) = tls_config {
+            let tls = tls.load()
+                .map_err(|e| FsError::Io(format!("Failed to load TLS config: {}", e)))?;
+            endpoint = endpoint.tls_config(tls.unwrap());
         }
-        Ok(resp)
+
+        let channel = endpoint
+            .connect()
+            .await
+            .map_err(|e| FsError::Io(e.to_string()))?;
+
+        Ok(Self {
+            client: FileSystemServiceClient::new(channel),
+        })
+    }
+
+    /// Convert tonic Status to FsError
+    fn map_error(err: tonic::Status) -> FsError {
+        match err.code() {
+            tonic::Code::NotFound => FsError::NotFound,
+            tonic::Code::PermissionDenied => FsError::PermissionDenied,
+            tonic::Code::InvalidArgument => FsError::InvalidInput(err.message().to_string()),
+            tonic::Code::Unauthenticated => FsError::PermissionDenied,
+            tonic::Code::Unimplemented => FsError::NotImplemented,
+            _ => FsError::Io(err.message().to_string()),
+        }
+    }
+
+    /// Convert proto FileAttr to core FileAttr
+    fn from_proto_file_attr(attr: FileAttr) -> FileAttr {
+        FileAttr {
+            inode: attr.inode,
+            size: attr.size,
+            mode: attr.mode,
+            uid: attr.uid,
+            gid: attr.gid,
+            atime: attr.atime,
+            mtime: attr.mtime,
+            ctime: attr.ctime,
+        }
+    }
+
+    /// Convert proto StatFs to core StatFs
+    fn from_proto_statfs(statfs: StatFs) -> StatFs {
+        StatFs {
+            blocks: statfs.blocks,
+            bfree: statfs.bfree,
+            bavail: statfs.bavail,
+            files: statfs.files,
+            ffree: statfs.ffree,
+            bsize: statfs.bsize,
+            namelen: statfs.namelen,
+        }
+    }
+
+    /// Create a request with authentication header
+    fn with_auth<T>(&self, mut req: Request<T>, token: Option<&str>) -> Request<T> {
+        if let Some(token) = token {
+            req.metadata_mut().append(
+                "authorization",
+                format!("Bearer {}", token).parse().unwrap(),
+            );
+        }
+        req
     }
 }
 
 #[async_trait]
 impl ClientOps for RpcClientOps {
     async fn lookup(&self, parent: Inode, name: &str) -> FsResult<FileAttr> {
-        match self.roundtrip(Request::Lookup { parent, name: name.to_string() }).await? {
-            Response::OkFileAttr(a) => Ok(a),
-            _ => Err(FsError::Other("invalid response".into())),
-        }
+        let req = Request::new(LookupRequest {
+            parent,
+            name: name.to_string(),
+        });
+        
+        self.client
+            .lookup(req)
+            .await
+            .map(|r| Self::from_proto_file_attr(r.into_inner()))
+            .map_err(Self::map_error)
     }
 
     async fn getattr(&self, inode: Inode) -> FsResult<FileAttr> {
-        match self.roundtrip(Request::Getattr { inode }).await? {
-            Response::OkFileAttr(a) => Ok(a),
-            _ => Err(FsError::Other("invalid response".into())),
-        }
+        let req = Request::new(GetattrRequest { inode });
+        
+        self.client
+            .getattr(req)
+            .await
+            .map(|r| Self::from_proto_file_attr(r.into_inner()))
+            .map_err(Self::map_error)
     }
 
     async fn readdir(&self, inode: Inode) -> FsResult<Vec<DirEntry>> {
-        match self.roundtrip(Request::Readdir { inode }).await? {
-            Response::OkDirEntries(e) => Ok(e),
-            _ => Err(FsError::Other("invalid response".into())),
-        }
+        let req = Request::new(ReaddirRequest { inode });
+        
+        let response = self.client
+            .readdir(req)
+            .await
+            .map_err(Self::map_error)?
+            .into_inner();
+
+        let entries = response
+            .entries
+            .into_iter()
+            .map(|e| DirEntry {
+                name: e.name,
+                inode: e.inode,
+                kind: e.kind,
+            })
+            .collect();
+
+        Ok(entries)
     }
 
     async fn open(&self, inode: Inode, flags: u32) -> FsResult<u64> {
-        match self.roundtrip(Request::Open { inode, flags }).await? {
-            Response::OkOpen(h) => Ok(h),
-            _ => Err(FsError::Other("invalid response".into())),
-        }
+        let req = Request::new(OpenRequest { inode, flags });
+        
+        self.client
+            .open(req)
+            .await
+            .map(|r| r.into_inner().handle)
+            .map_err(Self::map_error)
     }
 
     async fn read(&self, inode: Inode, offset: u64, size: u32) -> FsResult<Vec<u8>> {
-        match self.roundtrip(Request::Read { inode, offset, size }).await? {
-            Response::OkRead(d) => Ok(d),
-            _ => Err(FsError::Other("invalid response".into())),
-        }
+        let req = Request::new(ReadRequest { inode, offset, size });
+        
+        self.client
+            .read(req)
+            .await
+            .map(|r| r.into_inner().data)
+            .map_err(Self::map_error)
     }
 
     async fn write(&self, inode: Inode, offset: u64, data: &[u8], flags: u32) -> FsResult<u32> {
-        match self.roundtrip(Request::Write { inode, offset, data: data.to_vec(), flags }).await? {
-            Response::OkWrite(n) => Ok(n),
-            _ => Err(FsError::Other("invalid response".into())),
-        }
+        let req = Request::new(WriteRequest {
+            inode,
+            offset,
+            data: data.to_vec(),
+            flags,
+        });
+        
+        self.client
+            .write(req)
+            .await
+            .map(|r| r.into_inner().bytes_written)
+            .map_err(Self::map_error)
     }
 
     async fn create(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr> {
-        match self.roundtrip(Request::Create { parent, name: name.to_string(), mode }).await? {
-            Response::OkFileAttr(a) => Ok(a),
-            _ => Err(FsError::Other("invalid response".into())),
-        }
+        let req = Request::new(CreateRequest {
+            parent,
+            name: name.to_string(),
+            mode,
+        });
+        
+        self.client
+            .create(req)
+            .await
+            .map(|r| Self::from_proto_file_attr(r.into_inner()))
+            .map_err(Self::map_error)
     }
 
     async fn mkdir(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr> {
-        match self.roundtrip(Request::Mkdir { parent, name: name.to_string(), mode }).await? {
-            Response::OkFileAttr(a) => Ok(a),
-            _ => Err(FsError::Other("invalid response".into())),
-        }
+        let req = Request::new(MkdirRequest {
+            parent,
+            name: name.to_string(),
+            mode,
+        });
+        
+        self.client
+            .mkdir(req)
+            .await
+            .map(|r| Self::from_proto_file_attr(r.into_inner()))
+            .map_err(Self::map_error)
     }
 
     async fn unlink(&self, parent: Inode, name: &str) -> FsResult<()> {
-        match self.roundtrip(Request::Unlink { parent, name: name.to_string() }).await? {
-            Response::OkUnit => Ok(()),
-            _ => Err(FsError::Other("invalid response".into())),
-        }
+        let req = Request::new(UnlinkRequest {
+            parent,
+            name: name.to_string(),
+        });
+        
+        self.client
+            .unlink(req)
+            .await
+            .map(|_| ())
+            .map_err(Self::map_error)
     }
 
     async fn rmdir(&self, parent: Inode, name: &str) -> FsResult<()> {
-        match self.roundtrip(Request::Rmdir { parent, name: name.to_string() }).await? {
-            Response::OkUnit => Ok(()),
-            _ => Err(FsError::Other("invalid response".into())),
-        }
+        let req = Request::new(RmdirRequest {
+            parent,
+            name: name.to_string(),
+        });
+        
+        self.client
+            .rmdir(req)
+            .await
+            .map(|_| ())
+            .map_err(Self::map_error)
     }
 
     async fn rename(&self, parent: Inode, name: &str, new_parent: Inode, new_name: &str) -> FsResult<()> {
-        match self.roundtrip(Request::Rename {
+        let req = Request::new(RenameRequest {
             parent,
             name: name.to_string(),
             new_parent,
             new_name: new_name.to_string(),
-        }).await? {
-            Response::OkUnit => Ok(()),
-            _ => Err(FsError::Other("invalid response".into())),
-        }
+        });
+        
+        self.client
+            .rename(req)
+            .await
+            .map(|_| ())
+            .map_err(Self::map_error)
     }
 
     async fn setattr(&self, inode: Inode, attr: FileAttr) -> FsResult<FileAttr> {
-        match self.roundtrip(Request::Setattr { inode, attr }).await? {
-            Response::OkFileAttr(a) => Ok(a),
-            _ => Err(FsError::Other("invalid response".into())),
-        }
+        let proto_attr = FileAttr {
+            inode: attr.inode,
+            size: attr.size,
+            mode: attr.mode,
+            uid: attr.uid,
+            gid: attr.gid,
+            atime: attr.atime,
+            mtime: attr.mtime,
+            ctime: attr.ctime,
+        };
+        
+        let req = Request::new(SetattrRequest {
+            inode,
+            attr: Some(proto_attr),
+        });
+        
+        self.client
+            .setattr(req)
+            .await
+            .map(|r| Self::from_proto_file_attr(r.into_inner()))
+            .map_err(Self::map_error)
     }
 
     async fn statfs(&self, inode: Inode) -> FsResult<StatFs> {
-        match self.roundtrip(Request::Statfs { inode }).await? {
-            Response::OkStatFs(s) => Ok(s),
-            _ => Err(FsError::Other("invalid response".into())),
-        }
+        let req = Request::new(StatfsRequest { inode });
+        
+        self.client
+            .statfs(req)
+            .await
+            .map(|r| Self::from_proto_statfs(r.into_inner()))
+            .map_err(Self::map_error)
     }
 
     async fn flush(&self, inode: Inode) -> FsResult<()> {
-        match self.roundtrip(Request::Flush { inode }).await? {
-            Response::OkUnit => Ok(()),
-            _ => Err(FsError::Other("invalid response".into())),
-        }
+        let req = Request::new(FlushRequest { inode });
+        
+        self.client
+            .flush(req)
+            .await
+            .map(|_| ())
+            .map_err(Self::map_error)
     }
 
     async fn fsync(&self, inode: Inode, datasync: bool) -> FsResult<()> {
-        match self.roundtrip(Request::Fsync { inode, datasync }).await? {
-            Response::OkUnit => Ok(()),
-            _ => Err(FsError::Other("invalid response".into())),
-        }
+        let req = Request::new(FsyncRequest { inode, datasync });
+        
+        self.client
+            .fsync(req)
+            .await
+            .map(|_| ())
+            .map_err(Self::map_error)
     }
 }
