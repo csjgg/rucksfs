@@ -9,4 +9,6 @@ authors = { workspace = true }
 [dependencies]
 rucksfs-core = { path = "../core" }
 rucksfs-storage = { path = "../storage" }
+rucksfs-rpc = { path = "../rpc" }
 async-trait = "0.1"
+tokio = { version = "1", features = ["rt", "net"] }
