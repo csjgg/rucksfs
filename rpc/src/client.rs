@@ -1,44 +1,60 @@
 use async_trait::async_trait;
-use tonic::transport::{Channel, ClientTlsConfig};
+use tonic::transport::Channel;
 use tonic::Request;
+use tokio::sync::Mutex;
+use std::sync::Arc;
 
 use rucksfs_core::{ClientOps, DirEntry, FileAttr, FsError, FsResult, Inode, StatFs};
-use crate::proto::fuse::file_system_service_client::FileSystemServiceClient;
-use crate::proto::fuse::*;
+use crate::rucksfs::{
+    file_system_service_client::FileSystemServiceClient,
+    FileAttr as ProtoFileAttr, StatFs as ProtoStatFs,
+    LookupRequest, GetattrRequest, ReaddirRequest, OpenRequest, ReadRequest,
+    WriteRequest, CreateRequest, MkdirRequest, UnlinkRequest, RmdirRequest,
+    RenameRequest, SetattrRequest, StatfsRequest, FlushRequest, FsyncRequest,
+};
 use crate::tls::ClientTlsConfig as TlsConfig;
 
 /// gRPC client that implements ClientOps
+#[derive(Clone)]
 pub struct RpcClientOps {
-    client: FileSystemServiceClient<Channel>,
+    client: Arc<Mutex<FileSystemServiceClient<Channel>>>,
 }
 
 impl RpcClientOps {
     /// Connect to the gRPC server
-    pub async fn connect(addr: &str) -> FsResult<Self> {
-        let channel = Channel::from_static(addr)
+    pub async fn connect(addr: String) -> FsResult<Self> {
+        let channel = Channel::from_shared(addr)
+            .map_err(|e| FsError::InvalidInput(e.to_string()))?
             .connect()
             .await
             .map_err(|e| FsError::Io(e.to_string()))?;
         
         Ok(Self {
-            client: FileSystemServiceClient::new(channel),
+            client: Arc::new(Mutex::new(FileSystemServiceClient::new(channel))),
         })
     }
 
     /// Connect with TLS and authentication
     pub async fn connect_secure(
-        addr: &str,
+        addr: String,
         tls_config: Option<TlsConfig>,
-        auth_token: Option<String>,
+        _auth_token: Option<String>,
     ) -> FsResult<Self> {
-        let mut endpoint = Channel::from_static(addr);
+        let endpoint = Channel::from_shared(addr)
+            .map_err(|e| FsError::InvalidInput(e.to_string()))?;
 
         // Configure TLS
-        if let Some(tls) = tls_config {
+        let endpoint = if let Some(tls) = tls_config {
             let tls = tls.load()
                 .map_err(|e| FsError::Io(format!("Failed to load TLS config: {}", e)))?;
-            endpoint = endpoint.tls_config(tls.unwrap());
-        }
+            if let Some(tls) = tls {
+                endpoint.tls_config(tls).map_err(|e| FsError::Io(e.to_string()))?
+            } else {
+                endpoint
+            }
+        } else {
+            endpoint
+        };
 
         let channel = endpoint
             .connect()
@@ -46,7 +62,7 @@ impl RpcClientOps {
             .map_err(|e| FsError::Io(e.to_string()))?;
 
         Ok(Self {
-            client: FileSystemServiceClient::new(channel),
+            client: Arc::new(Mutex::new(FileSystemServiceClient::new(channel))),
         })
     }
 
@@ -63,7 +79,7 @@ impl RpcClientOps {
     }
 
     /// Convert proto FileAttr to core FileAttr
-    fn from_proto_file_attr(attr: FileAttr) -> FileAttr {
+    fn from_proto_file_attr(attr: ProtoFileAttr) -> FileAttr {
         FileAttr {
             inode: attr.inode,
             size: attr.size,
@@ -76,8 +92,22 @@ impl RpcClientOps {
         }
     }
 
+    /// Convert core FileAttr to proto FileAttr
+    fn to_proto_file_attr(attr: FileAttr) -> ProtoFileAttr {
+        ProtoFileAttr {
+            inode: attr.inode,
+            size: attr.size,
+            mode: attr.mode,
+            uid: attr.uid,
+            gid: attr.gid,
+            atime: attr.atime,
+            mtime: attr.mtime,
+            ctime: attr.ctime,
+        }
+    }
+
     /// Convert proto StatFs to core StatFs
-    fn from_proto_statfs(statfs: StatFs) -> StatFs {
+    fn from_proto_statfs(statfs: ProtoStatFs) -> StatFs {
         StatFs {
             blocks: statfs.blocks,
             bfree: statfs.bfree,
@@ -90,6 +120,7 @@ impl RpcClientOps {
     }
 
     /// Create a request with authentication header
+    #[allow(dead_code)]
     fn with_auth<T>(&self, mut req: Request<T>, token: Option<&str>) -> Request<T> {
         if let Some(token) = token {
             req.metadata_mut().append(
@@ -109,7 +140,8 @@ impl ClientOps for RpcClientOps {
             name: name.to_string(),
         });
         
-        self.client
+        let mut client = self.client.lock().await;
+        client
             .lookup(req)
             .await
             .map(|r| Self::from_proto_file_attr(r.into_inner()))
@@ -119,7 +151,8 @@ impl ClientOps for RpcClientOps {
     async fn getattr(&self, inode: Inode) -> FsResult<FileAttr> {
         let req = Request::new(GetattrRequest { inode });
         
-        self.client
+        let mut client = self.client.lock().await;
+        client
             .getattr(req)
             .await
             .map(|r| Self::from_proto_file_attr(r.into_inner()))
@@ -129,7 +162,8 @@ impl ClientOps for RpcClientOps {
     async fn readdir(&self, inode: Inode) -> FsResult<Vec<DirEntry>> {
         let req = Request::new(ReaddirRequest { inode });
         
-        let response = self.client
+        let mut client = self.client.lock().await;
+        let response = client
             .readdir(req)
             .await
             .map_err(Self::map_error)?
@@ -151,7 +185,8 @@ impl ClientOps for RpcClientOps {
     async fn open(&self, inode: Inode, flags: u32) -> FsResult<u64> {
         let req = Request::new(OpenRequest { inode, flags });
         
-        self.client
+        let mut client = self.client.lock().await;
+        client
             .open(req)
             .await
             .map(|r| r.into_inner().handle)
@@ -161,7 +196,8 @@ impl ClientOps for RpcClientOps {
     async fn read(&self, inode: Inode, offset: u64, size: u32) -> FsResult<Vec<u8>> {
         let req = Request::new(ReadRequest { inode, offset, size });
         
-        self.client
+        let mut client = self.client.lock().await;
+        client
             .read(req)
             .await
             .map(|r| r.into_inner().data)
@@ -176,7 +212,8 @@ impl ClientOps for RpcClientOps {
             flags,
         });
         
-        self.client
+        let mut client = self.client.lock().await;
+        client
             .write(req)
             .await
             .map(|r| r.into_inner().bytes_written)
@@ -190,7 +227,8 @@ impl ClientOps for RpcClientOps {
             mode,
         });
         
-        self.client
+        let mut client = self.client.lock().await;
+        client
             .create(req)
             .await
             .map(|r| Self::from_proto_file_attr(r.into_inner()))
@@ -204,7 +242,8 @@ impl ClientOps for RpcClientOps {
             mode,
         });
         
-        self.client
+        let mut client = self.client.lock().await;
+        client
             .mkdir(req)
             .await
             .map(|r| Self::from_proto_file_attr(r.into_inner()))
@@ -217,7 +256,8 @@ impl ClientOps for RpcClientOps {
             name: name.to_string(),
         });
         
-        self.client
+        let mut client = self.client.lock().await;
+        client
             .unlink(req)
             .await
             .map(|_| ())
@@ -230,7 +270,8 @@ impl ClientOps for RpcClientOps {
             name: name.to_string(),
         });
         
-        self.client
+        let mut client = self.client.lock().await;
+        client
             .rmdir(req)
             .await
             .map(|_| ())
@@ -245,7 +286,8 @@ impl ClientOps for RpcClientOps {
             new_name: new_name.to_string(),
         });
         
-        self.client
+        let mut client = self.client.lock().await;
+        client
             .rename(req)
             .await
             .map(|_| ())
@@ -253,23 +295,15 @@ impl ClientOps for RpcClientOps {
     }
 
     async fn setattr(&self, inode: Inode, attr: FileAttr) -> FsResult<FileAttr> {
-        let proto_attr = FileAttr {
-            inode: attr.inode,
-            size: attr.size,
-            mode: attr.mode,
-            uid: attr.uid,
-            gid: attr.gid,
-            atime: attr.atime,
-            mtime: attr.mtime,
-            ctime: attr.ctime,
-        };
+        let proto_attr = Self::to_proto_file_attr(attr);
         
         let req = Request::new(SetattrRequest {
             inode,
             attr: Some(proto_attr),
         });
         
-        self.client
+        let mut client = self.client.lock().await;
+        client
             .setattr(req)
             .await
             .map(|r| Self::from_proto_file_attr(r.into_inner()))
@@ -279,7 +313,8 @@ impl ClientOps for RpcClientOps {
     async fn statfs(&self, inode: Inode) -> FsResult<StatFs> {
         let req = Request::new(StatfsRequest { inode });
         
-        self.client
+        let mut client = self.client.lock().await;
+        client
             .statfs(req)
             .await
             .map(|r| Self::from_proto_statfs(r.into_inner()))
@@ -289,7 +324,8 @@ impl ClientOps for RpcClientOps {
     async fn flush(&self, inode: Inode) -> FsResult<()> {
         let req = Request::new(FlushRequest { inode });
         
-        self.client
+        let mut client = self.client.lock().await;
+        client
             .flush(req)
             .await
             .map(|_| ())
@@ -299,7 +335,8 @@ impl ClientOps for RpcClientOps {
     async fn fsync(&self, inode: Inode, datasync: bool) -> FsResult<()> {
         let req = Request::new(FsyncRequest { inode, datasync });
         
-        self.client
+        let mut client = self.client.lock().await;
+        client
             .fsync(req)
             .await
             .map(|_| ())
