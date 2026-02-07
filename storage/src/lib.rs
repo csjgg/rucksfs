@@ -1,6 +1,10 @@
 use async_trait::async_trait;
 use rucksfs_core::{DirEntry, FileAttr, FsResult, Inode};
 
+pub mod dummy;
+
+pub use dummy::{DummyDataStore, DummyDirectoryIndex, DummyMetadataStore};
+
 pub trait MetadataStore: Send + Sync {
     fn get(&self, key: &[u8]) -> FsResult<Option<Vec<u8>>>;
     fn put(&self, key: &[u8], value: &[u8]) -> FsResult<()>;
