@@ -1,12 +1,14 @@
 use async_trait::async_trait;
 use rucksfs_core::{ClientOps, DirEntry, FileAttr, FsError, FsResult, Inode, StatFs};
-use rucksfs_server::MetadataServer;
 use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
-use fuser::{FileAttr as FuseAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, ReplyOpen, ReplyWrite, Request};
+use fuser::{
+    FileAttr as FuseAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory,
+    ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request,
+};
 #[cfg(target_os = "linux")]
-use libc::ENOENT;
+use libc::{EACCES, EINVAL, EIO, ENOENT, EOPNOTSUPP};
 #[cfg(target_os = "linux")]
 use std::ffi::OsStr;
 #[cfg(target_os = "linux")]
@@ -136,7 +138,7 @@ where
         let result = futures::executor::block_on(async move { client.lookup(parent, &name).await });
         match result {
             Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
-            Err(_) => reply.error(ENOENT),
+            Err(e) => reply.error(fs_error_to_errno(e)),
         }
     }
 
@@ -145,7 +147,7 @@ where
         let result = futures::executor::block_on(async move { client.getattr(ino).await });
         match result {
             Ok(attr) => reply.attr(&Duration::from_secs(1), &to_fuse_attr(attr)),
-            Err(_) => reply.error(ENOENT),
+            Err(e) => reply.error(fs_error_to_errno(e)),
         }
     }
 
@@ -162,11 +164,12 @@ where
         match result {
             Ok(entries) => {
                 for (i, entry) in entries.into_iter().enumerate() {
-                    let _ = reply.add(entry.inode, (i + 1) as i64, FileType::Directory, entry.name);
+                    let kind = dir_entry_kind_to_file_type(entry.kind);
+                    let _ = reply.add(entry.inode, (i + 1) as i64, kind, entry.name);
                 }
                 reply.ok();
             }
-            Err(_) => reply.error(ENOENT),
+            Err(e) => reply.error(fs_error_to_errno(e)),
         }
     }
 
@@ -175,7 +178,7 @@ where
         let result = futures::executor::block_on(async move { client.open(ino, flags as u32).await });
         match result {
             Ok(handle) => reply.opened(handle, 0),
-            Err(_) => reply.error(ENOENT),
+            Err(e) => reply.error(fs_error_to_errno(e)),
         }
     }
 
@@ -186,7 +189,7 @@ where
         });
         match result {
             Ok(data) => reply.data(&data),
-            Err(_) => reply.error(ENOENT),
+            Err(e) => reply.error(fs_error_to_errno(e)),
         }
     }
 
@@ -209,13 +212,103 @@ where
         });
         match result {
             Ok(written) => reply.written(written),
-            Err(_) => reply.error(ENOENT),
+            Err(e) => reply.error(fs_error_to_errno(e)),
+        }
+    }
+
+    fn create(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
+        let name = name.to_string_lossy().to_string();
+        let client = self.client.clone();
+        let result = futures::executor::block_on(async move {
+            client.create(parent, &name, libc::S_IFREG as u32 | 0o644).await
+        });
+        match result {
+            Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
+            Err(e) => reply.error(fs_error_to_errno(e)),
+        }
+    }
+
+    fn mkdir(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
+        let name = name.to_string_lossy().to_string();
+        let client = self.client.clone();
+        let result = futures::executor::block_on(async move {
+            client.mkdir(parent, &name, libc::S_IFDIR as u32 | 0o755).await
+        });
+        match result {
+            Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
+            Err(e) => reply.error(fs_error_to_errno(e)),
+        }
+    }
+
+    fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let name = name.to_string_lossy().to_string();
+        let client = self.client.clone();
+        let result = futures::executor::block_on(async move { client.unlink(parent, &name).await });
+        match result {
+            Ok(()) => reply.ok(),
+            Err(e) => reply.error(fs_error_to_errno(e)),
+        }
+    }
+
+    fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let name = name.to_string_lossy().to_string();
+        let client = self.client.clone();
+        let result = futures::executor::block_on(async move { client.rmdir(parent, &name).await });
+        match result {
+            Ok(()) => reply.ok(),
+            Err(e) => reply.error(fs_error_to_errno(e)),
+        }
+    }
+
+    fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
+        let client = self.client.clone();
+        let result = futures::executor::block_on(async move { client.statfs(1).await });
+        match result {
+            Ok(st) => reply.statfs(
+                st.blocks,
+                st.bfree,
+                st.bavail,
+                st.files,
+                st.ffree,
+                st.bsize,
+                st.namelen,
+                st.bsize,
+            ),
+            Err(e) => reply.error(fs_error_to_errno(e)),
         }
     }
 }
 
 #[cfg(target_os = "linux")]
+fn dir_entry_kind_to_file_type(kind: u32) -> FileType {
+    use libc::{S_IFDIR, S_IFREG};
+    let mt = kind & libc::S_IFMT;
+    if mt == S_IFDIR {
+        FileType::Directory
+    } else {
+        FileType::RegularFile
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn to_fuse_attr(attr: FileAttr) -> FuseAttr {
+    let kind = dir_entry_kind_to_file_type(attr.mode & libc::S_IFMT);
     FuseAttr {
         ino: attr.inode,
         size: attr.size,
@@ -224,7 +317,7 @@ fn to_fuse_attr(attr: FileAttr) -> FuseAttr {
         mtime: SystemTime::UNIX_EPOCH + Duration::from_secs(attr.mtime),
         ctime: SystemTime::UNIX_EPOCH + Duration::from_secs(attr.ctime),
         crtime: SystemTime::UNIX_EPOCH,
-        kind: FileType::RegularFile,
+        kind,
         perm: (attr.mode & 0o7777) as u16,
         nlink: 1,
         uid: attr.uid,
@@ -247,11 +340,20 @@ pub fn mount_fuse<C: Client + 'static>(_mountpoint: &str, _client: Arc<C>) -> Fs
     Err(FsError::NotImplemented)
 }
 
-pub fn build_inprocess_client<M, D, I>(server: MetadataServer<M, D, I>) -> InProcessClient<MetadataServer<M, D, I>>
-where
-    M: rucksfs_storage::MetadataStore,
-    D: rucksfs_storage::DataStore,
-    I: rucksfs_storage::DirectoryIndex,
-{
-    InProcessClient::new(Arc::new(server))
+/// Build a Client from any ClientOps (in-process or RPC). Demo can use this with Arc::new(metadata_server).
+pub fn build_client<S: ClientOps>(ops: Arc<S>) -> InProcessClient<S> {
+    InProcessClient::new(ops)
+}
+
+#[cfg(target_os = "linux")]
+pub fn fs_error_to_errno(e: FsError) -> i32 {
+    use FsError::*;
+    match e {
+        NotImplemented => EOPNOTSUPP,
+        NotFound => ENOENT,
+        PermissionDenied => EACCES,
+        InvalidInput(_) => EINVAL,
+        Io(_) => EIO,
+        Other(_) => EIO,
+    }
 }

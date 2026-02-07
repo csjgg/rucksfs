@@ -8,9 +8,9 @@ authors = { workspace = true }
 
 [dependencies]
 rucksfs-core = { path = "../core" }
-rucksfs-server = { path = "../server" }
-rucksfs-storage = { path = "../storage" }
+rucksfs-rpc = { path = "../rpc" }
 async-trait = "0.1"
+tokio = { version = "1", features = ["rt"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = "0.15"
