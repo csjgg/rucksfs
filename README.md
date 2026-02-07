@@ -6,7 +6,7 @@ RucksFS：元数据管理（FUSE + RocksDB）工程骨架。整体分为 **Clien
 
 ## 架构概览
 
-```
+```ini
                     ┌─────────────────────────────────────────┐
                     │            用户空间 / 应用                │
                     │         (ls, cat, vim, ...)             │
@@ -18,7 +18,7 @@ RucksFS：元数据管理（FUSE + RocksDB）工程骨架。整体分为 **Clien
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
 │  │  FUSE 接口 (fuser)  ←→  Client 抽象 (Client / ClientOps)             │   │
 │  │  • 进程内: InProcessClient → 直接调用 Server（Demo 用）               │   │
-│  │  • 远程:   RpcClient → 通过 RPC 请求 Server（预留）                    │   │
+│  │  • 远程:   RpcClientOps → 通过 RPC 请求 Server（TCP + bincode）        │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────────┘
                                           │
@@ -94,12 +94,12 @@ flowchart TB
 
 | 目录 / crate | 职责 |
 |-------------|------|
-| **core** | 公共类型（`FileAttr`, `DirEntry`, `StatFs`, `FsError`）、POSIX 接口定义（`PosixOps` 同步 / `ClientOps` 异步） |
-| **storage** | 存储抽象：`MetadataStore`（KV）、`DataStore`（文件块）、`DirectoryIndex`（目录解析），无具体后端绑定 |
-| **server** | 元数据服务核心：`MetadataServer` 实现 `PosixOps`/`ClientOps`，组合上述三个 Storage trait |
-| **client** | FUSE 客户端：`Client` trait、`InProcessClient`（进程内）、`FuseClient`（fuser 实现）、`mount_fuse` |
-| **rpc** | RPC 预留：`RpcClient` / `RpcServer` trait，后续可接网络拆分 Client/Server |
-| **demo** | 单二进制 Demo：Client + Server 编译在一起，可挂载到本地目录，用于演示（具体挂载逻辑可后续实现） |
+| __core__ | 公共类型（`FileAttr`, `DirEntry`, `StatFs`, `FsError`）、POSIX 接口定义（`PosixOps` 同步 / `ClientOps` 异步） |
+| __storage__ | 存储抽象：`MetadataStore`（KV）、`DataStore`（文件块）、`DirectoryIndex`（目录解析），无具体后端绑定 |
+| __server__ | 元数据服务核心：`MetadataServer` 实现 `PosixOps`/`ClientOps`，组合上述三个 Storage trait |
+| __client__ | FUSE 客户端：`Client` trait、`InProcessClient`（进程内）、`FuseClient`（fuser 实现）、`build_client`、`mount_fuse`；可单独编译为 `rucksfs-client` 二进制（RPC 连接 + 挂载） |
+| __rpc__ | RPC：`RpcClientOps`（实现 `ClientOps`）、`serve(addr, backend)`（Tokio 异步 TCP），请求/响应 bincode 序列化 |
+| __demo__ | 单二进制 Demo：Client + Server 编译在一起，可挂载到本地目录，用于演示（具体挂载逻辑可后续实现） |
 
 ---
 
@@ -116,10 +116,22 @@ flowchart TB
 ```bash
 # 检查与构建
 cargo check
-cargo build -p rucksfs-demo
+cargo build -p rucksfs-client   # 单独 Client 二进制
+cargo build -p rucksfs-server   # 单独 Server 二进制
+cargo build -p rucksfs-demo    # 合编 Demo 二进制
 ```
 
-**Demo 挂载**（需要系统权限，且当前为占位逻辑）：
+**RPC 模式**（Client 与 Server 分进程，通过 TCP RPC 通信）：
+
+```bash
+# 终端 1：启动 Server
+cargo run -p rucksfs-server -- --bind 127.0.0.1:9000
+
+# 终端 2：连接并挂载 Client（需系统权限）
+cargo run -p rucksfs-client -- --server 127.0.0.1:9000 --mount /tmp/rucksfs
+```
+
+**Demo 合编**（单进程，进程内调用，无 RPC；需要系统权限，当前为占位逻辑）：
 
 ```bash
 cargo run -p rucksfs-demo -- --mount
