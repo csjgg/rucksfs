@@ -9,3 +9,6 @@ authors = { workspace = true }
 [dependencies]
 rucksfs-core = { path = "../core" }
 async-trait = "0.1"
+tokio = { version = "1", features = ["net", "io-util", "rt", "sync"] }
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
