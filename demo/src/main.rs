@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use rucksfs_client::{build_inprocess_client, mount_fuse};
+use rucksfs_client::{build_client, mount_fuse};
 use rucksfs_core::{DirEntry, FileAttr, FsError, FsResult, Inode};
 use rucksfs_server::MetadataServer;
 use rucksfs_storage::{DataStore, DirectoryIndex, MetadataStore};
@@ -71,7 +71,7 @@ fn main() {
     let index = Arc::new(DummyDirectoryIndex);
     let data = Arc::new(DummyDataStore);
     let server = MetadataServer::new(metadata, data, index);
-    let client = build_inprocess_client(server);
+    let client = build_client(Arc::new(server));
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--mount") {
         let _ = mount_fuse("/tmp/rucksfs", Arc::new(client));
