@@ -1,0 +1,18 @@
+[package]
+name = "rucksfs-client"
+version = "0.1.0"
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+authors = { workspace = true }
+
+[dependencies]
+rucksfs-core = { path = "../core" }
+rucksfs-server = { path = "../server" }
+rucksfs-storage = { path = "../storage" }
+async-trait = "0.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser = "0.15"
+libc = "0.2"
+futures = "0.3"
