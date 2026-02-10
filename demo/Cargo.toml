@@ -6,9 +6,16 @@ license = { workspace = true }
 repository = { workspace = true }
 authors = { workspace = true }
 
+[features]
+rocksdb = ["rucksfs-storage/rocksdb"]
+
 [dependencies]
 rucksfs-core = { path = "../core" }
 rucksfs-storage = { path = "../storage" }
 rucksfs-server = { path = "../server" }
 rucksfs-client = { path = "../client" }
 async-trait = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std"] }
+clap = { version = "4", features = ["derive"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
