@@ -10,7 +10,7 @@ authors = { workspace = true }
 rucksfs-core = { path = "../core" }
 rucksfs-storage = { path = "../storage" }
 rucksfs-rpc = { path = "../rpc" }
-async-trait = "0.1"
-tokio = { version = "1", features = ["rt", "net", "macros"] }
-tracing = "0.1"
-tracing-subscriber = "0.3"
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["rt", "net", "macros"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

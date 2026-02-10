@@ -11,4 +11,4 @@ rucksfs-core = { path = "../core" }
 rucksfs-storage = { path = "../storage" }
 rucksfs-server = { path = "../server" }
 rucksfs-client = { path = "../client" }
-async-trait = "0.1"
+async-trait = { workspace = true }
