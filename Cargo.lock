@@ -1220,6 +1220,7 @@ dependencies = [
  "rucksfs-core",
  "rucksfs-server",
  "rucksfs-storage",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
