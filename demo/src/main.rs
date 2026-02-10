@@ -216,13 +216,364 @@ fn print_step(n: u32, desc: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Interactive mode (placeholder — implemented in task 6)
+// Interactive REPL mode
 // ---------------------------------------------------------------------------
 
+/// Build a client from CLI options and run the interactive REPL.
 async fn run_interactive_mode(cli: &Cli) {
-    println!("Interactive REPL mode — not yet implemented.");
-    println!("Falling back to auto-demo...");
-    run_auto_demo_mode(cli).await;
+    println!("╔══════════════════════════════════════════════════════╗");
+    println!("║         RucksFS — Interactive REPL                  ║");
+    println!("╚══════════════════════════════════════════════════════╝");
+    println!();
+
+    if let Some(ref dir) = cli.persist {
+        #[cfg(feature = "rocksdb")]
+        {
+            println!("▶ Using persistent storage at: {}", dir);
+            let db_path = std::path::Path::new(dir).join("metadata.db");
+            let data_path = std::path::Path::new(dir).join("data.raw");
+            std::fs::create_dir_all(dir).expect("failed to create persist directory");
+
+            let db = open_rocks_db(&db_path).expect("failed to open RocksDB");
+            let metadata = Arc::new(RocksMetadataStore::new(Arc::clone(&db)));
+            let index = Arc::new(RocksDirectoryIndex::new(Arc::clone(&db)));
+            let data = Arc::new(
+                RawDiskDataStore::open(&data_path, 64 * 1024 * 1024)
+                    .expect("failed to open RawDisk data store"),
+            );
+            let server = Arc::new(MetadataServer::new(metadata, data, index));
+            let client = build_client(server);
+            run_repl(&client).await;
+        }
+        #[cfg(not(feature = "rocksdb"))]
+        {
+            let _ = dir;
+            eprintln!("Error: --persist requires the `rocksdb` feature.");
+            std::process::exit(1);
+        }
+    } else {
+        println!("▶ Using in-memory storage (data will not survive restart)");
+        let metadata = Arc::new(MemoryMetadataStore::new());
+        let index = Arc::new(MemoryDirectoryIndex::new());
+        let data = Arc::new(MemoryDataStore::new());
+        let server = Arc::new(MetadataServer::new(metadata, data, index));
+        let client = build_client(server);
+        run_repl(&client).await;
+    }
+}
+
+/// Root inode constant.
+const ROOT_INODE: u64 = 1;
+
+/// Resolve a POSIX-style path (e.g. "/foo/bar") to its inode by walking
+/// the directory tree from root.  Returns `(parent_inode, last_component, target_inode)`.
+async fn resolve_path(
+    client: &impl ClientOps,
+    path: &str,
+) -> Result<(u64, String, u64), String> {
+    let path = path.trim();
+    if path == "/" {
+        return Ok((ROOT_INODE, "/".to_string(), ROOT_INODE));
+    }
+
+    let path = path.strip_prefix('/').unwrap_or(path);
+    let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if components.is_empty() {
+        return Ok((ROOT_INODE, "/".to_string(), ROOT_INODE));
+    }
+
+    let mut current = ROOT_INODE;
+    for (i, comp) in components.iter().enumerate() {
+        if i == components.len() - 1 {
+            // Last component — try to resolve but return parent info regardless
+            match client.lookup(current, comp).await {
+                Ok(attr) => return Ok((current, comp.to_string(), attr.inode)),
+                Err(_) => return Err(format!("'{}' not found in path '/{}'", comp,
+                    components[..=i].join("/"))),
+            }
+        } else {
+            match client.lookup(current, comp).await {
+                Ok(attr) => current = attr.inode,
+                Err(_) => return Err(format!("directory '{}' not found in path '/{}'", comp,
+                    components[..=i].join("/"))),
+            }
+        }
+    }
+
+    unreachable!()
+}
+
+/// Resolve a path to (parent_inode, child_name) — useful for operations
+/// that need the parent context (create, mkdir, unlink, etc.).
+async fn resolve_parent(
+    client: &impl ClientOps,
+    path: &str,
+) -> Result<(u64, String), String> {
+    let path = path.trim();
+    let path = path.strip_prefix('/').unwrap_or(path);
+    let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+    if components.is_empty() {
+        return Err("cannot resolve parent of root".to_string());
+    }
+
+    let name = components.last().unwrap().to_string();
+
+    if components.len() == 1 {
+        return Ok((ROOT_INODE, name));
+    }
+
+    let mut current = ROOT_INODE;
+    for comp in &components[..components.len() - 1] {
+        match client.lookup(current, comp).await {
+            Ok(attr) => current = attr.inode,
+            Err(_) => return Err(format!("directory '{}' not found", comp)),
+        }
+    }
+
+    Ok((current, name))
+}
+
+/// The interactive REPL loop.
+async fn run_repl(client: &impl ClientOps) {
+    use std::io::{self, BufRead, Write};
+
+    println!("Type 'help' for available commands, 'exit' to quit.\n");
+
+    let stdin = io::stdin();
+    let mut reader = stdin.lock();
+
+    loop {
+        print!("rucksfs> ");
+        io::stdout().flush().ok();
+
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break, // EOF
+            Err(e) => {
+                eprintln!("read error: {}", e);
+                break;
+            }
+            _ => {}
+        }
+
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let parts: Vec<&str> = line.splitn(3, ' ').collect();
+        let cmd = parts[0];
+
+        match cmd {
+            "help" => print_help(),
+
+            "exit" | "quit" => {
+                println!("Goodbye!");
+                break;
+            }
+
+            "ls" => {
+                let path = parts.get(1).copied().unwrap_or("/");
+                match resolve_path(client, path).await {
+                    Ok((_, _, inode)) => match client.readdir(inode).await {
+                        Ok(entries) => {
+                            if entries.is_empty() {
+                                println!("  (empty directory)");
+                            }
+                            for e in &entries {
+                                let kind = if e.kind & 0o040000 != 0 { "d" } else { "-" };
+                                println!("  {} {} (inode={})", kind, e.name, e.inode);
+                            }
+                        }
+                        Err(e) => eprintln!("  error: {}", e),
+                    },
+                    Err(e) => eprintln!("  error: {}", e),
+                }
+            }
+
+            "mkdir" => {
+                let path = match parts.get(1) {
+                    Some(p) => *p,
+                    None => { eprintln!("  usage: mkdir <path>"); continue; }
+                };
+                match resolve_parent(client, path).await {
+                    Ok((parent, name)) => match client.mkdir(parent, &name, 0o755).await {
+                        Ok(attr) => println!("  created directory inode={}", attr.inode),
+                        Err(e) => eprintln!("  error: {}", e),
+                    },
+                    Err(e) => eprintln!("  error: {}", e),
+                }
+            }
+
+            "touch" => {
+                let path = match parts.get(1) {
+                    Some(p) => *p,
+                    None => { eprintln!("  usage: touch <path>"); continue; }
+                };
+                match resolve_parent(client, path).await {
+                    Ok((parent, name)) => match client.create(parent, &name, 0o644).await {
+                        Ok(attr) => println!("  created file inode={}", attr.inode),
+                        Err(e) => eprintln!("  error: {}", e),
+                    },
+                    Err(e) => eprintln!("  error: {}", e),
+                }
+            }
+
+            "write" => {
+                let path = match parts.get(1) {
+                    Some(p) => *p,
+                    None => { eprintln!("  usage: write <path> <content>"); continue; }
+                };
+                let content = match parts.get(2) {
+                    Some(c) => *c,
+                    None => { eprintln!("  usage: write <path> <content>"); continue; }
+                };
+                match resolve_path(client, path).await {
+                    Ok((_, _, inode)) => {
+                        let data = content.as_bytes();
+                        match client.write(inode, 0, data, 0).await {
+                            Ok(n) => println!("  wrote {} bytes", n),
+                            Err(e) => eprintln!("  error: {}", e),
+                        }
+                    }
+                    Err(e) => eprintln!("  error: {}", e),
+                }
+            }
+
+            "cat" => {
+                let path = match parts.get(1) {
+                    Some(p) => *p,
+                    None => { eprintln!("  usage: cat <path>"); continue; }
+                };
+                match resolve_path(client, path).await {
+                    Ok((_, _, inode)) => match client.read(inode, 0, 1024 * 1024).await {
+                        Ok(data) => {
+                            let text = String::from_utf8_lossy(&data);
+                            let trimmed = text.trim_end_matches('\0');
+                            if trimmed.is_empty() {
+                                println!("  (empty file)");
+                            } else {
+                                println!("{}", trimmed);
+                            }
+                        }
+                        Err(e) => eprintln!("  error: {}", e),
+                    },
+                    Err(e) => eprintln!("  error: {}", e),
+                }
+            }
+
+            "rm" => {
+                let path = match parts.get(1) {
+                    Some(p) => *p,
+                    None => { eprintln!("  usage: rm <path>"); continue; }
+                };
+                match resolve_parent(client, path).await {
+                    Ok((parent, name)) => match client.unlink(parent, &name).await {
+                        Ok(()) => println!("  removed"),
+                        Err(e) => eprintln!("  error: {}", e),
+                    },
+                    Err(e) => eprintln!("  error: {}", e),
+                }
+            }
+
+            "rmdir" => {
+                let path = match parts.get(1) {
+                    Some(p) => *p,
+                    None => { eprintln!("  usage: rmdir <path>"); continue; }
+                };
+                match resolve_parent(client, path).await {
+                    Ok((parent, name)) => match client.rmdir(parent, &name).await {
+                        Ok(()) => println!("  removed directory"),
+                        Err(e) => eprintln!("  error: {}", e),
+                    },
+                    Err(e) => eprintln!("  error: {}", e),
+                }
+            }
+
+            "mv" => {
+                let src = match parts.get(1) {
+                    Some(p) => *p,
+                    None => { eprintln!("  usage: mv <src> <dst>"); continue; }
+                };
+                let dst = match parts.get(2) {
+                    Some(p) => *p,
+                    None => { eprintln!("  usage: mv <src> <dst>"); continue; }
+                };
+                let src_parent = match resolve_parent(client, src).await {
+                    Ok(v) => v,
+                    Err(e) => { eprintln!("  error resolving src: {}", e); continue; }
+                };
+                let dst_parent = match resolve_parent(client, dst).await {
+                    Ok(v) => v,
+                    Err(e) => { eprintln!("  error resolving dst: {}", e); continue; }
+                };
+                match client.rename(src_parent.0, &src_parent.1, dst_parent.0, &dst_parent.1).await {
+                    Ok(()) => println!("  renamed"),
+                    Err(e) => eprintln!("  error: {}", e),
+                }
+            }
+
+            "stat" => {
+                let path = match parts.get(1) {
+                    Some(p) => *p,
+                    None => { eprintln!("  usage: stat <path>"); continue; }
+                };
+                match resolve_path(client, path).await {
+                    Ok((_, _, inode)) => match client.getattr(inode).await {
+                        Ok(attr) => {
+                            let kind = if attr.mode & 0o040000 != 0 { "directory" } else { "file" };
+                            println!("  inode:  {}", attr.inode);
+                            println!("  type:   {}", kind);
+                            println!("  size:   {} bytes", attr.size);
+                            println!("  mode:   {:#o}", attr.mode);
+                            println!("  nlink:  {}", attr.nlink);
+                            println!("  uid:    {}", attr.uid);
+                            println!("  gid:    {}", attr.gid);
+                        }
+                        Err(e) => eprintln!("  error: {}", e),
+                    },
+                    Err(e) => eprintln!("  error: {}", e),
+                }
+            }
+
+            "statfs" => {
+                match client.statfs(ROOT_INODE).await {
+                    Ok(st) => {
+                        println!("  blocks:  {}", st.blocks);
+                        println!("  bfree:   {}", st.bfree);
+                        println!("  bavail:  {}", st.bavail);
+                        println!("  files:   {}", st.files);
+                        println!("  ffree:   {}", st.ffree);
+                        println!("  bsize:   {}", st.bsize);
+                        println!("  namelen: {}", st.namelen);
+                    }
+                    Err(e) => eprintln!("  error: {}", e),
+                }
+            }
+
+            _ => {
+                eprintln!("  unknown command: '{}'. Type 'help' for usage.", cmd);
+            }
+        }
+    }
+}
+
+/// Print the help text listing all REPL commands.
+fn print_help() {
+    println!("Available commands:");
+    println!("  ls [path]              List directory contents (default: /)");
+    println!("  mkdir <path>           Create a directory");
+    println!("  touch <path>           Create an empty file");
+    println!("  write <path> <text>    Write text content to a file");
+    println!("  cat <path>             Read and display file content");
+    println!("  rm <path>              Remove a file");
+    println!("  rmdir <path>           Remove an empty directory");
+    println!("  mv <src> <dst>         Rename / move a file or directory");
+    println!("  stat <path>            Show file or directory attributes");
+    println!("  statfs                 Show filesystem statistics");
+    println!("  help                   Show this help message");
+    println!("  exit                   Exit the REPL");
 }
 
 // ---------------------------------------------------------------------------
