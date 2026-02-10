@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use rucksfs_core::{DirEntry, FileAttr, FsResult, Inode};
 
 pub mod dummy;
+pub mod encoding;
 
 pub use dummy::{DummyDataStore, DummyDirectoryIndex, DummyMetadataStore};
 
