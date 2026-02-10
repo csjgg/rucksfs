@@ -4,7 +4,7 @@ use fuser::{
     ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request,
 };
 #[cfg(target_os = "linux")]
-use libc::{EACCES, EINVAL, EIO, ENOENT, EOPNOTSUPP};
+use libc::{EACCES, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, EEXIST, EOPNOTSUPP};
 #[cfg(target_os = "linux")]
 use rucksfs_core::{FileAttr, FsError, FsResult};
 #[cfg(target_os = "linux")]
@@ -285,6 +285,10 @@ pub fn fs_error_to_errno(e: FsError) -> i32 {
     match e {
         NotImplemented => EOPNOTSUPP,
         NotFound => ENOENT,
+        AlreadyExists => EEXIST,
+        NotADirectory => ENOTDIR,
+        IsADirectory => EISDIR,
+        DirectoryNotEmpty => ENOTEMPTY,
         PermissionDenied => EACCES,
         InvalidInput(_) => EINVAL,
         Io(_) => EIO,

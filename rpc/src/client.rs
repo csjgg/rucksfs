@@ -74,6 +74,8 @@ impl RpcClientOps {
             tonic::Code::InvalidArgument => FsError::InvalidInput(err.message().to_string()),
             tonic::Code::Unauthenticated => FsError::PermissionDenied,
             tonic::Code::Unimplemented => FsError::NotImplemented,
+            tonic::Code::AlreadyExists => FsError::AlreadyExists,
+            tonic::Code::FailedPrecondition => FsError::DirectoryNotEmpty,
             _ => FsError::Io(err.message().to_string()),
         }
     }
@@ -84,6 +86,7 @@ impl RpcClientOps {
             inode: attr.inode,
             size: attr.size,
             mode: attr.mode,
+            nlink: 0, // proto does not carry nlink yet
             uid: attr.uid,
             gid: attr.gid,
             atime: attr.atime,
@@ -103,6 +106,7 @@ impl RpcClientOps {
             atime: attr.atime,
             mtime: attr.mtime,
             ctime: attr.ctime,
+            // nlink not in proto yet
         }
     }
 

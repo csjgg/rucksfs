@@ -24,6 +24,10 @@ impl FileSystemService {
             FsError::InvalidInput(msg) => Status::invalid_argument(msg),
             FsError::Io(msg) => Status::internal(msg),
             FsError::NotImplemented => Status::unimplemented(err.to_string()),
+            FsError::AlreadyExists => Status::already_exists(err.to_string()),
+            FsError::NotADirectory => Status::invalid_argument(err.to_string()),
+            FsError::IsADirectory => Status::invalid_argument(err.to_string()),
+            FsError::DirectoryNotEmpty => Status::failed_precondition(err.to_string()),
             FsError::Other(msg) => Status::internal(msg),
         }
     }
@@ -39,6 +43,7 @@ impl FileSystemService {
             atime: attr.atime,
             mtime: attr.mtime,
             ctime: attr.ctime,
+            // nlink is not in protobuf schema yet; will be added later
         }
     }
 
@@ -48,6 +53,7 @@ impl FileSystemService {
             inode: attr.inode,
             size: attr.size,
             mode: attr.mode,
+            nlink: 0, // proto does not carry nlink yet
             uid: attr.uid,
             gid: attr.gid,
             atime: attr.atime,

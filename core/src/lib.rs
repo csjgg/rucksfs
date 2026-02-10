@@ -10,6 +10,7 @@ pub struct FileAttr {
     pub inode: Inode,
     pub size: u64,
     pub mode: u32,
+    pub nlink: u32,
     pub uid: u32,
     pub gid: u32,
     pub atime: u64,
@@ -41,6 +42,14 @@ pub enum FsError {
     NotImplemented,
     #[error("not found")]
     NotFound,
+    #[error("already exists")]
+    AlreadyExists,
+    #[error("not a directory")]
+    NotADirectory,
+    #[error("is a directory")]
+    IsADirectory,
+    #[error("directory not empty")]
+    DirectoryNotEmpty,
     #[error("io error: {0}")]
     Io(String),
     #[error("invalid input: {0}")]
