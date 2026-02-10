@@ -1,10 +1,12 @@
 use async_trait::async_trait;
 use rucksfs_core::{DirEntry, FileAttr, FsResult, Inode};
 
+pub mod allocator;
 pub mod dummy;
 pub mod encoding;
 pub mod memory;
 
+pub use allocator::InodeAllocator;
 pub use dummy::{DummyDataStore, DummyDirectoryIndex, DummyMetadataStore};
 pub use memory::{MemoryDataStore, MemoryDirectoryIndex, MemoryMetadataStore};
 
