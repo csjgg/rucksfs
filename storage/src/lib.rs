@@ -5,10 +5,12 @@ pub mod allocator;
 pub mod dummy;
 pub mod encoding;
 pub mod memory;
+pub mod rawdisk;
 
 pub use allocator::InodeAllocator;
 pub use dummy::{DummyDataStore, DummyDirectoryIndex, DummyMetadataStore};
 pub use memory::{MemoryDataStore, MemoryDirectoryIndex, MemoryMetadataStore};
+pub use rawdisk::RawDiskDataStore;
 
 pub trait MetadataStore: Send + Sync {
     fn get(&self, key: &[u8]) -> FsResult<Option<Vec<u8>>>;
