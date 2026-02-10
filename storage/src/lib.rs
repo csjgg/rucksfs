@@ -3,8 +3,10 @@ use rucksfs_core::{DirEntry, FileAttr, FsResult, Inode};
 
 pub mod dummy;
 pub mod encoding;
+pub mod memory;
 
 pub use dummy::{DummyDataStore, DummyDirectoryIndex, DummyMetadataStore};
+pub use memory::{MemoryDataStore, MemoryDirectoryIndex, MemoryMetadataStore};
 
 pub trait MetadataStore: Send + Sync {
     fn get(&self, key: &[u8]) -> FsResult<Option<Vec<u8>>>;
