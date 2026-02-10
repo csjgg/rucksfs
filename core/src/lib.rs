@@ -5,7 +5,7 @@ use thiserror::Error;
 pub type FileId = u64;
 pub type Inode = u64;
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileAttr {
     pub inode: Inode,
     pub size: u64,
