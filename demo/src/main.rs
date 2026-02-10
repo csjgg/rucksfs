@@ -577,18 +577,76 @@ fn print_help() {
 }
 
 // ---------------------------------------------------------------------------
-// FUSE mount mode (placeholder — implemented in task 7)
+// FUSE mount mode
 // ---------------------------------------------------------------------------
 
 async fn run_mount_mode(cli: &Cli) {
+    let mountpoint = cli.mount.as_deref().unwrap_or("/tmp/rucksfs");
+
     #[cfg(target_os = "linux")]
     {
-        println!("FUSE mount mode — not yet implemented.");
-        println!("Falling back to auto-demo...");
-        run_auto_demo_mode(cli).await;
+        println!("╔══════════════════════════════════════════════════════╗");
+        println!("║         RucksFS — FUSE Mount Mode                   ║");
+        println!("╚══════════════════════════════════════════════════════╝");
+        println!();
+        println!("▶ Mounting at: {}", mountpoint);
+
+        // Ensure the mountpoint directory exists
+        if let Err(e) = std::fs::create_dir_all(mountpoint) {
+            eprintln!("Error: failed to create mountpoint '{}': {}", mountpoint, e);
+            std::process::exit(1);
+        }
+
+        if let Some(ref dir) = cli.persist {
+            #[cfg(feature = "rocksdb")]
+            {
+                println!("▶ Using persistent storage at: {}", dir);
+                std::fs::create_dir_all(dir).expect("failed to create persist directory");
+
+                let db_path = std::path::Path::new(dir).join("metadata.db");
+                let data_path = std::path::Path::new(dir).join("data.raw");
+
+                let db = open_rocks_db(&db_path).expect("failed to open RocksDB");
+                let metadata = Arc::new(RocksMetadataStore::new(Arc::clone(&db)));
+                let index = Arc::new(RocksDirectoryIndex::new(Arc::clone(&db)));
+                let data = Arc::new(
+                    RawDiskDataStore::open(&data_path, 64 * 1024 * 1024)
+                        .expect("failed to open RawDisk data store"),
+                );
+                let server = Arc::new(MetadataServer::new(metadata, data, index));
+                let client = Arc::new(build_client(server));
+
+                println!("▶ Press Ctrl+C or run `fusermount -u {}` to unmount.", mountpoint);
+                if let Err(e) = rucksfs_client::mount_fuse(mountpoint, client) {
+                    eprintln!("FUSE mount error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            #[cfg(not(feature = "rocksdb"))]
+            {
+                let _ = dir;
+                eprintln!("Error: --persist requires the `rocksdb` feature.");
+                std::process::exit(1);
+            }
+        } else {
+            println!("▶ Using in-memory storage");
+            let metadata = Arc::new(MemoryMetadataStore::new());
+            let index = Arc::new(MemoryDirectoryIndex::new());
+            let data = Arc::new(MemoryDataStore::new());
+            let server = Arc::new(MetadataServer::new(metadata, data, index));
+            let client = Arc::new(build_client(server));
+
+            println!("▶ Press Ctrl+C or run `fusermount -u {}` to unmount.", mountpoint);
+            if let Err(e) = rucksfs_client::mount_fuse(mountpoint, client) {
+                eprintln!("FUSE mount error: {}", e);
+                std::process::exit(1);
+            }
+        }
     }
+
     #[cfg(not(target_os = "linux"))]
     {
+        let _ = mountpoint;
         eprintln!("⚠ FUSE mount is only supported on Linux.");
         eprintln!("  Falling back to auto-demo...");
         println!();
