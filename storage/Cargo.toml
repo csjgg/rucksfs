@@ -9,6 +9,12 @@ authors = { workspace = true }
 [dependencies]
 rucksfs-core = { path = "../core" }
 async-trait = { workspace = true }
+rocksdb = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
+tempfile = { workspace = true }
+
+[features]
+default = []
+rocksdb = ["dep:rocksdb"]

@@ -6,9 +6,15 @@ pub mod encoding;
 pub mod memory;
 pub mod rawdisk;
 
+#[cfg(feature = "rocksdb")]
+pub mod rocks;
+
 pub use allocator::InodeAllocator;
 pub use memory::{MemoryDataStore, MemoryDirectoryIndex, MemoryMetadataStore};
 pub use rawdisk::RawDiskDataStore;
+
+#[cfg(feature = "rocksdb")]
+pub use rocks::{open_rocks_db, RocksDirectoryIndex, RocksMetadataStore};
 
 pub trait MetadataStore: Send + Sync {
     fn get(&self, key: &[u8]) -> FsResult<Option<Vec<u8>>>;
