@@ -1,4 +1,4 @@
-//! RPC server binary: runs MetadataServer (with dummy storage) and serves gRPC.
+//! RPC server binary: runs MetadataServer (with in-memory storage) and serves gRPC.
 //!
 //! Usage:
 //!   rucksfs-server --bind <addr> [options]
@@ -15,7 +15,7 @@
 //!   rucksfs-server --bind 0.0.0.0:50051 --token my-secret-token --tls-cert server.crt --tls-key server.key
 
 use rucksfs_server::MetadataServer;
-use rucksfs_storage::{DummyDataStore, DummyDirectoryIndex, DummyMetadataStore};
+use rucksfs_storage::{MemoryDataStore, MemoryDirectoryIndex, MemoryMetadataStore};
 use rucksfs_rpc::{ServerConfig, TlsConfig};
 use std::sync::Arc;
 
@@ -142,9 +142,9 @@ async fn main() {
     }
 
     // Create backend
-    let metadata = Arc::new(DummyMetadataStore);
-    let index = Arc::new(DummyDirectoryIndex);
-    let data = Arc::new(DummyDataStore);
+    let metadata = Arc::new(MemoryMetadataStore::new());
+    let index = Arc::new(MemoryDirectoryIndex::new());
+    let data = Arc::new(MemoryDataStore::new());
     let server = MetadataServer::new(metadata, data, index);
     let backend: Arc<dyn rucksfs_core::ClientOps> = Arc::new(server);
 
