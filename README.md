@@ -145,6 +145,18 @@ cargo test -p rucksfs-demo --features rocksdb
 
 ---
 
+## TODO
+
+- [ ] Verify correctness, feasibility, and thread-safety of the current architecture
+- [ ] Introduce IndexNode on the server side to reduce RocksDB query frequency
+- [ ] Introduce Delta Record to speed up file attribute modification writes
+- [ ] Introduce client-side caching to reduce round-trips to server
+- [ ] Evaluate replacing FUSE with a kernel module
+  - [ ] Research feasibility and trade-offs of kernel module approach
+  - [ ] Survey common approaches used by current cluster/distributed file systems (CFS)
+
+---
+
 ## License
 
 MIT
