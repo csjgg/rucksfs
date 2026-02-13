@@ -178,6 +178,49 @@ pub fn extract_child_name(key: &[u8]) -> FsResult<&str> {
 }
 
 // ---------------------------------------------------------------------------
+// Delta key encoding helpers
+// ---------------------------------------------------------------------------
+
+/// Prefix byte for delta entry keys.
+const DELTA_KEY_PREFIX: u8 = b'X';
+
+/// Encode a delta entry key: `[b'X'][inode: u64 BE][seq: u64 BE]`.
+///
+/// Total length: 17 bytes.  Keys with the same inode are ordered by `seq`
+/// when compared as byte strings (big-endian guarantees this).
+pub fn encode_delta_key(inode: Inode, seq: u64) -> [u8; 17] {
+    let mut key = [0u8; 17];
+    key[0] = DELTA_KEY_PREFIX;
+    key[1..9].copy_from_slice(&inode.to_be_bytes());
+    key[9..17].copy_from_slice(&seq.to_be_bytes());
+    key
+}
+
+/// Decode a delta entry key back into `(inode, seq)`.
+///
+/// Returns `FsError::InvalidInput` if `key` is shorter than 17 bytes or has
+/// the wrong prefix.
+pub fn decode_delta_key(key: &[u8]) -> FsResult<(Inode, u64)> {
+    if key.len() < 17 || key[0] != DELTA_KEY_PREFIX {
+        return Err(FsError::InvalidInput(
+            "invalid delta key".to_string(),
+        ));
+    }
+    let inode = u64::from_be_bytes(key[1..9].try_into().unwrap());
+    let seq = u64::from_be_bytes(key[9..17].try_into().unwrap());
+    Ok((inode, seq))
+}
+
+/// Build the scan prefix for all delta entries of a given `inode`:
+/// `[b'X'][inode: u64 BE]`.
+pub fn delta_prefix(inode: Inode) -> [u8; 9] {
+    let mut prefix = [0u8; 9];
+    prefix[0] = DELTA_KEY_PREFIX;
+    prefix[1..9].copy_from_slice(&inode.to_be_bytes());
+    prefix
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 #[cfg(test)]
@@ -293,5 +336,53 @@ mod tests {
     fn extract_child_name_bad_key() {
         assert!(extract_child_name(&[]).is_err());
         assert!(extract_child_name(&[b'X'; 9]).is_err());
+    }
+
+    // -- delta key tests ----------------------------------------------------
+
+    #[test]
+    fn delta_key_roundtrip() {
+        let key = encode_delta_key(42, 7);
+        assert_eq!(key.len(), 17);
+        assert_eq!(key[0], b'X');
+        let (inode, seq) = decode_delta_key(&key).unwrap();
+        assert_eq!(inode, 42);
+        assert_eq!(seq, 7);
+    }
+
+    #[test]
+    fn delta_key_same_inode_ordered_by_seq() {
+        let k1 = encode_delta_key(100, 0);
+        let k2 = encode_delta_key(100, 1);
+        let k3 = encode_delta_key(100, 255);
+        let k4 = encode_delta_key(100, u64::MAX);
+        assert!(k1 < k2);
+        assert!(k2 < k3);
+        assert!(k3 < k4);
+    }
+
+    #[test]
+    fn delta_key_different_inodes_ordered_by_inode() {
+        let k1 = encode_delta_key(1, u64::MAX);
+        let k2 = encode_delta_key(2, 0);
+        assert!(k1 < k2);
+    }
+
+    #[test]
+    fn delta_prefix_matches_keys() {
+        let prefix = delta_prefix(42);
+        let k1 = encode_delta_key(42, 0);
+        let k2 = encode_delta_key(42, 100);
+        let k_other = encode_delta_key(43, 0);
+        assert!(k1.starts_with(&prefix));
+        assert!(k2.starts_with(&prefix));
+        assert!(!k_other.starts_with(&prefix));
+    }
+
+    #[test]
+    fn decode_delta_key_bad_input() {
+        assert!(decode_delta_key(&[]).is_err());
+        assert!(decode_delta_key(&[b'X'; 10]).is_err()); // too short
+        assert!(decode_delta_key(&[b'I'; 17]).is_err()); // wrong prefix
     }
 }

@@ -10,11 +10,32 @@ pub mod rawdisk;
 pub mod rocks;
 
 pub use allocator::InodeAllocator;
-pub use memory::{MemoryDataStore, MemoryDirectoryIndex, MemoryMetadataStore};
+pub use memory::{MemoryDataStore, MemoryDeltaStore, MemoryDirectoryIndex, MemoryMetadataStore};
 pub use rawdisk::RawDiskDataStore;
 
 #[cfg(feature = "rocksdb")]
 pub use rocks::{open_rocks_db, RocksDirectoryIndex, RocksMetadataStore};
+
+/// Append-only delta store for incremental inode attribute updates.
+///
+/// Implementations work at the raw-byte level.  The caller (server layer)
+/// is responsible for encoding/decoding [`DeltaOp`] values.
+///
+/// Each delta is identified by `(inode, seq)` where `seq` is a per-inode
+/// monotonically increasing sequence number.
+pub trait DeltaStore: Send + Sync {
+    /// Atomically append one or more serialized delta values to the given
+    /// `inode`.  Returns the sequence numbers assigned to each delta.
+    fn append_deltas(&self, inode: Inode, values: &[Vec<u8>]) -> FsResult<Vec<u64>>;
+
+    /// Scan all pending (un-compacted) deltas for `inode`, returning them
+    /// in sequence-number order as raw bytes.
+    fn scan_deltas(&self, inode: Inode) -> FsResult<Vec<Vec<u8>>>;
+
+    /// Delete all deltas for `inode` (called after compaction merges them
+    /// into the base inode value).
+    fn clear_deltas(&self, inode: Inode) -> FsResult<()>;
+}
 
 pub trait MetadataStore: Send + Sync {
     fn get(&self, key: &[u8]) -> FsResult<Option<Vec<u8>>>;

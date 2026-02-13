@@ -4,12 +4,13 @@
 //! but data is not persisted across process restarts.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 use async_trait::async_trait;
 use rucksfs_core::{DirEntry, FileAttr, FsError, FsResult, Inode};
 
-use crate::{DataStore, DirectoryIndex, MetadataStore};
+use crate::{DataStore, DeltaStore, DirectoryIndex, MetadataStore};
 
 // ===========================================================================
 // MemoryMetadataStore
@@ -165,6 +166,105 @@ impl DirectoryIndex for MemoryDirectoryIndex {
         })?;
         if let Some(children) = guard.get_mut(&parent) {
             children.remove(name);
+        }
+        Ok(())
+    }
+}
+
+// ===========================================================================
+// MemoryDeltaStore
+// ===========================================================================
+
+/// Thread-safe, in-memory implementation of [`DeltaStore`] for testing.
+///
+/// Uses a `BTreeMap<(Inode, u64), Vec<u8>>` to store serialized delta ops,
+/// and per-inode `AtomicU64` counters for monotonically increasing sequence
+/// numbers.
+pub struct MemoryDeltaStore {
+    /// (inode, seq) → serialized DeltaOp bytes.
+    data: RwLock<BTreeMap<(Inode, u64), Vec<u8>>>,
+    /// Per-inode next sequence number counter.
+    seqs: RwLock<HashMap<Inode, AtomicU64>>,
+}
+
+impl MemoryDeltaStore {
+    /// Create an empty delta store.
+    pub fn new() -> Self {
+        Self {
+            data: RwLock::new(BTreeMap::new()),
+            seqs: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Allocate the next sequence number for `inode`.
+    fn next_seq(&self, inode: Inode) -> u64 {
+        // Fast path: counter already exists.
+        {
+            let guard = self.seqs.read().expect("seqs read lock poisoned");
+            if let Some(counter) = guard.get(&inode) {
+                return counter.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        // Slow path: create the counter.
+        let mut guard = self.seqs.write().expect("seqs write lock poisoned");
+        let counter = guard
+            .entry(inode)
+            .or_insert_with(|| AtomicU64::new(0));
+        counter.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+impl Default for MemoryDeltaStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DeltaStore for MemoryDeltaStore {
+    fn append_deltas(&self, inode: Inode, values: &[Vec<u8>]) -> FsResult<Vec<u64>> {
+        let mut data_guard = self.data.write().map_err(|e| {
+            FsError::Io(format!("MemoryDeltaStore write lock poisoned: {}", e))
+        })?;
+        let mut assigned = Vec::with_capacity(values.len());
+        for v in values {
+            let seq = self.next_seq(inode);
+            data_guard.insert((inode, seq), v.clone());
+            assigned.push(seq);
+        }
+        Ok(assigned)
+    }
+
+    fn scan_deltas(&self, inode: Inode) -> FsResult<Vec<Vec<u8>>> {
+        let guard = self.data.read().map_err(|e| {
+            FsError::Io(format!("MemoryDeltaStore read lock poisoned: {}", e))
+        })?;
+        // BTreeMap is sorted by (inode, seq), so we just range-scan.
+        let start = (inode, 0u64);
+        let end = (inode, u64::MAX);
+        let result: Vec<Vec<u8>> = guard
+            .range(start..=end)
+            .map(|(_, v)| v.clone())
+            .collect();
+        Ok(result)
+    }
+
+    fn clear_deltas(&self, inode: Inode) -> FsResult<()> {
+        let mut data_guard = self.data.write().map_err(|e| {
+            FsError::Io(format!("MemoryDeltaStore write lock poisoned: {}", e))
+        })?;
+        // Collect keys to remove.
+        let keys: Vec<(Inode, u64)> = data_guard
+            .range((inode, 0u64)..=(inode, u64::MAX))
+            .map(|(k, _)| *k)
+            .collect();
+        for k in keys {
+            data_guard.remove(&k);
+        }
+        // Reset sequence counter.
+        if let Ok(mut seq_guard) = self.seqs.write() {
+            if let Some(counter) = seq_guard.get_mut(&inode) {
+                counter.store(0, Ordering::Relaxed);
+            }
         }
         Ok(())
     }
@@ -568,6 +668,146 @@ mod tests {
                 ds.flush(1).await.unwrap();
                 ds.flush(u64::MAX).await.unwrap();
             });
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // MemoryDeltaStore tests
+    // -----------------------------------------------------------------------
+    mod delta_store {
+        use super::*;
+
+        #[test]
+        fn append_and_scan_single() {
+            let store = MemoryDeltaStore::new();
+            let val = vec![1u8, 0, 0, 0, 1]; // IncrementNlink(1)
+            let seqs = store.append_deltas(42, &[val.clone()]).unwrap();
+            assert_eq!(seqs, vec![0]);
+
+            let scanned = store.scan_deltas(42).unwrap();
+            assert_eq!(scanned.len(), 1);
+            assert_eq!(scanned[0], val);
+        }
+
+        #[test]
+        fn append_and_scan_multiple() {
+            let store = MemoryDeltaStore::new();
+            let v1 = vec![1u8, 0, 0, 0, 1]; // IncrementNlink(1)
+            let v2 = vec![2u8, 0, 0, 0, 0, 0, 0, 0x07, 0xD0]; // SetMtime(2000)
+            let seqs = store.append_deltas(42, &[v1.clone(), v2.clone()]).unwrap();
+            assert_eq!(seqs, vec![0, 1]);
+
+            let scanned = store.scan_deltas(42).unwrap();
+            assert_eq!(scanned.len(), 2);
+            assert_eq!(scanned[0], v1);
+            assert_eq!(scanned[1], v2);
+        }
+
+        #[test]
+        fn scan_returns_empty_for_unknown_inode() {
+            let store = MemoryDeltaStore::new();
+            let scanned = store.scan_deltas(999).unwrap();
+            assert!(scanned.is_empty());
+        }
+
+        #[test]
+        fn clear_deltas_removes_all() {
+            let store = MemoryDeltaStore::new();
+            let v1 = vec![1u8, 0, 0, 0, 1];
+            let v2 = vec![2u8, 0, 0, 0, 0, 0, 0, 0x07, 0xD0];
+            store.append_deltas(42, &[v1, v2]).unwrap();
+            assert_eq!(store.scan_deltas(42).unwrap().len(), 2);
+
+            store.clear_deltas(42).unwrap();
+            assert!(store.scan_deltas(42).unwrap().is_empty());
+        }
+
+        #[test]
+        fn clear_resets_sequence_counter() {
+            let store = MemoryDeltaStore::new();
+            let v = vec![1u8, 0, 0, 0, 1];
+            store.append_deltas(42, &[v.clone(), v.clone()]).unwrap();
+            // seq should have been 0, 1
+            store.clear_deltas(42).unwrap();
+            // After clear, next append should start from 0 again
+            let seqs = store.append_deltas(42, &[v]).unwrap();
+            assert_eq!(seqs, vec![0]);
+        }
+
+        #[test]
+        fn inode_isolation() {
+            let store = MemoryDeltaStore::new();
+            let v1 = vec![1u8, 0, 0, 0, 1];
+            let v2 = vec![2u8, 0, 0, 0, 0, 0, 0, 0x07, 0xD0];
+            store.append_deltas(10, &[v1.clone()]).unwrap();
+            store.append_deltas(20, &[v2.clone()]).unwrap();
+
+            assert_eq!(store.scan_deltas(10).unwrap(), vec![v1]);
+            assert_eq!(store.scan_deltas(20).unwrap(), vec![v2]);
+
+            // Clear inode 10 should not affect inode 20
+            store.clear_deltas(10).unwrap();
+            assert!(store.scan_deltas(10).unwrap().is_empty());
+            assert_eq!(store.scan_deltas(20).unwrap().len(), 1);
+        }
+
+        #[test]
+        fn sequential_appends_monotonic_seq() {
+            let store = MemoryDeltaStore::new();
+            let v = vec![1u8, 0, 0, 0, 1];
+            for i in 0..10u64 {
+                let seqs = store.append_deltas(42, &[v.clone()]).unwrap();
+                assert_eq!(seqs, vec![i]);
+            }
+            assert_eq!(store.scan_deltas(42).unwrap().len(), 10);
+        }
+
+        #[test]
+        fn concurrent_appends_unique_seqs() {
+            use std::sync::Arc;
+            use std::thread;
+
+            let store = Arc::new(MemoryDeltaStore::new());
+            let mut handles = vec![];
+
+            for _ in 0..20 {
+                let s = Arc::clone(&store);
+                handles.push(thread::spawn(move || {
+                    let v = vec![1u8, 0, 0, 0, 1];
+                    s.append_deltas(42, &[v]).unwrap()
+                }));
+            }
+
+            let mut all_seqs: Vec<u64> = vec![];
+            for h in handles {
+                let seqs = h.join().unwrap();
+                all_seqs.extend(seqs);
+            }
+
+            // All sequence numbers should be unique
+            all_seqs.sort();
+            all_seqs.dedup();
+            assert_eq!(all_seqs.len(), 20);
+
+            // scan should return all 20
+            assert_eq!(store.scan_deltas(42).unwrap().len(), 20);
+        }
+
+        #[test]
+        fn clear_nonexistent_inode_is_ok() {
+            let store = MemoryDeltaStore::new();
+            store.clear_deltas(999).unwrap();
+        }
+
+        #[test]
+        fn scan_preserves_order() {
+            let store = MemoryDeltaStore::new();
+            let values: Vec<Vec<u8>> = (0..5u8)
+                .map(|i| vec![1u8, 0, 0, 0, i])
+                .collect();
+            store.append_deltas(42, &values).unwrap();
+            let scanned = store.scan_deltas(42).unwrap();
+            assert_eq!(scanned, values);
         }
     }
 }
