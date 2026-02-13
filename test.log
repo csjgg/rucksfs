@@ -1,17 +1,1 @@
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
-     Running unittests src/lib.rs (target/debug/deps/rucksfs_storage-a750aeec81ac2c4a)
-
-running 10 tests
-test memory::tests::delta_store::clear_nonexistent_inode_is_ok ... ok
-test memory::tests::delta_store::append_and_scan_multiple ... ok
-test memory::tests::delta_store::append_and_scan_single ... ok
-test memory::tests::delta_store::clear_deltas_removes_all ... ok
-test memory::tests::delta_store::clear_resets_sequence_counter ... ok
-test memory::tests::delta_store::scan_preserves_order ... ok
-test memory::tests::delta_store::scan_returns_empty_for_unknown_inode ... ok
-test memory::tests::delta_store::sequential_appends_monotonic_seq ... ok
-test memory::tests::delta_store::inode_isolation ... ok
-test memory::tests::delta_store::concurrent_appends_unique_seqs ... ok
-
-test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 54 filtered out; finished in 0.00s
-
+zsh: command not found: timeout

@@ -7,16 +7,19 @@
 //! - **dir_entries**: directory entries (key = encoded dir entry key, value = child inode as u64 BE)
 //! - **system**: system-level KV pairs (e.g. next inode counter)
 
-use rocksdb::{ColumnFamilyDescriptor, Options, DB};
+use rocksdb::{ColumnFamilyDescriptor, Options, WriteBatch, DB};
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 
 use rucksfs_core::{DirEntry, FileAttr, FsError, FsResult, Inode};
 
 use crate::encoding::{
-    dir_entry_prefix, encode_dir_entry_key, encode_inode_key, extract_child_name, InodeValue,
+    decode_delta_key, delta_prefix, dir_entry_prefix, encode_delta_key, encode_dir_entry_key,
+    encode_inode_key, extract_child_name, InodeValue,
 };
-use crate::{DirectoryIndex, MetadataStore};
+use crate::{DeltaStore, DirectoryIndex, MetadataStore};
 
 /// Column family name for inode metadata.
 const CF_INODES: &str = "inodes";
@@ -24,9 +27,11 @@ const CF_INODES: &str = "inodes";
 const CF_DIR_ENTRIES: &str = "dir_entries";
 /// Column family name for system-level data (e.g. allocator state).
 const CF_SYSTEM: &str = "system";
+/// Column family name for delta entries (append-only incremental inode updates).
+const CF_DELTA_ENTRIES: &str = "delta_entries";
 
 /// All column family names used by the storage layer.
-const ALL_CFS: &[&str] = &[CF_INODES, CF_DIR_ENTRIES, CF_SYSTEM];
+const ALL_CFS: &[&str] = &[CF_INODES, CF_DIR_ENTRIES, CF_SYSTEM, CF_DELTA_ENTRIES];
 
 /// Open (or create) a RocksDB database with the required column families.
 ///
@@ -252,6 +257,167 @@ impl DirectoryIndex for RocksDirectoryIndex {
         self.db
             .delete_cf(&cf, &key)
             .map_err(|e| FsError::Io(format!("RocksDB delete: {}", e)))
+    }
+}
+
+// ===========================================================================
+// RocksDeltaStore
+// ===========================================================================
+
+/// Persistent delta store backed by the `delta_entries` column family.
+///
+/// Each delta entry is stored as:
+/// - key: `encode_delta_key(inode, seq)` — 17 bytes
+/// - value: serialized `DeltaOp` bytes (produced by the server layer)
+///
+/// Per-inode sequence numbers are tracked in memory using `AtomicU64`
+/// counters and recovered from the CF on startup.
+pub struct RocksDeltaStore {
+    db: Arc<DB>,
+    /// Per-inode next sequence number.  Lazily populated on first access
+    /// or recovered from disk on `recover_seq`.
+    seqs: RwLock<HashMap<Inode, AtomicU64>>,
+}
+
+impl RocksDeltaStore {
+    /// Create a new delta store from a shared DB handle.
+    pub fn new(db: Arc<DB>) -> Self {
+        Self {
+            db,
+            seqs: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Recover per-inode sequence counters by scanning the `delta_entries` CF.
+    ///
+    /// Should be called once at startup before serving requests.
+    pub fn recover_seqs(&self) -> FsResult<()> {
+        let cf = self
+            .db
+            .cf_handle(CF_DELTA_ENTRIES)
+            .ok_or_else(|| FsError::Io("CF 'delta_entries' not found".into()))?;
+
+        let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::End);
+        let mut max_seqs: HashMap<Inode, u64> = HashMap::new();
+
+        // Iterate from end to collect max seq per inode efficiently.
+        for item in iter {
+            let (k, _) = item.map_err(|e| FsError::Io(format!("RocksDB iterator: {}", e)))?;
+            if k.len() < 17 {
+                continue;
+            }
+            if let Ok((inode, seq)) = decode_delta_key(&k) {
+                max_seqs
+                    .entry(inode)
+                    .and_modify(|s| {
+                        if seq > *s {
+                            *s = seq;
+                        }
+                    })
+                    .or_insert(seq);
+            }
+        }
+
+        let mut guard = self.seqs.write().map_err(|e| {
+            FsError::Io(format!("RocksDeltaStore seqs lock poisoned: {}", e))
+        })?;
+        for (inode, max_seq) in max_seqs {
+            guard.insert(inode, AtomicU64::new(max_seq + 1));
+        }
+        Ok(())
+    }
+
+    /// Allocate the next sequence number for `inode`.
+    fn next_seq(&self, inode: Inode) -> u64 {
+        // Fast path: counter already exists.
+        {
+            let guard = self.seqs.read().expect("seqs read lock poisoned");
+            if let Some(counter) = guard.get(&inode) {
+                return counter.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        // Slow path: create the counter.
+        let mut guard = self.seqs.write().expect("seqs write lock poisoned");
+        let counter = guard.entry(inode).or_insert_with(|| AtomicU64::new(0));
+        counter.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+impl DeltaStore for RocksDeltaStore {
+    fn append_deltas(&self, inode: Inode, values: &[Vec<u8>]) -> FsResult<Vec<u64>> {
+        let cf = self
+            .db
+            .cf_handle(CF_DELTA_ENTRIES)
+            .ok_or_else(|| FsError::Io("CF 'delta_entries' not found".into()))?;
+
+        let mut batch = WriteBatch::default();
+        let mut assigned = Vec::with_capacity(values.len());
+
+        for v in values {
+            let seq = self.next_seq(inode);
+            let key = encode_delta_key(inode, seq);
+            batch.put_cf(&cf, &key, v);
+            assigned.push(seq);
+        }
+
+        self.db
+            .write(batch)
+            .map_err(|e| FsError::Io(format!("RocksDB write batch: {}", e)))?;
+
+        Ok(assigned)
+    }
+
+    fn scan_deltas(&self, inode: Inode) -> FsResult<Vec<Vec<u8>>> {
+        let cf = self
+            .db
+            .cf_handle(CF_DELTA_ENTRIES)
+            .ok_or_else(|| FsError::Io("CF 'delta_entries' not found".into()))?;
+
+        let prefix = delta_prefix(inode);
+        let iter = self.db.prefix_iterator_cf(&cf, &prefix);
+
+        let mut result = Vec::new();
+        for item in iter {
+            let (k, v) = item.map_err(|e| FsError::Io(format!("RocksDB iterator: {}", e)))?;
+            if !k.starts_with(&prefix) {
+                break;
+            }
+            result.push(v.to_vec());
+        }
+        Ok(result)
+    }
+
+    fn clear_deltas(&self, inode: Inode) -> FsResult<()> {
+        let cf = self
+            .db
+            .cf_handle(CF_DELTA_ENTRIES)
+            .ok_or_else(|| FsError::Io("CF 'delta_entries' not found".into()))?;
+
+        // Scan and delete all delta entries for the given inode.
+        let prefix = delta_prefix(inode);
+        let iter = self.db.prefix_iterator_cf(&cf, &prefix);
+
+        let mut batch = WriteBatch::default();
+        for item in iter {
+            let (k, _) = item.map_err(|e| FsError::Io(format!("RocksDB iterator: {}", e)))?;
+            if !k.starts_with(&prefix) {
+                break;
+            }
+            batch.delete_cf(&cf, &k);
+        }
+
+        self.db
+            .write(batch)
+            .map_err(|e| FsError::Io(format!("RocksDB write batch: {}", e)))?;
+
+        // Reset in-memory sequence counter.
+        if let Ok(mut guard) = self.seqs.write() {
+            if let Some(counter) = guard.get_mut(&inode) {
+                counter.store(0, Ordering::Relaxed);
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -610,6 +776,194 @@ mod tests {
                 dir_idx.resolve_path(1, "myfile.txt").unwrap(),
                 Some(10)
             );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // RocksDeltaStore tests
+    // -----------------------------------------------------------------------
+    mod delta_store {
+        use super::*;
+
+        fn new_delta_store() -> (tempfile::TempDir, RocksDeltaStore) {
+            let (tmp, db) = temp_db();
+            (tmp, RocksDeltaStore::new(db))
+        }
+
+        #[test]
+        fn append_and_scan_single() {
+            let (_tmp, store) = new_delta_store();
+            let val = vec![1u8, 0, 0, 0, 1]; // IncrementNlink(1)
+            let seqs = store.append_deltas(42, &[val.clone()]).unwrap();
+            assert_eq!(seqs, vec![0]);
+
+            let scanned = store.scan_deltas(42).unwrap();
+            assert_eq!(scanned.len(), 1);
+            assert_eq!(scanned[0], val);
+        }
+
+        #[test]
+        fn append_and_scan_multiple() {
+            let (_tmp, store) = new_delta_store();
+            let v1 = vec![1u8, 0, 0, 0, 1]; // IncrementNlink(1)
+            let v2 = vec![2u8, 0, 0, 0, 0, 0, 0, 0x07, 0xD0]; // SetMtime(2000)
+            let seqs = store.append_deltas(42, &[v1.clone(), v2.clone()]).unwrap();
+            assert_eq!(seqs, vec![0, 1]);
+
+            let scanned = store.scan_deltas(42).unwrap();
+            assert_eq!(scanned.len(), 2);
+            assert_eq!(scanned[0], v1);
+            assert_eq!(scanned[1], v2);
+        }
+
+        #[test]
+        fn scan_returns_empty_for_unknown_inode() {
+            let (_tmp, store) = new_delta_store();
+            let scanned = store.scan_deltas(999).unwrap();
+            assert!(scanned.is_empty());
+        }
+
+        #[test]
+        fn clear_deltas_removes_all() {
+            let (_tmp, store) = new_delta_store();
+            let v1 = vec![1u8, 0, 0, 0, 1];
+            let v2 = vec![2u8, 0, 0, 0, 0, 0, 0, 0x07, 0xD0];
+            store.append_deltas(42, &[v1, v2]).unwrap();
+            assert_eq!(store.scan_deltas(42).unwrap().len(), 2);
+
+            store.clear_deltas(42).unwrap();
+            assert!(store.scan_deltas(42).unwrap().is_empty());
+        }
+
+        #[test]
+        fn clear_resets_sequence_counter() {
+            let (_tmp, store) = new_delta_store();
+            let v = vec![1u8, 0, 0, 0, 1];
+            store.append_deltas(42, &[v.clone(), v.clone()]).unwrap();
+            store.clear_deltas(42).unwrap();
+            // After clear, next append should start from 0 again
+            let seqs = store.append_deltas(42, &[v]).unwrap();
+            assert_eq!(seqs, vec![0]);
+        }
+
+        #[test]
+        fn inode_isolation() {
+            let (_tmp, store) = new_delta_store();
+            let v1 = vec![1u8, 0, 0, 0, 1];
+            let v2 = vec![2u8, 0, 0, 0, 0, 0, 0, 0x07, 0xD0];
+            store.append_deltas(10, &[v1.clone()]).unwrap();
+            store.append_deltas(20, &[v2.clone()]).unwrap();
+
+            assert_eq!(store.scan_deltas(10).unwrap(), vec![v1]);
+            assert_eq!(store.scan_deltas(20).unwrap(), vec![v2]);
+
+            // Clear inode 10 should not affect inode 20
+            store.clear_deltas(10).unwrap();
+            assert!(store.scan_deltas(10).unwrap().is_empty());
+            assert_eq!(store.scan_deltas(20).unwrap().len(), 1);
+        }
+
+        #[test]
+        fn sequential_appends_monotonic_seq() {
+            let (_tmp, store) = new_delta_store();
+            let v = vec![1u8, 0, 0, 0, 1];
+            for i in 0..10u64 {
+                let seqs = store.append_deltas(42, &[v.clone()]).unwrap();
+                assert_eq!(seqs, vec![i]);
+            }
+            assert_eq!(store.scan_deltas(42).unwrap().len(), 10);
+        }
+
+        #[test]
+        fn clear_nonexistent_inode_is_ok() {
+            let (_tmp, store) = new_delta_store();
+            store.clear_deltas(999).unwrap();
+        }
+
+        #[test]
+        fn scan_preserves_order() {
+            let (_tmp, store) = new_delta_store();
+            let values: Vec<Vec<u8>> = (0..5u8)
+                .map(|i| vec![1u8, 0, 0, 0, i])
+                .collect();
+            store.append_deltas(42, &values).unwrap();
+            let scanned = store.scan_deltas(42).unwrap();
+            assert_eq!(scanned, values);
+        }
+
+        #[test]
+        fn data_persists_across_reopen() {
+            let tmp = tempfile::tempdir().expect("create temp dir");
+            let v = vec![1u8, 0, 0, 0, 1];
+
+            // Write
+            {
+                let db = open_rocks_db(tmp.path()).unwrap();
+                let store = RocksDeltaStore::new(db);
+                store.append_deltas(42, &[v.clone()]).unwrap();
+            }
+
+            // Re-open and verify
+            {
+                let db = open_rocks_db(tmp.path()).unwrap();
+                let store = RocksDeltaStore::new(db);
+                let scanned = store.scan_deltas(42).unwrap();
+                assert_eq!(scanned, vec![v]);
+            }
+        }
+
+        #[test]
+        fn recover_seqs_on_restart() {
+            let tmp = tempfile::tempdir().expect("create temp dir");
+            let v = vec![1u8, 0, 0, 0, 1];
+
+            // Write 3 deltas
+            {
+                let db = open_rocks_db(tmp.path()).unwrap();
+                let store = RocksDeltaStore::new(db);
+                store
+                    .append_deltas(42, &[v.clone(), v.clone(), v.clone()])
+                    .unwrap();
+            }
+
+            // Re-open, recover, then append — should not collide
+            {
+                let db = open_rocks_db(tmp.path()).unwrap();
+                let store = RocksDeltaStore::new(db);
+                store.recover_seqs().unwrap();
+                let seqs = store.append_deltas(42, &[v]).unwrap();
+                // Previous max seq was 2, so next should be 3
+                assert_eq!(seqs, vec![3]);
+            }
+        }
+
+        #[test]
+        fn shared_db_with_metadata_and_dir() {
+            let (_tmp, db) = temp_db();
+            let meta = RocksMetadataStore::new(Arc::clone(&db));
+            let dir_idx = RocksDirectoryIndex::new(Arc::clone(&db));
+            let delta = RocksDeltaStore::new(db);
+
+            // All three should work on the same DB
+            meta.put(&encode_inode_key(42), b"inode_data").unwrap();
+            dir_idx
+                .insert_child(
+                    1,
+                    "test.txt",
+                    42,
+                    FileAttr {
+                        inode: 42,
+                        mode: 0o100644,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let v = vec![1u8, 0, 0, 0, 1];
+            delta.append_deltas(42, &[v.clone()]).unwrap();
+
+            assert!(meta.get(&encode_inode_key(42)).unwrap().is_some());
+            assert_eq!(dir_idx.resolve_path(1, "test.txt").unwrap(), Some(42));
+            assert_eq!(delta.scan_deltas(42).unwrap(), vec![v]);
         }
     }
 }

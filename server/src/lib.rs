@@ -1,5 +1,6 @@
 //! Metadata server — orchestrates storage backends to implement POSIX semantics.
 
+pub mod cache;
 pub mod delta;
 
 use std::collections::HashMap;

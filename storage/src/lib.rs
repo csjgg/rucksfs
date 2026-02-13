@@ -14,7 +14,7 @@ pub use memory::{MemoryDataStore, MemoryDeltaStore, MemoryDirectoryIndex, Memory
 pub use rawdisk::RawDiskDataStore;
 
 #[cfg(feature = "rocksdb")]
-pub use rocks::{open_rocks_db, RocksDirectoryIndex, RocksMetadataStore};
+pub use rocks::{open_rocks_db, RocksDeltaStore, RocksDirectoryIndex, RocksMetadataStore};
 
 /// Append-only delta store for incremental inode attribute updates.
 ///

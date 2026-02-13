@@ -1,0 +1,13 @@
+   Compiling regex-syntax v0.8.9
+   Compiling itertools v0.13.0
+   Compiling itertools v0.12.1
+   Compiling regex-automata v0.4.14
+   Compiling regex v1.12.3
+   Compiling prost-build v0.13.5
+   Compiling bindgen v0.72.1
+   Compiling bindgen v0.69.5
+   Compiling tonic-build v0.12.3
+   Compiling rucksfs-rpc v0.1.0 (/Users/shunjiecui/code/rucksfs/rpc)
+   Compiling librocksdb-sys v0.16.0+8.10.0
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling rucksfs-client v0.1.0 (/Users/shunjiecui/code/rucksfs/client)
