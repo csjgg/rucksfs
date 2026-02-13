@@ -162,8 +162,46 @@ where
 
     // -- helper: load / save inode ------------------------------------------
 
-    /// Load and deserialize an inode from the metadata store.
+    /// Load an inode's **effective** attributes (base + pending deltas).
+    ///
+    /// Resolution order:
+    /// 1. Check the folded-state cache → hit → return immediately.
+    /// 2. Read the base value from the metadata store.
+    /// 3. Scan and fold any pending deltas from the delta store.
+    /// 4. Populate the cache with the folded result.
     fn load_inode(&self, inode: Inode) -> FsResult<InodeValue> {
+        // 1. Cache hit?
+        if let Some(cached) = self.cache.get(inode) {
+            return Ok(cached);
+        }
+
+        // 2. Read base.
+        let key = encode_inode_key(inode);
+        let mut iv = match self.metadata.get(&key)? {
+            Some(bytes) => InodeValue::deserialize(&bytes)?,
+            None => return Err(FsError::NotFound),
+        };
+
+        // 3. Fold pending deltas.
+        let raw_deltas = self.delta_store.scan_deltas(inode)?;
+        if !raw_deltas.is_empty() {
+            let ops: Vec<DeltaOp> = raw_deltas
+                .iter()
+                .filter_map(|bytes| DeltaOp::deserialize(bytes).ok())
+                .collect();
+            delta::fold_deltas(&mut iv, &ops);
+        }
+
+        // 4. Populate cache.
+        self.cache.put(inode, iv.clone());
+
+        Ok(iv)
+    }
+
+    /// Load **only the base** inode value from the metadata store,
+    /// bypassing cache and delta fold.  Used internally during
+    /// compaction.
+    fn load_base_inode(&self, inode: Inode) -> FsResult<InodeValue> {
         let key = encode_inode_key(inode);
         match self.metadata.get(&key)? {
             Some(bytes) => InodeValue::deserialize(&bytes),
@@ -171,10 +209,14 @@ where
         }
     }
 
-    /// Serialize and save an inode to the metadata store.
+    /// Serialize and save an inode to the metadata store, and update the
+    /// cache to reflect the new base value.
     fn save_inode(&self, inode: Inode, val: &InodeValue) -> FsResult<()> {
         let key = encode_inode_key(inode);
-        self.metadata.put(&key, &val.serialize())
+        self.metadata.put(&key, &val.serialize())?;
+        // Update the cache so subsequent reads see the latest value.
+        self.cache.put(inode, val.clone());
+        Ok(())
     }
 
     /// Delete an inode from the metadata store.
