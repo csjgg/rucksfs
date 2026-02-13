@@ -1,0 +1,10 @@
+   Compiling rucksfs-server v0.1.0 (/Users/shunjiecui/code/rucksfs/server)
+error[E0277]: the trait bound `rucksfs_storage::encoding::InodeValue: Default` is not satisfied
+   --> server/src/compaction.rs:408:15
+    |
+408 |             ..Default::default()
+    |               ^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `rucksfs_storage::encoding::InodeValue`
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `rucksfs-server` (lib test) due to 1 previous error
+DONE:101

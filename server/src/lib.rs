@@ -1,6 +1,7 @@
 //! Metadata server — orchestrates storage backends to implement POSIX semantics.
 
 pub mod cache;
+pub mod compaction;
 pub mod delta;
 
 use std::collections::HashMap;
@@ -13,6 +14,7 @@ use rucksfs_storage::encoding::{encode_inode_key, InodeValue};
 use rucksfs_storage::{DataStore, DeltaStore, DirectoryIndex, MetadataStore};
 
 use crate::cache::InodeFoldedCache;
+use crate::compaction::{CompactionConfig, DeltaCompactionWorker};
 use crate::delta::DeltaOp;
 
 /// File-type mode bits (S_IFDIR, S_IFREG).
@@ -75,6 +77,8 @@ where
     pub delta_store: Arc<DS>,
     /// LRU cache of folded inode values.
     pub cache: Arc<InodeFoldedCache>,
+    /// Background compaction worker (shared with the MetadataServer).
+    pub compaction: Arc<DeltaCompactionWorker<M, DS>>,
     allocator: InodeAllocator,
     /// Per-directory lock to serialize mutations under the same parent.
     dir_locks: Mutex<HashMap<Inode, Arc<Mutex<()>>>>,
@@ -98,12 +102,21 @@ where
         let allocator = InodeAllocator::load(metadata.as_ref())
             .unwrap_or_else(|_| InodeAllocator::new());
 
+        let cache = Arc::new(InodeFoldedCache::new(DEFAULT_CACHE_CAPACITY));
+        let compaction = Arc::new(DeltaCompactionWorker::new(
+            Arc::clone(&metadata),
+            Arc::clone(&delta_store),
+            Arc::clone(&cache),
+            CompactionConfig::default(),
+        ));
+
         let server = Self {
             metadata,
             data,
             index,
             delta_store,
-            cache: Arc::new(InodeFoldedCache::new(DEFAULT_CACHE_CAPACITY)),
+            cache,
+            compaction,
             allocator,
             dir_locks: Mutex::new(HashMap::new()),
         };
@@ -113,23 +126,34 @@ where
         server
     }
 
-    /// Create a new `MetadataServer` with a custom cache capacity.
-    pub fn with_cache_capacity(
+    /// Create a new `MetadataServer` with a custom cache capacity and
+    /// compaction configuration.
+    pub fn with_config(
         metadata: Arc<M>,
         data: Arc<D>,
         index: Arc<I>,
         delta_store: Arc<DS>,
         cache_capacity: usize,
+        compaction_config: CompactionConfig,
     ) -> Self {
         let allocator = InodeAllocator::load(metadata.as_ref())
             .unwrap_or_else(|_| InodeAllocator::new());
+
+        let cache = Arc::new(InodeFoldedCache::new(cache_capacity));
+        let compaction = Arc::new(DeltaCompactionWorker::new(
+            Arc::clone(&metadata),
+            Arc::clone(&delta_store),
+            Arc::clone(&cache),
+            compaction_config,
+        ));
 
         let server = Self {
             metadata,
             data,
             index,
             delta_store,
-            cache: Arc::new(InodeFoldedCache::new(cache_capacity)),
+            cache,
+            compaction,
             allocator,
             dir_locks: Mutex::new(HashMap::new()),
         };
@@ -244,6 +268,10 @@ where
         // Update the cache.  If the parent is not cached, the next read
         // will do a full fold.  This keeps the hot path fast.
         self.cache.apply_deltas(parent, deltas);
+
+        // Mark the inode as dirty for background compaction.
+        self.compaction.mark_dirty(parent);
+
         Ok(())
     }
 
