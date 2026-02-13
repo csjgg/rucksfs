@@ -222,17 +222,6 @@ where
         Ok(iv)
     }
 
-    /// Load **only the base** inode value from the metadata store,
-    /// bypassing cache and delta fold.  Used internally during
-    /// compaction.
-    fn load_base_inode(&self, inode: Inode) -> FsResult<InodeValue> {
-        let key = encode_inode_key(inode);
-        match self.metadata.get(&key)? {
-            Some(bytes) => InodeValue::deserialize(&bytes),
-            None => Err(FsError::NotFound),
-        }
-    }
-
     /// Serialize and save an inode to the metadata store, and update the
     /// cache to reflect the new base value.
     fn save_inode(&self, inode: Inode, val: &InodeValue) -> FsResult<()> {

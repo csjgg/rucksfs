@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use rucksfs_core::{FsError, PosixOps};
 use rucksfs_server::MetadataServer;
-use rucksfs_storage::{MemoryDataStore, MemoryDeltaStore, MemoryDirectoryIndex, MemoryMetadataStore};
+use rucksfs_storage::{DeltaStore, MemoryDataStore, MemoryDeltaStore, MemoryDirectoryIndex, MemoryMetadataStore};
 
 /// Root inode constant.
 const ROOT: u64 = 1;
@@ -557,4 +557,176 @@ fn concurrent_mkdir_rmdir() {
     // Root nlink should be back to 2
     let root_attr = server.getattr(ROOT).unwrap();
     assert_eq!(root_attr.nlink, 2);
+}
+
+// ===========================================================================
+// Delta entries — correctness & concurrency
+// ===========================================================================
+
+/// After many creates the parent nlink/mtime are correctly folded
+/// from deltas (no read-modify-write needed on the write path).
+#[test]
+fn delta_fold_many_creates() {
+    let server = new_server();
+    let n = 100;
+    for i in 0..n {
+        let name = format!("f_{}", i);
+        server.create(ROOT, &name, FILE_MODE).unwrap();
+    }
+
+    let root = server.getattr(ROOT).unwrap();
+    // root.nlink stays 2 (files don't increment nlink), but all 100
+    // entries should be visible.
+    assert_eq!(root.nlink, 2);
+    let entries = server.readdir(ROOT).unwrap();
+    assert_eq!(entries.len(), n);
+}
+
+/// After many mkdirs the parent nlink is correctly incremented via deltas.
+#[test]
+fn delta_fold_many_mkdirs() {
+    let server = new_server();
+    let n = 100;
+    for i in 0..n {
+        let name = format!("d_{}", i);
+        server.mkdir(ROOT, &name, DIR_MODE).unwrap();
+    }
+
+    let root = server.getattr(ROOT).unwrap();
+    // root nlink = 2 (base) + 100 (one ".." per child dir)
+    assert_eq!(root.nlink, 2 + n as u32);
+    let entries = server.readdir(ROOT).unwrap();
+    assert_eq!(entries.len(), n);
+}
+
+/// mkdir then rmdir: nlink goes up then back down via deltas.
+#[test]
+fn delta_fold_mkdir_rmdir_nlink() {
+    let server = new_server();
+
+    for i in 0..20 {
+        server.mkdir(ROOT, &format!("d_{}", i), DIR_MODE).unwrap();
+    }
+    assert_eq!(server.getattr(ROOT).unwrap().nlink, 22); // 2 + 20
+
+    for i in 0..10 {
+        server.rmdir(ROOT, &format!("d_{}", i)).unwrap();
+    }
+    assert_eq!(server.getattr(ROOT).unwrap().nlink, 12); // 22 - 10
+
+    for i in 10..20 {
+        server.rmdir(ROOT, &format!("d_{}", i)).unwrap();
+    }
+    assert_eq!(server.getattr(ROOT).unwrap().nlink, 2);
+}
+
+/// Concurrent creates storm: N threads each create a file under the same
+/// parent, exercising the append-only delta path under contention.
+#[test]
+fn concurrent_create_storm() {
+    use std::thread;
+
+    let server = Arc::new(new_server());
+    let n = 200;
+
+    let mut handles = vec![];
+    for i in 0..n {
+        let s = Arc::clone(&server);
+        handles.push(thread::spawn(move || {
+            let name = format!("storm_{}", i);
+            s.create(ROOT, &name, FILE_MODE).unwrap();
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    let entries = server.readdir(ROOT).unwrap();
+    assert_eq!(entries.len(), n);
+
+    // mtime should be recent-ish (non-zero).
+    let root = server.getattr(ROOT).unwrap();
+    assert!(root.mtime > 0);
+}
+
+/// Concurrent mkdirs storm: verifies nlink correctness under contention.
+#[test]
+fn concurrent_mkdir_storm_nlink() {
+    use std::thread;
+
+    let server = Arc::new(new_server());
+    let n = 100;
+
+    let mut handles = vec![];
+    for i in 0..n {
+        let s = Arc::clone(&server);
+        handles.push(thread::spawn(move || {
+            let name = format!("sd_{}", i);
+            s.mkdir(ROOT, &name, DIR_MODE).unwrap();
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    let root = server.getattr(ROOT).unwrap();
+    assert_eq!(root.nlink, 2 + n as u32);
+}
+
+/// Compaction: after flush_all, the base inode should reflect all deltas
+/// and the delta store should be empty.
+#[test]
+fn compaction_flush_merges_deltas() {
+    let server = new_server();
+
+    for i in 0..50 {
+        server.mkdir(ROOT, &format!("cd_{}", i), DIR_MODE).unwrap();
+    }
+
+    // Before compaction: getattr already works (via fold).
+    assert_eq!(server.getattr(ROOT).unwrap().nlink, 52);
+
+    // Flush compaction.
+    let flushed = server.compaction.flush_all().unwrap();
+    assert!(flushed > 0, "expected at least one inode to be compacted");
+
+    // After compaction: the result should be identical.
+    assert_eq!(server.getattr(ROOT).unwrap().nlink, 52);
+
+    // Delta store for ROOT should now be empty.
+    let remaining = server.delta_store.scan_deltas(ROOT).unwrap();
+    assert!(remaining.is_empty(), "deltas should be cleared after compaction");
+}
+
+/// End-to-end: interleave writes, compaction, and reads.
+#[test]
+fn compaction_interleaved_with_writes() {
+    let server = new_server();
+
+    // Phase 1: create some dirs.
+    for i in 0..10 {
+        server.mkdir(ROOT, &format!("p1_{}", i), DIR_MODE).unwrap();
+    }
+    assert_eq!(server.getattr(ROOT).unwrap().nlink, 12);
+
+    // Compact.
+    server.compaction.flush_all().unwrap();
+    assert_eq!(server.getattr(ROOT).unwrap().nlink, 12);
+
+    // Phase 2: create more dirs (new deltas on top of compacted base).
+    for i in 0..10 {
+        server.mkdir(ROOT, &format!("p2_{}", i), DIR_MODE).unwrap();
+    }
+    assert_eq!(server.getattr(ROOT).unwrap().nlink, 22);
+
+    // Phase 3: remove some.
+    for i in 0..5 {
+        server.rmdir(ROOT, &format!("p1_{}", i)).unwrap();
+    }
+    assert_eq!(server.getattr(ROOT).unwrap().nlink, 17);
+
+    // Final compact + verify.
+    server.compaction.flush_all().unwrap();
+    assert_eq!(server.getattr(ROOT).unwrap().nlink, 17);
+    assert!(server.delta_store.scan_deltas(ROOT).unwrap().is_empty());
 }
