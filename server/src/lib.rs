@@ -10,7 +10,10 @@ use async_trait::async_trait;
 use rucksfs_core::{ClientOps, DirEntry, FileAttr, FsError, FsResult, Inode, PosixOps, StatFs};
 use rucksfs_storage::allocator::{InodeAllocator, ROOT_INODE};
 use rucksfs_storage::encoding::{encode_inode_key, InodeValue};
-use rucksfs_storage::{DataStore, DirectoryIndex, MetadataStore};
+use rucksfs_storage::{DataStore, DeltaStore, DirectoryIndex, MetadataStore};
+
+use crate::cache::InodeFoldedCache;
+use crate::delta::DeltaOp;
 
 /// File-type mode bits (S_IFDIR, S_IFREG).
 const S_IFDIR: u32 = 0o040000;
@@ -49,31 +52,49 @@ impl DirLockGuard {
     }
 }
 
+/// Default capacity for the folded inode cache.
+const DEFAULT_CACHE_CAPACITY: usize = 10_000;
+
 /// Core metadata server that composes [`MetadataStore`], [`DataStore`],
-/// and [`DirectoryIndex`] to implement full POSIX file-system operations.
-pub struct MetadataServer<M, D, I>
+/// [`DirectoryIndex`], and [`DeltaStore`] to implement full POSIX
+/// file-system operations.
+///
+/// Parent-directory attribute updates (nlink, mtime, ctime) are written
+/// as append-only delta entries rather than read-modify-write, following
+/// the Mantle delta-entries design.
+pub struct MetadataServer<M, D, I, DS>
 where
     M: MetadataStore,
     D: DataStore,
     I: DirectoryIndex,
+    DS: DeltaStore,
 {
     pub metadata: Arc<M>,
     pub data: Arc<D>,
     pub index: Arc<I>,
+    pub delta_store: Arc<DS>,
+    /// LRU cache of folded inode values.
+    pub cache: Arc<InodeFoldedCache>,
     allocator: InodeAllocator,
     /// Per-directory lock to serialize mutations under the same parent.
     dir_locks: Mutex<HashMap<Inode, Arc<Mutex<()>>>>,
 }
 
-impl<M, D, I> MetadataServer<M, D, I>
+impl<M, D, I, DS> MetadataServer<M, D, I, DS>
 where
     M: MetadataStore,
     D: DataStore,
     I: DirectoryIndex,
+    DS: DeltaStore,
 {
     /// Create a new `MetadataServer` and initialise the root directory
     /// (inode 1) if it does not already exist.
-    pub fn new(metadata: Arc<M>, data: Arc<D>, index: Arc<I>) -> Self {
+    pub fn new(
+        metadata: Arc<M>,
+        data: Arc<D>,
+        index: Arc<I>,
+        delta_store: Arc<DS>,
+    ) -> Self {
         let allocator = InodeAllocator::load(metadata.as_ref())
             .unwrap_or_else(|_| InodeAllocator::new());
 
@@ -81,6 +102,34 @@ where
             metadata,
             data,
             index,
+            delta_store,
+            cache: Arc::new(InodeFoldedCache::new(DEFAULT_CACHE_CAPACITY)),
+            allocator,
+            dir_locks: Mutex::new(HashMap::new()),
+        };
+
+        // Ensure root directory exists.
+        server.init_root();
+        server
+    }
+
+    /// Create a new `MetadataServer` with a custom cache capacity.
+    pub fn with_cache_capacity(
+        metadata: Arc<M>,
+        data: Arc<D>,
+        index: Arc<I>,
+        delta_store: Arc<DS>,
+        cache_capacity: usize,
+    ) -> Self {
+        let allocator = InodeAllocator::load(metadata.as_ref())
+            .unwrap_or_else(|_| InodeAllocator::new());
+
+        let server = Self {
+            metadata,
+            data,
+            index,
+            delta_store,
+            cache: Arc::new(InodeFoldedCache::new(cache_capacity)),
             allocator,
             dir_locks: Mutex::new(HashMap::new()),
         };
@@ -131,7 +180,29 @@ where
     /// Delete an inode from the metadata store.
     fn delete_inode(&self, inode: Inode) -> FsResult<()> {
         let key = encode_inode_key(inode);
-        self.metadata.delete(&key)
+        self.metadata.delete(&key)?;
+        // Also clean up any pending deltas and cache for this inode.
+        let _ = self.delta_store.clear_deltas(inode);
+        self.cache.invalidate(inode);
+        Ok(())
+    }
+
+    // -- helper: delta append -----------------------------------------------
+
+    /// Append delta operations for a parent directory and update the cache.
+    ///
+    /// This replaces the old read-modify-write pattern for parent attribute
+    /// updates.  The deltas are persisted to the `DeltaStore` and applied
+    /// to the in-memory cache in a single logical step.
+    fn append_parent_deltas(&self, parent: Inode, deltas: &[DeltaOp]) -> FsResult<()> {
+        // Serialize and persist.
+        let serialized: Vec<Vec<u8>> = deltas.iter().map(|d| d.serialize()).collect();
+        self.delta_store.append_deltas(parent, &serialized)?;
+
+        // Update the cache.  If the parent is not cached, the next read
+        // will do a full fold.  This keeps the hot path fast.
+        self.cache.apply_deltas(parent, deltas);
+        Ok(())
     }
 
     // -- helper: per-directory lock -----------------------------------------
@@ -160,11 +231,12 @@ where
 // PosixOps implementation
 // ---------------------------------------------------------------------------
 
-impl<M, D, I> PosixOps for MetadataServer<M, D, I>
+impl<M, D, I, DS> PosixOps for MetadataServer<M, D, I, DS>
 where
     M: MetadataStore,
     D: DataStore,
     I: DirectoryIndex,
+    DS: DeltaStore,
 {
     fn lookup(&self, parent: Inode, name: &str) -> FsResult<FileAttr> {
         let child_inode = self
@@ -277,11 +349,11 @@ where
         self.index
             .insert_child(parent, name, new_inode, iv.to_attr())?;
 
-        // Update parent times
-        let mut parent_iv = self.load_inode(parent)?;
-        parent_iv.mtime = ts;
-        parent_iv.ctime = ts;
-        self.save_inode(parent, &parent_iv)?;
+        // Update parent times via delta append (replaces read-modify-write).
+        self.append_parent_deltas(
+            parent,
+            &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
+        )?;
 
         Ok(iv.to_attr())
     }
@@ -312,12 +384,15 @@ where
         self.index
             .insert_child(parent, name, new_inode, iv.to_attr())?;
 
-        // Parent nlink +1 (for the ".." in new dir)
-        let mut parent_iv = self.load_inode(parent)?;
-        parent_iv.nlink += 1;
-        parent_iv.mtime = ts;
-        parent_iv.ctime = ts;
-        self.save_inode(parent, &parent_iv)?;
+        // Parent nlink +1 (for the ".." in new dir) + update times via delta.
+        self.append_parent_deltas(
+            parent,
+            &[
+                DeltaOp::IncrementNlink(1),
+                DeltaOp::SetMtime(ts),
+                DeltaOp::SetCtime(ts),
+            ],
+        )?;
 
         Ok(iv.to_attr())
     }
@@ -346,12 +421,12 @@ where
             self.save_inode(child_inode, &child_iv)?;
         }
 
-        // Update parent times
+        // Update parent times via delta append.
         let ts = now_secs();
-        let mut parent_iv = self.load_inode(parent)?;
-        parent_iv.mtime = ts;
-        parent_iv.ctime = ts;
-        self.save_inode(parent, &parent_iv)?;
+        self.append_parent_deltas(
+            parent,
+            &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
+        )?;
 
         Ok(())
     }
@@ -378,13 +453,16 @@ where
         self.index.remove_child(parent, name)?;
         self.delete_inode(child_inode)?;
 
-        // Parent nlink -1
+        // Parent nlink -1 + update times via delta.
         let ts = now_secs();
-        let mut parent_iv = self.load_inode(parent)?;
-        parent_iv.nlink = parent_iv.nlink.saturating_sub(1);
-        parent_iv.mtime = ts;
-        parent_iv.ctime = ts;
-        self.save_inode(parent, &parent_iv)?;
+        self.append_parent_deltas(
+            parent,
+            &[
+                DeltaOp::IncrementNlink(-1),
+                DeltaOp::SetMtime(ts),
+                DeltaOp::SetCtime(ts),
+            ],
+        )?;
 
         Ok(())
     }
@@ -442,12 +520,15 @@ where
                 }
                 // Remove the target dir
                 self.delete_inode(dst_inode)?;
-                // Adjust new_parent nlink
-                let mut np_iv = self.load_inode(new_parent)?;
-                np_iv.nlink = np_iv.nlink.saturating_sub(1);
-                np_iv.mtime = ts;
-                np_iv.ctime = ts;
-                self.save_inode(new_parent, &np_iv)?;
+                // Adjust new_parent nlink via delta.
+                self.append_parent_deltas(
+                    new_parent,
+                    &[
+                        DeltaOp::IncrementNlink(-1),
+                        DeltaOp::SetMtime(ts),
+                        DeltaOp::SetCtime(ts),
+                    ],
+                )?;
             } else {
                 // Remove the target file
                 self.delete_inode(dst_inode)?;
@@ -464,29 +545,35 @@ where
         // Update nlink for cross-directory dir rename
         if src_is_dir && parent != new_parent {
             // Old parent loses a ".." reference
-            let mut old_parent_iv = self.load_inode(parent)?;
-            old_parent_iv.nlink = old_parent_iv.nlink.saturating_sub(1);
-            old_parent_iv.mtime = ts;
-            old_parent_iv.ctime = ts;
-            self.save_inode(parent, &old_parent_iv)?;
+            self.append_parent_deltas(
+                parent,
+                &[
+                    DeltaOp::IncrementNlink(-1),
+                    DeltaOp::SetMtime(ts),
+                    DeltaOp::SetCtime(ts),
+                ],
+            )?;
 
             // New parent gains a ".." reference
-            let mut new_parent_iv = self.load_inode(new_parent)?;
-            new_parent_iv.nlink += 1;
-            new_parent_iv.mtime = ts;
-            new_parent_iv.ctime = ts;
-            self.save_inode(new_parent, &new_parent_iv)?;
+            self.append_parent_deltas(
+                new_parent,
+                &[
+                    DeltaOp::IncrementNlink(1),
+                    DeltaOp::SetMtime(ts),
+                    DeltaOp::SetCtime(ts),
+                ],
+            )?;
         } else {
             // Same parent: just update times
-            let mut parent_iv = self.load_inode(parent)?;
-            parent_iv.mtime = ts;
-            parent_iv.ctime = ts;
-            self.save_inode(parent, &parent_iv)?;
+            self.append_parent_deltas(
+                parent,
+                &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
+            )?;
             if parent != new_parent {
-                let mut np_iv = self.load_inode(new_parent)?;
-                np_iv.mtime = ts;
-                np_iv.ctime = ts;
-                self.save_inode(new_parent, &np_iv)?;
+                self.append_parent_deltas(
+                    new_parent,
+                    &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
+                )?;
             }
         }
 
@@ -569,11 +656,12 @@ where
 // Async bridge
 // ---------------------------------------------------------------------------
 
-impl<M, D, I> MetadataServer<M, D, I>
+impl<M, D, I, DS> MetadataServer<M, D, I, DS>
 where
     M: MetadataStore,
     D: DataStore,
     I: DirectoryIndex,
+    DS: DeltaStore,
 {
     /// Execute an async future synchronously.
     ///
@@ -605,11 +693,12 @@ where
 // ---------------------------------------------------------------------------
 
 #[async_trait]
-impl<M, D, I> ClientOps for MetadataServer<M, D, I>
+impl<M, D, I, DS> ClientOps for MetadataServer<M, D, I, DS>
 where
     M: MetadataStore,
     D: DataStore,
     I: DirectoryIndex,
+    DS: DeltaStore,
 {
     async fn lookup(&self, parent: Inode, name: &str) -> FsResult<FileAttr> {
         PosixOps::lookup(self, parent, name)

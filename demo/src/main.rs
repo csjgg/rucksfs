@@ -12,9 +12,9 @@ use clap::Parser;
 use rucksfs_client::build_client;
 use rucksfs_core::ClientOps;
 use rucksfs_server::MetadataServer;
-use rucksfs_storage::{MemoryDataStore, MemoryDirectoryIndex, MemoryMetadataStore};
+use rucksfs_storage::{MemoryDataStore, MemoryDeltaStore, MemoryDirectoryIndex, MemoryMetadataStore};
 #[cfg(feature = "rocksdb")]
-use rucksfs_storage::{open_rocks_db, RocksDirectoryIndex, RocksMetadataStore};
+use rucksfs_storage::{open_rocks_db, RocksDeltaStore, RocksDirectoryIndex, RocksMetadataStore};
 #[cfg(feature = "rocksdb")]
 use rucksfs_storage::RawDiskDataStore;
 
@@ -81,8 +81,9 @@ async fn run_auto_demo_mode(cli: &Cli) {
                 RawDiskDataStore::open(&data_path, 64 * 1024 * 1024)
                     .expect("failed to open RawDisk data store"),
             );
+            let delta_store = Arc::new(RocksDeltaStore::new(Arc::clone(&db)));
 
-            let server = Arc::new(MetadataServer::new(metadata, data, index));
+            let server = Arc::new(MetadataServer::new(metadata, data, index, delta_store));
             let client = build_client(server);
             run_auto_demo(&client).await;
         }
@@ -98,7 +99,8 @@ async fn run_auto_demo_mode(cli: &Cli) {
         let metadata = Arc::new(MemoryMetadataStore::new());
         let index = Arc::new(MemoryDirectoryIndex::new());
         let data = Arc::new(MemoryDataStore::new());
-        let server = Arc::new(MetadataServer::new(metadata, data, index));
+        let delta_store = Arc::new(MemoryDeltaStore::new());
+        let server = Arc::new(MetadataServer::new(metadata, data, index, delta_store));
         let client = build_client(server);
         run_auto_demo(&client).await;
     }
@@ -241,7 +243,8 @@ async fn run_interactive_mode(cli: &Cli) {
                 RawDiskDataStore::open(&data_path, 64 * 1024 * 1024)
                     .expect("failed to open RawDisk data store"),
             );
-            let server = Arc::new(MetadataServer::new(metadata, data, index));
+            let delta_store = Arc::new(RocksDeltaStore::new(Arc::clone(&db)));
+            let server = Arc::new(MetadataServer::new(metadata, data, index, delta_store));
             let client = build_client(server);
             run_repl(&client).await;
         }
@@ -256,7 +259,8 @@ async fn run_interactive_mode(cli: &Cli) {
         let metadata = Arc::new(MemoryMetadataStore::new());
         let index = Arc::new(MemoryDirectoryIndex::new());
         let data = Arc::new(MemoryDataStore::new());
-        let server = Arc::new(MetadataServer::new(metadata, data, index));
+        let delta_store = Arc::new(MemoryDeltaStore::new());
+        let server = Arc::new(MetadataServer::new(metadata, data, index, delta_store));
         let client = build_client(server);
         run_repl(&client).await;
     }
@@ -613,7 +617,8 @@ async fn run_mount_mode(cli: &Cli) {
                     RawDiskDataStore::open(&data_path, 64 * 1024 * 1024)
                         .expect("failed to open RawDisk data store"),
                 );
-                let server = Arc::new(MetadataServer::new(metadata, data, index));
+                let delta_store = Arc::new(RocksDeltaStore::new(Arc::clone(&db)));
+                let server = Arc::new(MetadataServer::new(metadata, data, index, delta_store));
                 let client = Arc::new(build_client(server));
 
                 println!("▶ Press Ctrl+C or run `fusermount -u {}` to unmount.", mountpoint);
@@ -633,7 +638,8 @@ async fn run_mount_mode(cli: &Cli) {
             let metadata = Arc::new(MemoryMetadataStore::new());
             let index = Arc::new(MemoryDirectoryIndex::new());
             let data = Arc::new(MemoryDataStore::new());
-            let server = Arc::new(MetadataServer::new(metadata, data, index));
+            let delta_store = Arc::new(MemoryDeltaStore::new());
+            let server = Arc::new(MetadataServer::new(metadata, data, index, delta_store));
             let client = Arc::new(build_client(server));
 
             println!("▶ Press Ctrl+C or run `fusermount -u {}` to unmount.", mountpoint);

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use rucksfs_core::{FsError, PosixOps};
 use rucksfs_server::MetadataServer;
-use rucksfs_storage::{MemoryDataStore, MemoryDirectoryIndex, MemoryMetadataStore};
+use rucksfs_storage::{MemoryDataStore, MemoryDeltaStore, MemoryDirectoryIndex, MemoryMetadataStore};
 
 /// Root inode constant.
 const ROOT: u64 = 1;
@@ -19,7 +19,7 @@ const FILE_MODE: u32 = 0o644;
 /// Permission mode for a directory.
 const DIR_MODE: u32 = 0o755;
 
-type TestServer = MetadataServer<MemoryMetadataStore, MemoryDataStore, MemoryDirectoryIndex>;
+type TestServer = MetadataServer<MemoryMetadataStore, MemoryDataStore, MemoryDirectoryIndex, MemoryDeltaStore>;
 
 /// Helper to build a fresh server for each test.
 fn new_server() -> TestServer {
@@ -27,6 +27,7 @@ fn new_server() -> TestServer {
         Arc::new(MemoryMetadataStore::new()),
         Arc::new(MemoryDataStore::new()),
         Arc::new(MemoryDirectoryIndex::new()),
+        Arc::new(MemoryDeltaStore::new()),
     )
 }
 

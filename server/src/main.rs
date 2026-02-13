@@ -15,7 +15,7 @@
 //!   rucksfs-server --bind 0.0.0.0:50051 --token my-secret-token --tls-cert server.crt --tls-key server.key
 
 use rucksfs_server::MetadataServer;
-use rucksfs_storage::{MemoryDataStore, MemoryDirectoryIndex, MemoryMetadataStore};
+use rucksfs_storage::{MemoryDataStore, MemoryDeltaStore, MemoryDirectoryIndex, MemoryMetadataStore};
 use rucksfs_rpc::{ServerConfig, TlsConfig};
 use std::sync::Arc;
 
@@ -141,11 +141,11 @@ async fn main() {
         tracing::info!("Authentication enabled with Bearer token");
     }
 
-    // Create backend
     let metadata = Arc::new(MemoryMetadataStore::new());
     let index = Arc::new(MemoryDirectoryIndex::new());
     let data = Arc::new(MemoryDataStore::new());
-    let server = MetadataServer::new(metadata, data, index);
+    let delta_store = Arc::new(MemoryDeltaStore::new());
+    let server = MetadataServer::new(metadata, data, index, delta_store);
     let backend: Arc<dyn rucksfs_core::ClientOps> = Arc::new(server);
 
     // Configure server

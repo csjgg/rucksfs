@@ -8,7 +8,7 @@ use std::sync::Arc;
 use rucksfs_client::build_client;
 use rucksfs_core::ClientOps;
 use rucksfs_server::MetadataServer;
-use rucksfs_storage::{MemoryDataStore, MemoryDirectoryIndex, MemoryMetadataStore};
+use rucksfs_storage::{MemoryDataStore, MemoryDeltaStore, MemoryDirectoryIndex, MemoryMetadataStore};
 
 /// Root inode constant.
 const ROOT: u64 = 1;
@@ -18,7 +18,8 @@ fn mem_client() -> impl ClientOps {
     let metadata = Arc::new(MemoryMetadataStore::new());
     let index = Arc::new(MemoryDirectoryIndex::new());
     let data = Arc::new(MemoryDataStore::new());
-    let server = Arc::new(MetadataServer::new(metadata, data, index));
+    let delta_store = Arc::new(MemoryDeltaStore::new());
+    let server = Arc::new(MetadataServer::new(metadata, data, index, delta_store));
     build_client(server)
 }
 
@@ -315,7 +316,7 @@ async fn deep_directory_tree() {
 #[cfg(feature = "rocksdb")]
 mod rocksdb_tests {
     use super::*;
-    use rucksfs_storage::{open_rocks_db, RawDiskDataStore, RocksDirectoryIndex, RocksMetadataStore};
+    use rucksfs_storage::{open_rocks_db, RawDiskDataStore, RocksDeltaStore, RocksDirectoryIndex, RocksMetadataStore};
 
     /// Build a persistent server+client stack at the given directory.
     fn persistent_client(
@@ -330,7 +331,8 @@ mod rocksdb_tests {
         let data = Arc::new(
             RawDiskDataStore::open(&data_path, 64 * 1024 * 1024).expect("open RawDisk"),
         );
-        let server = Arc::new(MetadataServer::new(metadata, data, index));
+        let delta_store = Arc::new(RocksDeltaStore::new(Arc::clone(&db)));
+        let server = Arc::new(MetadataServer::new(metadata, data, index, delta_store));
         build_client(server)
     }
 
