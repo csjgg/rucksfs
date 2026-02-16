@@ -13,6 +13,7 @@ rocksdb = ["rucksfs-storage/rocksdb"]
 rucksfs-core = { path = "../core" }
 rucksfs-storage = { path = "../storage" }
 rucksfs-server = { path = "../server" }
+rucksfs-dataserver = { path = "../dataserver" }
 rucksfs-client = { path = "../client" }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std"] }

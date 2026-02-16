@@ -9,8 +9,9 @@
 use std::sync::Arc;
 
 use clap::Parser;
-use rucksfs_client::build_client;
-use rucksfs_core::ClientOps;
+use rucksfs_client::EmbeddedClient;
+use rucksfs_core::{DataLocation, DataOps, MetadataOps, VfsOps};
+use rucksfs_dataserver::DataServer;
 use rucksfs_server::MetadataServer;
 use rucksfs_storage::{MemoryDataStore, MemoryDeltaStore, MemoryDirectoryIndex, MemoryMetadataStore};
 #[cfg(feature = "rocksdb")]
@@ -36,14 +37,61 @@ struct Cli {
     persist: Option<String>,
 }
 
+/// Build the All-in-One EmbeddedClient using in-memory backends.
+fn build_memory_client() -> EmbeddedClient {
+    let metadata = Arc::new(MemoryMetadataStore::new());
+    let index = Arc::new(MemoryDirectoryIndex::new());
+    let delta_store = Arc::new(MemoryDeltaStore::new());
+    let data_store = MemoryDataStore::new();
+
+    let data_server: Arc<dyn DataOps> = Arc::new(DataServer::new(data_store));
+    let metadata_server: Arc<dyn MetadataOps> = Arc::new(MetadataServer::new(
+        metadata,
+        index,
+        delta_store,
+        Arc::clone(&data_server),
+        DataLocation {
+            address: "embedded".to_string(),
+        },
+    ));
+
+    EmbeddedClient::new(metadata_server, data_server)
+}
+
+/// Build the All-in-One EmbeddedClient using persistent RocksDB + RawDisk backends.
+#[cfg(feature = "rocksdb")]
+fn build_persist_client(dir: &str) -> EmbeddedClient {
+    let db_path = std::path::Path::new(dir).join("metadata.db");
+    let data_path = std::path::Path::new(dir).join("data.raw");
+    std::fs::create_dir_all(dir).expect("failed to create persist directory");
+
+    let db = open_rocks_db(&db_path).expect("failed to open RocksDB");
+    let metadata = Arc::new(RocksMetadataStore::new(Arc::clone(&db)));
+    let index = Arc::new(RocksDirectoryIndex::new(Arc::clone(&db)));
+    let delta_store = Arc::new(RocksDeltaStore::new(Arc::clone(&db)));
+    let data_store = RawDiskDataStore::open(&data_path, 64 * 1024 * 1024)
+        .expect("failed to open RawDisk data store");
+
+    let data_server: Arc<dyn DataOps> = Arc::new(DataServer::new(data_store));
+    let metadata_server: Arc<dyn MetadataOps> = Arc::new(MetadataServer::new(
+        metadata,
+        index,
+        delta_store,
+        Arc::clone(&data_server),
+        DataLocation {
+            address: "embedded".to_string(),
+        },
+    ));
+
+    EmbeddedClient::new(metadata_server, data_server)
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
 
-    // Decide which mode to run based on CLI flags.
-    // Priority: --mount > --interactive > auto-demo
     if let Some(ref _mountpoint) = cli.mount {
         run_mount_mode(&cli).await;
     } else if cli.interactive {
@@ -57,7 +105,6 @@ async fn main() {
 // Auto-demo mode
 // ---------------------------------------------------------------------------
 
-/// Run the automatic demo, exercising all major POSIX operations.
 async fn run_auto_demo_mode(cli: &Cli) {
     println!("╔══════════════════════════════════════════════════════╗");
     println!("║         RucksFS — Automatic Demo                    ║");
@@ -68,40 +115,19 @@ async fn run_auto_demo_mode(cli: &Cli) {
         #[cfg(feature = "rocksdb")]
         {
             println!("▶ Using persistent storage at: {}", dir);
-            let db_path = std::path::Path::new(dir).join("metadata.db");
-            let data_path = std::path::Path::new(dir).join("data.raw");
-
-            // Ensure the directory exists
-            std::fs::create_dir_all(dir).expect("failed to create persist directory");
-
-            let db = open_rocks_db(&db_path).expect("failed to open RocksDB");
-            let metadata = Arc::new(RocksMetadataStore::new(Arc::clone(&db)));
-            let index = Arc::new(RocksDirectoryIndex::new(Arc::clone(&db)));
-            let data = Arc::new(
-                RawDiskDataStore::open(&data_path, 64 * 1024 * 1024)
-                    .expect("failed to open RawDisk data store"),
-            );
-            let delta_store = Arc::new(RocksDeltaStore::new(Arc::clone(&db)));
-
-            let server = Arc::new(MetadataServer::new(metadata, data, index, delta_store));
-            let client = build_client(server);
+            let client = build_persist_client(dir);
             run_auto_demo(&client).await;
         }
         #[cfg(not(feature = "rocksdb"))]
         {
             let _ = dir;
             eprintln!("Error: --persist requires the `rocksdb` feature.");
-            eprintln!("Rebuild with: cargo run -p rucksfs-demo --features rocksdb -- --persist {}", dir);
+            eprintln!("Rebuild with: cargo run -p rucksfs-demo --features rocksdb -- --persist <dir>");
             std::process::exit(1);
         }
     } else {
         println!("▶ Using in-memory storage (data will not survive restart)");
-        let metadata = Arc::new(MemoryMetadataStore::new());
-        let index = Arc::new(MemoryDirectoryIndex::new());
-        let data = Arc::new(MemoryDataStore::new());
-        let delta_store = Arc::new(MemoryDeltaStore::new());
-        let server = Arc::new(MetadataServer::new(metadata, data, index, delta_store));
-        let client = build_client(server);
+        let client = build_memory_client();
         run_auto_demo(&client).await;
     }
 
@@ -110,7 +136,7 @@ async fn run_auto_demo_mode(cli: &Cli) {
 }
 
 /// Core auto-demo logic: exercises all major operations sequentially.
-async fn run_auto_demo(client: &impl ClientOps) {
+async fn run_auto_demo(client: &impl VfsOps) {
     const ROOT: u64 = 1;
     println!();
 
@@ -141,7 +167,7 @@ async fn run_auto_demo(client: &impl ClientOps) {
         }
     };
 
-    // 3. write "Hello, RucksFS!\n" to /mydir/hello.txt
+    // 3. write to /mydir/hello.txt
     print_step(3, "write \"Hello, RucksFS!\" → /mydir/hello.txt");
     let content = b"Hello, RucksFS!\n";
     match client.write(file_inode, 0, content, 0).await {
@@ -212,7 +238,6 @@ async fn run_auto_demo(client: &impl ClientOps) {
     }
 }
 
-/// Pretty-print a step header.
 fn print_step(n: u32, desc: &str) {
     println!("── Step {:>2}: {} ──", n, desc);
 }
@@ -221,7 +246,6 @@ fn print_step(n: u32, desc: &str) {
 // Interactive REPL mode
 // ---------------------------------------------------------------------------
 
-/// Build a client from CLI options and run the interactive REPL.
 async fn run_interactive_mode(cli: &Cli) {
     println!("╔══════════════════════════════════════════════════════╗");
     println!("║         RucksFS — Interactive REPL                  ║");
@@ -232,20 +256,7 @@ async fn run_interactive_mode(cli: &Cli) {
         #[cfg(feature = "rocksdb")]
         {
             println!("▶ Using persistent storage at: {}", dir);
-            let db_path = std::path::Path::new(dir).join("metadata.db");
-            let data_path = std::path::Path::new(dir).join("data.raw");
-            std::fs::create_dir_all(dir).expect("failed to create persist directory");
-
-            let db = open_rocks_db(&db_path).expect("failed to open RocksDB");
-            let metadata = Arc::new(RocksMetadataStore::new(Arc::clone(&db)));
-            let index = Arc::new(RocksDirectoryIndex::new(Arc::clone(&db)));
-            let data = Arc::new(
-                RawDiskDataStore::open(&data_path, 64 * 1024 * 1024)
-                    .expect("failed to open RawDisk data store"),
-            );
-            let delta_store = Arc::new(RocksDeltaStore::new(Arc::clone(&db)));
-            let server = Arc::new(MetadataServer::new(metadata, data, index, delta_store));
-            let client = build_client(server);
+            let client = build_persist_client(dir);
             run_repl(&client).await;
         }
         #[cfg(not(feature = "rocksdb"))]
@@ -256,23 +267,15 @@ async fn run_interactive_mode(cli: &Cli) {
         }
     } else {
         println!("▶ Using in-memory storage (data will not survive restart)");
-        let metadata = Arc::new(MemoryMetadataStore::new());
-        let index = Arc::new(MemoryDirectoryIndex::new());
-        let data = Arc::new(MemoryDataStore::new());
-        let delta_store = Arc::new(MemoryDeltaStore::new());
-        let server = Arc::new(MetadataServer::new(metadata, data, index, delta_store));
-        let client = build_client(server);
+        let client = build_memory_client();
         run_repl(&client).await;
     }
 }
 
-/// Root inode constant.
 const ROOT_INODE: u64 = 1;
 
-/// Resolve a POSIX-style path (e.g. "/foo/bar") to its inode by walking
-/// the directory tree from root.  Returns `(parent_inode, last_component, target_inode)`.
 async fn resolve_path(
-    client: &impl ClientOps,
+    client: &impl VfsOps,
     path: &str,
 ) -> Result<(u64, String, u64), String> {
     let path = path.trim();
@@ -289,7 +292,6 @@ async fn resolve_path(
     let mut current = ROOT_INODE;
     for (i, comp) in components.iter().enumerate() {
         if i == components.len() - 1 {
-            // Last component — try to resolve but return parent info regardless
             match client.lookup(current, comp).await {
                 Ok(attr) => return Ok((current, comp.to_string(), attr.inode)),
                 Err(_) => return Err(format!("'{}' not found in path '/{}'", comp,
@@ -307,10 +309,8 @@ async fn resolve_path(
     unreachable!()
 }
 
-/// Resolve a path to (parent_inode, child_name) — useful for operations
-/// that need the parent context (create, mkdir, unlink, etc.).
 async fn resolve_parent(
-    client: &impl ClientOps,
+    client: &impl VfsOps,
     path: &str,
 ) -> Result<(u64, String), String> {
     let path = path.trim();
@@ -338,8 +338,7 @@ async fn resolve_parent(
     Ok((current, name))
 }
 
-/// The interactive REPL loop.
-async fn run_repl(client: &impl ClientOps) {
+async fn run_repl(client: &impl VfsOps) {
     use std::io::{self, BufRead, Write};
 
     println!("Type 'help' for available commands, 'exit' to quit.\n");
@@ -353,7 +352,7 @@ async fn run_repl(client: &impl ClientOps) {
 
         let mut line = String::new();
         match reader.read_line(&mut line) {
-            Ok(0) => break, // EOF
+            Ok(0) => break,
             Err(e) => {
                 eprintln!("read error: {}", e);
                 break;
@@ -563,7 +562,6 @@ async fn run_repl(client: &impl ClientOps) {
     }
 }
 
-/// Print the help text listing all REPL commands.
 fn print_help() {
     println!("Available commands:");
     println!("  ls [path]              List directory contents (default: /)");
@@ -595,7 +593,6 @@ async fn run_mount_mode(cli: &Cli) {
         println!();
         println!("▶ Mounting at: {}", mountpoint);
 
-        // Ensure the mountpoint directory exists
         if let Err(e) = std::fs::create_dir_all(mountpoint) {
             eprintln!("Error: failed to create mountpoint '{}': {}", mountpoint, e);
             std::process::exit(1);
@@ -605,22 +602,7 @@ async fn run_mount_mode(cli: &Cli) {
             #[cfg(feature = "rocksdb")]
             {
                 println!("▶ Using persistent storage at: {}", dir);
-                std::fs::create_dir_all(dir).expect("failed to create persist directory");
-
-                let db_path = std::path::Path::new(dir).join("metadata.db");
-                let data_path = std::path::Path::new(dir).join("data.raw");
-
-                let db = open_rocks_db(&db_path).expect("failed to open RocksDB");
-                let metadata = Arc::new(RocksMetadataStore::new(Arc::clone(&db)));
-                let index = Arc::new(RocksDirectoryIndex::new(Arc::clone(&db)));
-                let data = Arc::new(
-                    RawDiskDataStore::open(&data_path, 64 * 1024 * 1024)
-                        .expect("failed to open RawDisk data store"),
-                );
-                let delta_store = Arc::new(RocksDeltaStore::new(Arc::clone(&db)));
-                let server = Arc::new(MetadataServer::new(metadata, data, index, delta_store));
-                let client = Arc::new(build_client(server));
-
+                let client = Arc::new(build_persist_client(dir));
                 println!("▶ Press Ctrl+C or run `fusermount -u {}` to unmount.", mountpoint);
                 if let Err(e) = rucksfs_client::mount_fuse(mountpoint, client) {
                     eprintln!("FUSE mount error: {}", e);
@@ -635,13 +617,7 @@ async fn run_mount_mode(cli: &Cli) {
             }
         } else {
             println!("▶ Using in-memory storage");
-            let metadata = Arc::new(MemoryMetadataStore::new());
-            let index = Arc::new(MemoryDirectoryIndex::new());
-            let data = Arc::new(MemoryDataStore::new());
-            let delta_store = Arc::new(MemoryDeltaStore::new());
-            let server = Arc::new(MetadataServer::new(metadata, data, index, delta_store));
-            let client = Arc::new(build_client(server));
-
+            let client = Arc::new(build_memory_client());
             println!("▶ Press Ctrl+C or run `fusermount -u {}` to unmount.", mountpoint);
             if let Err(e) = rucksfs_client::mount_fuse(mountpoint, client) {
                 eprintln!("FUSE mount error: {}", e);

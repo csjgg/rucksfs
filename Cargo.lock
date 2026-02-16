@@ -1228,6 +1228,7 @@ dependencies = [
  "clap",
  "rucksfs-client",
  "rucksfs-core",
+ "rucksfs-dataserver",
  "rucksfs-server",
  "rucksfs-storage",
  "tempfile",
