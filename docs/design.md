@@ -1,7 +1,7 @@
 # rucksfs Technical Design Document
 
-> **Version:** 0.1.0-draft
-> **Last Updated:** 2026-02-10
+> **Version:** 0.2.0-draft
+> **Last Updated:** 2026-02-13
 > **Target Audience:** Developers (human & AI Agent) implementing rucksfs
 
 ---
@@ -30,6 +30,8 @@
       - [`dir_entries` CF — Key](#dir_entries-cf--key)
       - [`dir_entries` CF — Value](#dir_entries-cf--value)
       - [`system` CF — Key/Value](#system-cf--keyvalue)
+      - [`delta_entries` CF — Key](#delta_entries-cf--key)
+      - [`delta_entries` CF — Value](#delta_entries-cf--value)
     - [3.4 Value Serialization: `InodeValue`](#34-value-serialization-inodevalue)
     - [3.5 Encoding Summary Diagram](#35-encoding-summary-diagram)
   - [4. Inode Allocation \& Reclamation](#4-inode-allocation--reclamation)
@@ -49,6 +51,16 @@
       - [5.2.3 Inode ID as the Sole Link](#523-inode-id-as-the-sole-link)
     - [5.3 Module Replaceability](#53-module-replaceability)
     - [5.4 RocksDB Recommended Configuration](#54-rocksdb-recommended-configuration)
+    - [5.5 Delta Entries \& Append-Only Write Path](#55-delta-entries--append-only-write-path)
+      - [5.5.1 Motivation](#551-motivation)
+      - [5.5.2 Architecture Overview](#552-architecture-overview)
+      - [5.5.3 DeltaOp Enum (`server/src/delta.rs`)](#553-deltaop-enum-serversrcdeltars)
+      - [5.5.4 Fold Semantics](#554-fold-semantics)
+      - [5.5.5 DeltaStore Trait (`storage/src/lib.rs`)](#555-deltastore-trait-storagesrclibrs)
+      - [5.5.6 InodeFoldedCache (`server/src/cache.rs`)](#556-inodefoldedcache-serversrccachers)
+      - [5.5.7 Write Path: `append_parent_deltas`](#557-write-path-append_parent_deltas)
+      - [5.5.8 Read Path: `load_inode`](#558-read-path-load_inode)
+      - [5.5.9 Background Compaction Worker (`server/src/compaction.rs`)](#559-background-compaction-worker-serversrccompactionrs)
   - [6. POSIX Operations — Detailed Design](#6-posix-operations--detailed-design)
     - [Common Error Mapping](#common-error-mapping)
     - [6.1 Metadata Operations](#61-metadata-operations)
@@ -70,9 +82,26 @@
       - [6.3.4 `flush`](#634-flush)
       - [6.3.5 `fsync`](#635-fsync)
   - [7. Transactions \& Consistency Guarantees](#7-transactions--consistency-guarantees)
+    - [7.1 RocksDB WriteBatch Atomicity](#71-rocksdb-writebatch-atomicity)
+    - [7.2 Operations Requiring Atomicity](#72-operations-requiring-atomicity)
+    - [7.3 Concurrency Control Strategy](#73-concurrency-control-strategy)
+      - [Strategy: Per-Directory Mutex](#strategy-per-directory-mutex)
+      - [Alternative: RocksDB OptimisticTransactionDB (Future)](#alternative-rocksdb-optimistictransactiondb-future)
+    - [7.4 TOCTOU Prevention](#74-toctou-prevention)
   - [8. Security Mechanisms](#8-security-mechanisms)
+    - [8.1 POSIX Permission Model](#81-posix-permission-model)
+    - [8.2 RPC Authentication Integration](#82-rpc-authentication-integration)
+    - [8.3 Data Integrity](#83-data-integrity)
   - [9. Fault Tolerance \& Crash Recovery](#9-fault-tolerance--crash-recovery)
+    - [9.1 Failure Scenarios \& Expected Behavior](#91-failure-scenarios--expected-behavior)
+    - [9.2 RocksDB WAL Crash Consistency](#92-rocksdb-wal-crash-consistency)
+    - [9.3 RawDiskDataStore Recovery](#93-rawdiskdatastore-recovery)
+    - [9.4 Inode Allocator Recovery](#94-inode-allocator-recovery)
   - [10. Configuration \& Tuning Recommendations](#10-configuration--tuning-recommendations)
+    - [10.1 RocksDB Configuration Summary](#101-rocksdb-configuration-summary)
+    - [10.2 RawDiskDataStore Configuration](#102-rawdiskdatastore-configuration)
+    - [10.3 FUSE Mount Options](#103-fuse-mount-options)
+    - [10.4 Performance Tuning Checklist](#104-performance-tuning-checklist)
   - [11. Glossary](#11-glossary)
 
 ---
@@ -86,7 +115,7 @@ rucksfs is a user-space file system implemented in Rust. It exposes a standard P
 | Crate | Role |
 |-------|------|
 | `core` | Shared types (`FileAttr`, `DirEntry`, `StatFs`, `FsError`) and trait definitions (`PosixOps`, `ClientOps`) |
-| `storage` | Storage trait abstractions (`MetadataStore`, `DataStore`, `DirectoryIndex`) and dummy implementations |
+| `storage` | Storage trait abstractions (`MetadataStore`, `DataStore`, `DirectoryIndex`, `DeltaStore`) and implementations (memory, RocksDB) |
 | `server` | Server-side POSIX logic — `MetadataServer<M, D, I>` implements `PosixOps` by composing the three storage traits |
 | `client` | FUSE mount layer (`FuseClient`) and client-side `ClientOps` adapter |
 | `rpc` | gRPC transport layer — protobuf definitions (`fuse.proto`), TLS, Bearer Token auth |
@@ -239,28 +268,40 @@ Transport security: TLS (via `tokio-rustls`) + Bearer Token authentication (cons
 
 ### 2.4 Storage Module Decoupling
 
-The server's `MetadataServer<M, D, I>` is generic over three independently replaceable storage backends:
+The server's `MetadataServer<M, D, I, DS>` is generic over four independently replaceable storage backends:
 
 ```rust
-pub struct MetadataServer<M, D, I>
+pub struct MetadataServer<M, D, I, DS>
 where
     M: MetadataStore,   // inode attribute CRUD
     D: DataStore,       // file content I/O
     I: DirectoryIndex,  // directory structure
+    DS: DeltaStore,     // append-only delta entries for inode attributes
 {
     pub metadata: Arc<M>,
     pub data: Arc<D>,
     pub index: Arc<I>,
+    pub delta_store: Arc<DS>,
+    /// LRU cache of folded inode values.
+    pub cache: Arc<InodeFoldedCache>,
+    /// Background compaction worker (shared with the MetadataServer).
+    pub compaction: Arc<DeltaCompactionWorker<M, DS>>,
+    allocator: InodeAllocator,
+    /// Per-directory lock to serialize mutations under the same parent.
+    dir_locks: Mutex<HashMap<Inode, Arc<Mutex<()>>>>,
 }
 ```
 
 **Key decoupling principle:** `MetadataStore` and `DataStore` share **no direct dependency**. They are linked solely by **inode ID** — the metadata engine stores inode attributes keyed by inode ID, and the data engine reads/writes content keyed by the same inode ID. Neither engine needs to know the other's implementation.
+
+The `DeltaStore` is an **append-only** log of incremental attribute modifications (nlink changes, timestamp updates). On the write path, directory operations append deltas instead of doing a full read-modify-write of the parent inode. On the read path, deltas are folded on top of the base inode value to produce the current state (see §5.5 for details).
 
 | Trait | Current Implementation | Future Alternatives |
 |-------|----------------------|-------------------|
 | `MetadataStore` | RocksDB | SQLite, TiKV, etcd |
 | `DataStore` | `RawDiskDataStore` (local raw file) | S3, Ceph RADOS, MinIO |
 | `DirectoryIndex` | RocksDB (same instance as MetadataStore) | In-memory trie, Redis |
+| `DeltaStore` | RocksDB (`delta_entries` CF) / `MemoryDeltaStore` | Redis Streams, Kafka |
 
 ### 2.5 Deployment Modes
 
@@ -343,13 +384,15 @@ All metadata is stored in a single RocksDB instance with three Column Families (
 
 | CF Name | Purpose | Key Format | Value Format |
 |---------|---------|------------|--------------|
-| `inodes` | Inode attributes | `inode_id` (8 bytes, big-endian u64) | Serialized `InodeValue` (see §3.3) |
-| `dir_entries` | Directory children | `parent_inode` (8 BE bytes) + `child_name` (variable, UTF-8) | `child_inode` (8 BE bytes) + `child_kind` (4 BE bytes) |
+| `inodes` | Inode attributes (base values) | `[b'I'][inode_id: u64 BE]` (9 bytes) | Serialized `InodeValue` (see §3.3) |
+| `dir_entries` | Directory children | `[b'D'][parent_inode: u64 BE][child_name: UTF-8]` (variable) | `child_inode` (8 BE bytes) + `child_kind` (4 BE bytes) |
+| `delta_entries` | Append-only inode attribute deltas | `[b'X'][inode: u64 BE][seq: u64 BE]` (17 bytes) | Serialized `DeltaOp` (5–9 bytes, see §5.5) |
 | `system` | System-level counters | ASCII key string (e.g. `b"next_inode"`) | Value depends on key (e.g. 8 BE bytes for counters) |
 
-**Why three CFs instead of one?**
+**Why four CFs instead of one?**
 - `inodes` CF has point-lookup access pattern (get by inode) → optimize with bloom filter.
 - `dir_entries` CF has prefix-scan access pattern (list children of a parent) → optimize with prefix extractor.
+- `delta_entries` CF has append-heavy, prefix-scan access pattern (scan all deltas for an inode) → optimize with prefix extractor on first 9 bytes (`[b'X'][inode]`). Separated from `inodes` to avoid write amplification during RocksDB compaction of hot base values.
 - `system` CF is rarely accessed, very small → separate compaction avoids interference.
 
 ### 3.3 Key Encoding Rules
@@ -415,6 +458,65 @@ Total: 12 bytes, fixed length.
 |---|---|---|
 | `b"next_inode"` | `u64` (8 BE bytes) | Next inode ID to allocate |
 | `b"fs_stats"` | Serialized `StatFs` | Cached filesystem statistics |
+
+#### `delta_entries` CF — Key
+
+```
+┌───────────────────┬──────────────────────┬──────────────────────┐
+│ prefix: u8 = 'X'  │  inode: u64 (BE)     │  seq: u64 (BE)       │
+│       1 byte       │       8 bytes        │       8 bytes        │
+└───────────────────┴──────────────────────┴──────────────────────┘
+```
+
+Total: 17 bytes, fixed length. The prefix byte `b'X'` distinguishes delta keys from inode (`b'I'`) and dir-entry (`b'D'`) keys. Keys with the same inode are ordered by `seq` (big-endian guarantees lexicographic = numerical order).
+
+Encoding (Rust):
+```rust
+const DELTA_KEY_PREFIX: u8 = b'X';
+
+fn encode_delta_key(inode: Inode, seq: u64) -> [u8; 17] {
+    let mut key = [0u8; 17];
+    key[0] = DELTA_KEY_PREFIX;
+    key[1..9].copy_from_slice(&inode.to_be_bytes());
+    key[9..17].copy_from_slice(&seq.to_be_bytes());
+    key
+}
+
+fn decode_delta_key(key: &[u8]) -> FsResult<(Inode, u64)> {
+    // key[0] == b'X', key[1..9] = inode, key[9..17] = seq
+    let inode = u64::from_be_bytes(key[1..9].try_into().unwrap());
+    let seq   = u64::from_be_bytes(key[9..17].try_into().unwrap());
+    Ok((inode, seq))
+}
+
+/// Prefix for scanning all deltas of a given inode: [b'X'][inode: u64 BE] (9 bytes).
+fn delta_prefix(inode: Inode) -> [u8; 9] {
+    let mut prefix = [0u8; 9];
+    prefix[0] = DELTA_KEY_PREFIX;
+    prefix[1..9].copy_from_slice(&inode.to_be_bytes());
+    prefix
+}
+```
+
+#### `delta_entries` CF — Value
+
+Each value is a single serialized `DeltaOp`: a 1-byte op-type tag followed by a fixed-size payload.
+
+```
+┌──────────────────┬──────────────────────────────┐
+│ op_type: u8      │  payload (BE)                │
+│    1 byte        │  4 bytes (i32) or 8 bytes    │
+└──────────────────┴──────────────────────────────┘
+```
+
+| Op Type Tag | Payload | Total Size | Meaning |
+|---|---|---|---|
+| `1` (`OP_INCREMENT_NLINK`) | `i32` (4 BE bytes) | 5 bytes | Add signed delta to `nlink` |
+| `2` (`OP_SET_MTIME`) | `u64` (8 BE bytes) | 9 bytes | Set `mtime` (fold takes max) |
+| `3` (`OP_SET_CTIME`) | `u64` (8 BE bytes) | 9 bytes | Set `ctime` (fold takes max) |
+| `4` (`OP_SET_ATIME`) | `u64` (8 BE bytes) | 9 bytes | Set `atime` (fold takes max) |
+
+**Design rationale:** Keeping each delta as a small, self-contained blob (5–9 bytes) makes append cheap and sequential scan efficient. The op-type tag enables forward-compatible extension — new delta types can be added without breaking existing entries.
 
 ### 3.4 Value Serialization: `InodeValue`
 
@@ -486,6 +588,11 @@ impl InodeValue {
   dir_entries CF:
     Key:   [ parent_inode u64 BE | child_name UTF-8 ]  →  Value: [ child_inode u64 BE | kind u32 BE ]
             8 bytes                1-255 bytes                     8 bytes              4 bytes
+
+  delta_entries CF:
+    Key:   [ b'X' | inode u64 BE | seq u64 BE ]  →  Value: [ op_type u8 | payload (4 or 8 bytes) ]
+             1B      8 bytes       8 bytes                    1B           variable
+             Total key: 17 bytes                              Total value: 5 bytes (nlink) or 9 bytes (timestamps)
 
   system CF:
     Key:   [ ASCII string ]  →  Value: [ varies ]
@@ -899,6 +1006,269 @@ where
 | `inodes` | 10 bits/key | None (point lookups only) | 4 KiB |
 | `dir_entries` | 10 bits/key | `FixedPrefix(8)` | 4 KiB |
 | `system` | None | None | 4 KiB |
+| `delta_entries` | 10 bits/key | `FixedPrefix(9)` | 4 KiB |
+
+### 5.5 Delta Entries & Append-Only Write Path
+
+#### 5.5.1 Motivation
+
+Traditional read-modify-write for parent inode attributes (nlink, mtime, ctime) on every `create`/`mkdir`/`unlink`/`rmdir`/`rename` creates a **write amplification bottleneck** on hot directories. A single `mkdir` requires reading the parent inode, deserializing, modifying nlink/mtime/ctime, re-serializing, and writing back — all while holding a lock.
+
+The **delta entries** mechanism (inspired by the Mantle paper's approach to metadata journaling) replaces this pattern with an **append-only** write path: mutations are recorded as small, fixed-size delta operations and folded on read or during background compaction.
+
+#### 5.5.2 Architecture Overview
+
+```
+  Write Path (create / mkdir / unlink / rmdir / rename):
+
+  ┌─────────────┐     append      ┌──────────────────┐
+  │ MetadataServer │ ────────────► │  DeltaStore       │
+  │ append_parent  │               │  (delta_entries CF)│
+  │ _deltas()      │               └──────────────────┘
+  └───────┬───────┘
+          │  apply_deltas()
+          ▼
+  ┌──────────────────┐
+  │ InodeFoldedCache  │  (LRU, in-memory)
+  │ keeps hot inodes  │
+  │ up-to-date        │
+  └──────────────────┘
+          │  mark_dirty()
+          ▼
+  ┌──────────────────────────┐
+  │ DeltaCompactionWorker    │  (background thread)
+  │ periodically folds dirty │
+  │ inodes back to base      │
+  └──────────────────────────┘
+
+
+  Read Path (getattr / lookup):
+
+  ┌─────────────┐   cache hit?   ┌──────────────────┐
+  │ load_inode() │ ─────────────► │ InodeFoldedCache  │ → return cached value
+  └───────┬──────┘   miss         └──────────────────┘
+          │
+          ├── read base from MetadataStore (inodes CF)
+          ├── scan deltas from DeltaStore (delta_entries CF)
+          ├── fold_deltas(base, deltas)
+          └── populate cache, return folded value
+```
+
+#### 5.5.3 DeltaOp Enum (`server/src/delta.rs`)
+
+A `DeltaOp` represents an incremental modification to an inode's attributes. Instead of modifying the base inode directly, callers append deltas and the system folds them lazily.
+
+```rust
+pub enum DeltaOp {
+    /// Increment (or decrement) `nlink` by the given signed amount.
+    IncrementNlink(i32),
+    /// Set `mtime` to the given timestamp (fold takes max).
+    SetMtime(u64),
+    /// Set `ctime` to the given timestamp (fold takes max).
+    SetCtime(u64),
+    /// Set `atime` to the given timestamp (fold takes max).
+    SetAtime(u64),
+}
+```
+
+**Binary encoding:** Each `DeltaOp` serializes to a compact binary blob:
+
+| Variant | Format | Size |
+|---|---|---|
+| `IncrementNlink(i32)` | `[0x01][i32 BE]` | 5 bytes |
+| `SetMtime(u64)` | `[0x02][u64 BE]` | 9 bytes |
+| `SetCtime(u64)` | `[0x03][u64 BE]` | 9 bytes |
+| `SetAtime(u64)` | `[0x04][u64 BE]` | 9 bytes |
+
+#### 5.5.4 Fold Semantics
+
+The `fold_deltas(base, deltas)` function applies a sequence of deltas to a base `InodeValue` **in place**:
+
+- `IncrementNlink(n)` → `base.nlink = max(0, base.nlink as i64 + n as i64) as u32` (clamped to avoid underflow)
+- `SetMtime(t)` → `base.mtime = max(base.mtime, t)` (monotonic — latest timestamp wins)
+- `SetCtime(t)` → `base.ctime = max(base.ctime, t)`
+- `SetAtime(t)` → `base.atime = max(base.atime, t)`
+
+**Key property:** Fold is **commutative for timestamps** (max is order-independent) and **associative for nlink** (integer addition). This means concurrent appends produce correct results regardless of ordering, and partial folds can be resumed.
+
+#### 5.5.5 DeltaStore Trait (`storage/src/lib.rs`)
+
+The `DeltaStore` trait abstracts the delta persistence layer at the raw-byte level:
+
+```rust
+pub trait DeltaStore: Send + Sync {
+    /// Atomically append one or more serialized delta values for an inode.
+    /// Returns the sequence numbers assigned to each delta.
+    fn append_deltas(&self, inode: Inode, values: &[Vec<u8>]) -> FsResult<Vec<u64>>;
+
+    /// Scan all pending (un-compacted) deltas for an inode,
+    /// returning them in sequence-number order as raw bytes.
+    fn scan_deltas(&self, inode: Inode) -> FsResult<Vec<Vec<u8>>>;
+
+    /// Delete all deltas for an inode (called after compaction).
+    fn clear_deltas(&self, inode: Inode) -> FsResult<()>;
+}
+```
+
+**Implementations:**
+
+| Implementation | Storage | Use Case |
+|---|---|---|
+| `MemoryDeltaStore` | In-memory `BTreeMap<(Inode, u64), Vec<u8>>` | Unit tests, demo mode |
+| `RocksDeltaStore` | RocksDB `delta_entries` CF | Production, persistent storage |
+
+Each implementation maintains a per-inode monotonic sequence counter (`AtomicU64`) to ensure deltas are ordered within each inode.
+
+#### 5.5.6 InodeFoldedCache (`server/src/cache.rs`)
+
+An LRU cache that stores the **folded** (base + all deltas applied) `InodeValue` for recently accessed inodes.
+
+```rust
+pub struct InodeFoldedCache {
+    inner: Mutex<CacheInner>,  // thread-safe
+}
+```
+
+**Operations:**
+
+| Method | Description |
+|---|---|
+| `get(inode)` | Lookup + promote to MRU. Returns `None` on miss. |
+| `put(inode, value)` | Insert/overwrite. Evicts LRU entry if at capacity. |
+| `apply_delta(inode, delta)` | Update cached value in-place (no-op on miss). |
+| `apply_deltas(inode, deltas)` | Batch in-place update (no-op on miss). |
+| `invalidate(inode)` | Remove entry (called after compaction). |
+
+**Why write-through on the write path?** When `append_parent_deltas` is called, the delta is persisted to the `DeltaStore` **and** applied to the cache in the same call. This means subsequent `getattr` calls hit the cache directly without scanning deltas, keeping the hot path at O(1).
+
+#### 5.5.7 Write Path: `append_parent_deltas`
+
+The core helper that replaces read-modify-write on the parent inode:
+
+```rust
+fn append_parent_deltas(&self, parent: Inode, deltas: &[DeltaOp]) -> FsResult<()> {
+    // 1. Serialize and persist to DeltaStore.
+    let serialized: Vec<Vec<u8>> = deltas.iter().map(|d| d.serialize()).collect();
+    self.delta_store.append_deltas(parent, &serialized)?;
+
+    // 2. Update cache in-place (write-through).
+    self.cache.apply_deltas(parent, deltas);
+
+    // 3. Mark inode as dirty for background compaction.
+    self.compaction.mark_dirty(parent);
+
+    Ok(())
+}
+```
+
+**Operations that use this path:**
+
+| Operation | Deltas Appended to Parent |
+|---|---|
+| `create` | `SetMtime(now)`, `SetCtime(now)` |
+| `mkdir` | `IncrementNlink(1)`, `SetMtime(now)`, `SetCtime(now)` |
+| `unlink` | `SetMtime(now)`, `SetCtime(now)` |
+| `rmdir` | `IncrementNlink(-1)`, `SetMtime(now)`, `SetCtime(now)` |
+| `rename` | `SetMtime(now)`, `SetCtime(now)` (per affected parent) |
+
+#### 5.5.8 Read Path: `load_inode`
+
+The unified read path with cache-first, delta-fold-on-miss strategy:
+
+```rust
+fn load_inode(&self, inode: Inode) -> FsResult<InodeValue> {
+    // 1. Cache hit → return immediately.
+    if let Some(cached) = self.cache.get(inode) {
+        return Ok(cached);
+    }
+
+    // 2. Read base from MetadataStore.
+    let key = encode_inode_key(inode);
+    let mut iv = match self.metadata.get(&key)? {
+        Some(bytes) => InodeValue::deserialize(&bytes)?,
+        None => return Err(FsError::NotFound),
+    };
+
+    // 3. Fold pending deltas.
+    let raw_deltas = self.delta_store.scan_deltas(inode)?;
+    if !raw_deltas.is_empty() {
+        let ops: Vec<DeltaOp> = raw_deltas
+            .iter()
+            .filter_map(|bytes| DeltaOp::deserialize(bytes).ok())
+            .collect();
+        fold_deltas(&mut iv, &ops);
+    }
+
+    // 4. Populate cache for subsequent reads.
+    self.cache.put(inode, iv.clone());
+
+    Ok(iv)
+}
+```
+
+**Performance characteristics:**
+
+| Scenario | Cost |
+|---|---|
+| Cache hit | O(1) — single `HashMap` lookup + LRU promotion |
+| Cache miss, no deltas | 1 MetadataStore read + 1 DeltaStore prefix scan (empty) |
+| Cache miss, N deltas | 1 MetadataStore read + 1 DeltaStore prefix scan + O(N) fold |
+| After compaction | Cache invalidated → next read loads fresh base (0 deltas) |
+
+#### 5.5.9 Background Compaction Worker (`server/src/compaction.rs`)
+
+The `DeltaCompactionWorker` runs in a background thread and periodically merges accumulated deltas back into the base inode value, keeping read amplification bounded.
+
+```rust
+pub struct DeltaCompactionWorker<M, DS>
+where
+    M: MetadataStore,
+    DS: DeltaStore,
+{
+    metadata: Arc<M>,
+    delta_store: Arc<DS>,
+    cache: Arc<InodeFoldedCache>,
+    config: CompactionConfig,
+    dirty: Mutex<HashSet<Inode>>,   // inodes with pending deltas
+    running: AtomicBool,            // stop flag
+}
+```
+
+**Configuration:**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `interval_ms` | 5,000 ms | How often the worker scans for dirty inodes |
+| `delta_threshold` | 32 | Minimum number of pending deltas before compaction triggers |
+
+**Compaction algorithm for a single inode:**
+
+```
+  compact_inode(inode):
+    1. scan_deltas(inode) → raw_deltas[]
+    2. if len(raw_deltas) < threshold → skip (re-mark as dirty)
+    3. read base from MetadataStore
+    4. fold_deltas(base, raw_deltas)
+    5. write updated base to MetadataStore
+    6. clear_deltas(inode) in DeltaStore
+    7. invalidate(inode) in cache
+```
+
+**Lifecycle:**
+
+| Method | Description |
+|---|---|
+| `mark_dirty(inode)` | Called by write path after appending deltas |
+| `compact_dirty()` | One round: swap out dirty set, compact eligible inodes |
+| `flush_all()` | Force-compact all dirty inodes regardless of threshold (shutdown / tests) |
+| `run_loop()` | Blocking loop: `sleep(interval)` → `compact_dirty()` → repeat until `stop()` |
+| `stop()` | Set `running = false`; loop exits after current sleep + final `flush_all()` |
+
+**Crash safety:** If the process crashes between steps 5 and 6 (base written but deltas not cleared), the next `load_inode` will re-fold the same deltas on top of the already-updated base. Because `SetMtime`/`SetCtime` use `max()` semantics and `IncrementNlink` will double-count, the compaction worker should ideally use a WriteBatch to atomically update the base and delete deltas. In the current demo implementation, this is acceptable because:
+- Timestamps use `max()` → re-applying is harmless.
+- Nlink double-count is rare (only on crash) and detectable via `fsck`-style consistency check.
+
+**Future improvement:** Wrap steps 5–6 in a single `WriteBatch` across `inodes` and `delta_entries` CFs (requires both CFs in the same RocksDB instance).
 
 ---
 
@@ -945,18 +1315,16 @@ fn lookup(&self, parent: Inode, name: &str) -> FsResult<FileAttr> {
     let child_inode = self.index.resolve_path(parent, name)?
         .ok_or(FsError::NotFound)?;  // ENOENT if not found
 
-    // Step 2: Fetch child's FileAttr from MetadataStore
-    let key = encode_inode_key(child_inode);  // inodes CF
-    let value = self.metadata.get(&key)?
-        .ok_or(FsError::NotFound)?;  // should not happen if index is consistent
+    // Step 2: Load child inode via delta-aware read path (see §5.5.8)
+    //   load_inode checks the InodeFoldedCache first, then falls back to
+    //   MetadataStore base + DeltaStore fold.
+    let iv = self.load_inode(child_inode)?;
 
-    // Step 3: Deserialize and return
-    let inode_val = InodeValue::deserialize(&value)?;
-    Ok(inode_val.to_file_attr())
+    Ok(iv.to_attr())
 }
 ```
 
-**CF Access:** `dir_entries` (read) → `inodes` (read). Two point lookups, no writes.
+**CF Access:** `dir_entries` (read) → `inodes` (read, on cache miss) → `delta_entries` (prefix scan, on cache miss). On cache hit the cost is a single in-memory `HashMap` lookup.
 
 **Error Mapping:**
 | Condition | Error |
@@ -972,7 +1340,7 @@ fn lookup(&self, parent: Inode, name: &str) -> FsResult<FileAttr> {
 fn getattr(&self, inode: Inode) -> FsResult<FileAttr>;
 ```
 
-**Description:** Retrieve the attributes (metadata) of an inode by its ID.
+**Description:** Retrieve the attributes (metadata) of an inode by its ID. This is one of the most frequently called operations — called by `stat()`, `ls -l`, and internally by many other operations.
 
 **Preconditions:**
 - `inode` must be a valid allocated inode.
@@ -981,15 +1349,19 @@ fn getattr(&self, inode: Inode) -> FsResult<FileAttr>;
 
 ```rust
 fn getattr(&self, inode: Inode) -> FsResult<FileAttr> {
-    let key = encode_inode_key(inode);
-    let value = self.metadata.get(&key)?
-        .ok_or(FsError::NotFound)?;
-    let inode_val = InodeValue::deserialize(&value)?;
-    Ok(inode_val.to_file_attr())
+    // Delegates to the delta-aware load_inode (see §5.5.8):
+    //   1. Check InodeFoldedCache → return on hit
+    //   2. Read base from MetadataStore (inodes CF)
+    //   3. Scan pending deltas from DeltaStore (delta_entries CF)
+    //   4. Fold deltas into base → populate cache → return
+    let iv = self.load_inode(inode)?;
+    Ok(iv.to_attr())
 }
 ```
 
-**CF Access:** `inodes` (read). Single point lookup.
+**CF Access:** On cache hit: none (in-memory). On cache miss: `inodes` (read) → `delta_entries` (prefix scan).
+
+**Performance:** With the `InodeFoldedCache` (default capacity 4096), hot inodes are served entirely from memory. Background compaction (§5.5.9) keeps the delta chain short, so cache-miss fold cost stays bounded.
 
 **Error Mapping:**
 | Condition | Error |
@@ -1148,48 +1520,45 @@ fn create(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr>;
 
 ```rust
 fn create(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr> {
-    // Step 1: Verify parent is a directory and check permissions
-    let parent_attr = self.getattr(parent)?;
-    check_write_permission(&parent_attr)?;
+    let _guard = self.lock_dir(parent);
 
-    // Step 2: Check name does not already exist
+    // Step 1: Check name does not already exist
     if self.index.resolve_path(parent, name)?.is_some() {
-        return Err(FsError::Other("file exists".into()));  // EEXIST
+        return Err(FsError::AlreadyExists);  // EEXIST
     }
 
-    // Step 3: Allocate new inode
+    // Step 2: Allocate new inode
     let new_inode = self.allocator.alloc();
+    let ts = now_secs();
 
-    // Step 4: Construct FileAttr for new file
-    let now = now();
-    let new_attr = FileAttr {
+    // Step 3: Construct InodeValue for new file
+    let iv = InodeValue {
+        version: 1,
         inode: new_inode,
         size: 0,
-        mode: S_IFREG | (mode & 0o7777),  // regular file + permission bits
-        uid: caller_uid(), gid: caller_gid(),
-        atime: now, mtime: now, ctime: now,
+        mode: S_IFREG | (mode & 0o7777),
+        nlink: 1,
+        uid: 0, gid: 0,
+        atime: ts, mtime: ts, ctime: ts,
     };
-    let inode_val = InodeValue::from_file_attr(&new_attr, 1); // nlink=1
 
-    // Step 5: Atomic WriteBatch (see §7 for details)
-    //   a. Put new inode to inodes CF
-    //   b. Insert dir entry to dir_entries CF
-    //   c. Update parent mtime/ctime in inodes CF
-    //   d. Persist inode allocator counter to system CF
-    let mut batch = WriteBatch::default();
-    batch.put_cf(cf_inodes, encode_inode_key(new_inode), inode_val.serialize());
-    batch.put_cf(cf_dir_entries, encode_dir_key(parent, name), encode_dir_value(new_inode, S_IFREG));
-    batch.put_cf(cf_inodes, encode_inode_key(parent), updated_parent_attr.serialize());
-    batch.put_cf(cf_system, b"next_inode", self.allocator.next.load().to_be_bytes());
-    db.write(batch)?;
+    // Step 4: Persist new inode + dir entry
+    self.save_inode(new_inode, &iv)?;          // inodes CF
+    self.index.insert_child(parent, name, new_inode, iv.to_attr())?;  // dir_entries CF
 
-    Ok(new_attr)
+    // Step 5: Update parent times via **delta append** (no read-modify-write)
+    self.append_parent_deltas(
+        parent,
+        &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
+    )?;
+
+    Ok(iv.to_attr())
 }
 ```
 
-**CF Access:** `inodes` (read parent + write new + write parent) → `dir_entries` (read check + write) → `system` (write counter).
+**CF Access:** `dir_entries` (read check + write) → `inodes` (write new child) → `delta_entries` (append parent deltas).
 
-**Atomicity:** All writes bundled in a single `WriteBatch`. If the write fails, no partial state is created.
+**Delta advantage:** The parent inode is **not read** during `create`. Instead, `SetMtime` and `SetCtime` deltas are appended to the delta store, and the in-memory folded cache is updated. This eliminates the read-modify-write contention on the parent under high concurrency.
 
 **Error Mapping:**
 | Condition | Error |
@@ -1218,40 +1587,49 @@ fn mkdir(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr>;
 
 ```rust
 fn mkdir(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr> {
-    // Steps 1-2: Same as create (verify parent, check name doesn't exist)
+    let _guard = self.lock_dir(parent);
 
-    // Step 3: Allocate new inode
+    // Step 1: Check name does not already exist
+    if self.index.resolve_path(parent, name)?.is_some() {
+        return Err(FsError::AlreadyExists);  // EEXIST
+    }
+
+    // Step 2: Allocate new inode
     let new_inode = self.allocator.alloc();
+    let ts = now_secs();
 
-    // Step 4: Construct FileAttr for new directory
-    let new_attr = FileAttr {
+    // Step 3: Construct InodeValue for new directory
+    let iv = InodeValue {
+        version: 1,
         inode: new_inode,
         size: 0,
         mode: S_IFDIR | (mode & 0o7777),
-        uid: caller_uid(), gid: caller_gid(),
-        atime: now, mtime: now, ctime: now,
+        nlink: 2,  // "." and parent entry
+        uid: 0, gid: 0,
+        atime: ts, mtime: ts, ctime: ts,
     };
-    let inode_val = InodeValue::from_file_attr(&new_attr, 2);  // nlink=2
 
-    // Step 5: Update parent: nlink += 1, mtime = now, ctime = now
-    let mut parent_val = load_inode_value(parent)?;
-    parent_val.nlink += 1;
-    parent_val.mtime = now;
-    parent_val.ctime = now;
+    // Step 4: Persist new inode + dir entry
+    self.save_inode(new_inode, &iv)?;          // inodes CF
+    self.index.insert_child(parent, name, new_inode, iv.to_attr())?;  // dir_entries CF
 
-    // Step 6: Atomic WriteBatch
-    let mut batch = WriteBatch::default();
-    batch.put_cf(cf_inodes, encode_inode_key(new_inode), inode_val.serialize());
-    batch.put_cf(cf_dir_entries, encode_dir_key(parent, name), encode_dir_value(new_inode, S_IFDIR));
-    batch.put_cf(cf_inodes, encode_inode_key(parent), parent_val.serialize());
-    batch.put_cf(cf_system, b"next_inode", allocator_next_bytes);
-    db.write(batch)?;
+    // Step 5: Parent nlink +1 (for "..") + update times via **delta append**
+    self.append_parent_deltas(
+        parent,
+        &[
+            DeltaOp::IncrementNlink(1),
+            DeltaOp::SetMtime(ts),
+            DeltaOp::SetCtime(ts),
+        ],
+    )?;
 
-    Ok(new_attr)
+    Ok(iv.to_attr())
 }
 ```
 
-**CF Access:** Same as `create`, plus parent nlink update.
+**CF Access:** `dir_entries` (read check + write) → `inodes` (write new child) → `delta_entries` (append parent deltas: nlink+1, mtime, ctime).
+
+**Delta advantage:** The parent inode's nlink increment is expressed as `IncrementNlink(1)` delta instead of a read-modify-write. Under a burst of concurrent `mkdir` calls, each thread appends its own delta independently — no contention on the parent's base inode value.
 
 ---
 
@@ -1267,51 +1645,50 @@ fn unlink(&self, parent: Inode, name: &str) -> FsResult<()>;
 
 ```rust
 fn unlink(&self, parent: Inode, name: &str) -> FsResult<()> {
+    let _guard = self.lock_dir(parent);
+
     // Step 1: Resolve the target inode
     let child_inode = self.index.resolve_path(parent, name)?
         .ok_or(FsError::NotFound)?;
 
     // Step 2: Verify target is NOT a directory (use rmdir for directories)
-    let child_attr = self.getattr(child_inode)?;
-    if child_attr.mode & S_IFDIR != 0 {
-        return Err(FsError::InvalidInput("is a directory".into()));  // EISDIR
+    let mut child_iv = self.load_inode(child_inode)?;
+    if Self::is_dir(child_iv.mode) {
+        return Err(FsError::IsADirectory);  // EISDIR
     }
 
-    // Step 3: Load and decrement nlink
-    let mut child_val = load_inode_value(child_inode)?;
-    child_val.nlink -= 1;
-    child_val.ctime = now();
+    // Step 3: Remove dir entry
+    self.index.remove_child(parent, name)?;
 
-    // Step 4: Update parent directory mtime/ctime
-    let mut parent_val = load_inode_value(parent)?;
-    parent_val.mtime = now();
-    parent_val.ctime = now();
+    // Step 4: Decrement nlink on child
+    child_iv.nlink = child_iv.nlink.saturating_sub(1);
 
-    // Step 5: Atomic WriteBatch
-    let mut batch = WriteBatch::default();
-    batch.delete_cf(cf_dir_entries, encode_dir_key(parent, name));
-    batch.put_cf(cf_inodes, encode_inode_key(parent), parent_val.serialize());
-
-    if child_val.nlink == 0 {
-        // No more references — delete inode and content
-        batch.delete_cf(cf_inodes, encode_inode_key(child_inode));
-        // Data cleanup: either inline or deferred
-        // For simplicity, inline cleanup:
-        //   DataStore content becomes unreachable (inode slot can be reused)
-        //   In demo mode with no inode reclamation, the data region is simply abandoned
+    if child_iv.nlink == 0 {
+        // No more references — delete inode
+        self.delete_inode(child_inode)?;
     } else {
-        // Still has references — keep inode with updated nlink
-        batch.put_cf(cf_inodes, encode_inode_key(child_inode), child_val.serialize());
+        // Still has references — update ctime and save
+        let ts = now_secs();
+        child_iv.ctime = ts;
+        self.save_inode(child_inode, &child_iv)?;
     }
 
-    db.write(batch)?;
+    // Step 5: Update parent times via **delta append** (no read-modify-write)
+    let ts = now_secs();
+    self.append_parent_deltas(
+        parent,
+        &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
+    )?;
+
     Ok(())
 }
 ```
 
 **Deferred deletion (open-file case):** If the file is currently open (tracked by an in-memory `HashMap<Inode, u32>` of open handle counts), the actual inode + data deletion is deferred until the last `flush`/`close`. The dir entry is removed immediately (POSIX: unlinked files remain accessible via open file descriptors).
 
-**CF Access:** `dir_entries` (read + delete) → `inodes` (read child + read parent + write both).
+**CF Access:** `dir_entries` (read + delete) → `inodes` (read child + write/delete child) → `delta_entries` (append parent deltas: mtime, ctime).
+
+**Delta advantage:** The parent inode update is a pure delta append — no read of the parent's base value is needed.
 
 ---
 
@@ -1327,39 +1704,46 @@ fn rmdir(&self, parent: Inode, name: &str) -> FsResult<()>;
 
 ```rust
 fn rmdir(&self, parent: Inode, name: &str) -> FsResult<()> {
+    let _guard = self.lock_dir(parent);
+
     // Step 1: Resolve the target
     let child_inode = self.index.resolve_path(parent, name)?
         .ok_or(FsError::NotFound)?;
 
     // Step 2: Verify target IS a directory
-    let child_attr = self.getattr(child_inode)?;
-    if child_attr.mode & S_IFDIR == 0 {
-        return Err(FsError::InvalidInput("not a directory".into()));  // ENOTDIR
+    let child_iv = self.load_inode(child_inode)?;
+    if !Self::is_dir(child_iv.mode) {
+        return Err(FsError::NotADirectory);  // ENOTDIR
     }
 
     // Step 3: Check directory is empty
-    let children = self.index.list_dir(child_inode)?;
-    // list_dir returns at least "." and ".." — if len > 2, dir is not empty
-    if children.len() > 2 {
-        return Err(FsError::Other("directory not empty".into()));  // ENOTEMPTY
+    let entries = self.index.list_dir(child_inode)?;
+    if !entries.is_empty() {
+        return Err(FsError::DirectoryNotEmpty);  // ENOTEMPTY
     }
 
-    // Step 4: Update parent nlink -= 1, mtime, ctime
-    let mut parent_val = load_inode_value(parent)?;
-    parent_val.nlink -= 1;
-    parent_val.mtime = now();
-    parent_val.ctime = now();
+    // Step 4: Remove dir entry and delete child inode
+    self.index.remove_child(parent, name)?;
+    self.delete_inode(child_inode)?;
 
-    // Step 5: Atomic WriteBatch
-    let mut batch = WriteBatch::default();
-    batch.delete_cf(cf_dir_entries, encode_dir_key(parent, name));
-    batch.delete_cf(cf_inodes, encode_inode_key(child_inode));
-    batch.put_cf(cf_inodes, encode_inode_key(parent), parent_val.serialize());
-    db.write(batch)?;
+    // Step 5: Parent nlink -1 + update times via **delta append**
+    let ts = now_secs();
+    self.append_parent_deltas(
+        parent,
+        &[
+            DeltaOp::IncrementNlink(-1),
+            DeltaOp::SetMtime(ts),
+            DeltaOp::SetCtime(ts),
+        ],
+    )?;
 
     Ok(())
 }
 ```
+
+**CF Access:** `dir_entries` (read + delete) → `inodes` (read child + delete child) → `delta_entries` (append parent deltas: nlink-1, mtime, ctime).
+
+**Delta advantage:** The parent's nlink decrement is expressed as `IncrementNlink(-1)` delta — no read of the parent base value is needed.
 
 **Error Mapping:**
 | Condition | Error |
@@ -1386,114 +1770,116 @@ fn rename(&self, parent: Inode, name: &str, new_parent: Inode, new_name: &str) -
 
 ```rust
 fn rename(&self, parent: Inode, name: &str, new_parent: Inode, new_name: &str) -> FsResult<()> {
-    // Step 1: Resolve source
+    // Step 1: Acquire locks in inode order to prevent deadlock
+    let (_guard1, _guard2) = if parent == new_parent {
+        (self.lock_dir(parent), None)
+    } else {
+        let (first, second) = if parent < new_parent {
+            (parent, new_parent)
+        } else {
+            (new_parent, parent)
+        };
+        (self.lock_dir(first), Some(self.lock_dir(second)))
+    };
+
+    // Step 2: Resolve source
     let src_inode = self.index.resolve_path(parent, name)?
         .ok_or(FsError::NotFound)?;
-    let src_val = load_inode_value(src_inode)?;
-    let src_is_dir = src_val.mode & S_IFDIR != 0;
-
-    // Step 2: Check if target already exists
-    let maybe_target = self.index.resolve_path(new_parent, new_name)?;
-
-    let mut batch = WriteBatch::default();
-    let now = now();
+    let src_iv = self.load_inode(src_inode)?;
+    let src_is_dir = Self::is_dir(src_iv.mode);
+    let ts = now_secs();
 
     // Step 3: Handle existing target (POSIX atomic replacement)
-    if let Some(target_inode) = maybe_target {
-        let target_val = load_inode_value(target_inode)?;
-        let target_is_dir = target_val.mode & S_IFDIR != 0;
+    if let Some(dst_inode) = self.index.resolve_path(new_parent, new_name)? {
+        let dst_iv = self.load_inode(dst_inode)?;
+        let dst_is_dir = Self::is_dir(dst_iv.mode);
 
         // POSIX constraint: cannot replace dir with non-dir and vice versa
-        if src_is_dir && !target_is_dir {
-            return Err(FsError::InvalidInput("cannot replace file with directory".into()));
-            // ENOTDIR
+        if src_is_dir && !dst_is_dir {
+            return Err(FsError::NotADirectory);  // ENOTDIR
         }
-        if !src_is_dir && target_is_dir {
-            return Err(FsError::InvalidInput("cannot replace directory with file".into()));
-            // EISDIR
+        if !src_is_dir && dst_is_dir {
+            return Err(FsError::IsADirectory);   // EISDIR
         }
 
         // If target is a directory, it must be empty
-        if target_is_dir {
-            let children = self.index.list_dir(target_inode)?;
-            if children.len() > 2 {
-                return Err(FsError::Other("target directory not empty".into()));
-                // ENOTEMPTY
+        if dst_is_dir {
+            let entries = self.index.list_dir(dst_inode)?;
+            if !entries.is_empty() {
+                return Err(FsError::DirectoryNotEmpty);  // ENOTEMPTY
             }
+            self.delete_inode(dst_inode)?;
+            // Adjust new_parent nlink via delta
+            self.append_parent_deltas(new_parent, &[
+                DeltaOp::IncrementNlink(-1),
+                DeltaOp::SetMtime(ts),
+                DeltaOp::SetCtime(ts),
+            ])?;
+        } else {
+            self.delete_inode(dst_inode)?;
         }
 
-        // Delete the target inode
-        batch.delete_cf(cf_inodes, encode_inode_key(target_inode));
-
-        // If target was a directory, new_parent.nlink -= 1
-        if target_is_dir {
-            let mut np_val = load_inode_value(new_parent)?;
-            np_val.nlink -= 1;
-            np_val.mtime = now;
-            np_val.ctime = now;
-            batch.put_cf(cf_inodes, encode_inode_key(new_parent), np_val.serialize());
-        }
+        self.index.remove_child(new_parent, new_name)?;
     }
 
-    // Step 4: Remove old dir entry, insert new dir entry
-    batch.delete_cf(cf_dir_entries, encode_dir_key(parent, name));
-    batch.put_cf(cf_dir_entries,
-        encode_dir_key(new_parent, new_name),
-        encode_dir_value(src_inode, if src_is_dir { S_IFDIR } else { S_IFREG }));
+    // Step 4: Move the entry
+    self.index.remove_child(parent, name)?;
+    self.index.insert_child(new_parent, new_name, src_inode, src_iv.to_attr())?;
 
-    // Step 5: Handle cross-directory nlink updates (for directories only)
+    // Step 5: Handle nlink and time updates via **delta append**
     if src_is_dir && parent != new_parent {
-        // Old parent loses a ".." reference: nlink -= 1
-        let mut old_parent_val = load_inode_value(parent)?;
-        old_parent_val.nlink -= 1;
-        old_parent_val.mtime = now;
-        old_parent_val.ctime = now;
-        batch.put_cf(cf_inodes, encode_inode_key(parent), old_parent_val.serialize());
-
-        // New parent gains a ".." reference: nlink += 1
-        // (unless already updated in Step 3 for target replacement)
-        if maybe_target.is_none() || !load_inode_value(maybe_target.unwrap())?.is_dir() {
-            let mut new_parent_val = load_inode_value(new_parent)?;
-            new_parent_val.nlink += 1;
-            new_parent_val.mtime = now;
-            new_parent_val.ctime = now;
-            batch.put_cf(cf_inodes, encode_inode_key(new_parent), new_parent_val.serialize());
+        // Cross-directory dir rename:
+        // Old parent loses ".." reference → nlink -1
+        self.append_parent_deltas(parent, &[
+            DeltaOp::IncrementNlink(-1),
+            DeltaOp::SetMtime(ts),
+            DeltaOp::SetCtime(ts),
+        ])?;
+        // New parent gains ".." reference → nlink +1
+        self.append_parent_deltas(new_parent, &[
+            DeltaOp::IncrementNlink(1),
+            DeltaOp::SetMtime(ts),
+            DeltaOp::SetCtime(ts),
+        ])?;
+    } else {
+        // Same parent or non-dir cross-parent: just update times
+        self.append_parent_deltas(parent, &[
+            DeltaOp::SetMtime(ts),
+            DeltaOp::SetCtime(ts),
+        ])?;
+        if parent != new_parent {
+            self.append_parent_deltas(new_parent, &[
+                DeltaOp::SetMtime(ts),
+                DeltaOp::SetCtime(ts),
+            ])?;
         }
     }
 
-    // Step 6: Update parent mtime/ctime (same-directory rename)
-    if parent == new_parent {
-        let mut p_val = load_inode_value(parent)?;
-        p_val.mtime = now;
-        p_val.ctime = now;
-        batch.put_cf(cf_inodes, encode_inode_key(parent), p_val.serialize());
-    }
+    // Step 6: Update source inode ctime
+    let mut src_iv = self.load_inode(src_inode)?;
+    src_iv.ctime = ts;
+    self.save_inode(src_inode, &src_iv)?;
 
-    // Step 7: Update source inode ctime
-    let mut src_updated = src_val.clone();
-    src_updated.ctime = now;
-    batch.put_cf(cf_inodes, encode_inode_key(src_inode), src_updated.serialize());
-
-    // Step 8: Atomic commit
-    db.write(batch)?;
     Ok(())
 }
 ```
 
-**CF Access:** `dir_entries` (read src + read dst + delete src + put dst) → `inodes` (read/write multiple inodes).
+**CF Access:** `dir_entries` (read src + read dst + delete src + put dst) → `inodes` (read/write source + delete target) → `delta_entries` (append parent deltas for nlink/time updates).
 
-**WriteBatch Contents Summary (worst case — cross-dir rename replacing existing dir):**
+**Delta Operations Summary (worst case — cross-dir rename replacing existing dir):**
 
-| Operation | CF | Key |
+| Operation | Store | Target |
 |---|---|---|
-| Delete old entry | `dir_entries` | `(parent, name)` |
-| Insert new entry | `dir_entries` | `(new_parent, new_name)` |
-| Delete replaced target inode | `inodes` | `target_inode` |
-| Update source inode (ctime) | `inodes` | `src_inode` |
-| Update old parent (nlink-1, mtime) | `inodes` | `parent` |
-| Update new parent (nlink+1, mtime) | `inodes` | `new_parent` |
+| Delete old dir entry | `DirectoryIndex` | `(parent, name)` |
+| Insert new dir entry | `DirectoryIndex` | `(new_parent, new_name)` |
+| Delete replaced target inode | `MetadataStore` | `target_inode` |
+| Update source inode (ctime) | `MetadataStore` | `src_inode` |
+| `IncrementNlink(-1)` delta | `DeltaStore` | `new_parent` (target was dir) |
+| `IncrementNlink(-1)` delta | `DeltaStore` | `parent` (lost `..` ref) |
+| `IncrementNlink(+1)` delta | `DeltaStore` | `new_parent` (gained `..` ref) |
+| `SetMtime` + `SetCtime` deltas | `DeltaStore` | both parents |
 
-All in a single atomic `WriteBatch`.
+**Delta advantage:** All parent nlink/time updates are expressed as delta appends. No parent base value is read during rename, eliminating read-modify-write contention on hot directories.
 
 ---
 
@@ -1702,11 +2088,14 @@ The following operations involve multi-key mutations that **must** be atomic:
 
 | Operation | WriteBatch Contents | CFs Involved |
 |---|---|---|
-| `create` | Put new inode + Put dir entry + Update parent mtime + Persist allocator | `inodes`, `dir_entries`, `system` |
-| `mkdir` | Put new inode + Put dir entry + Update parent (nlink+1, mtime) + Persist allocator | `inodes`, `dir_entries`, `system` |
-| `unlink` | Delete dir entry + Update/Delete child inode (nlink) + Update parent mtime | `inodes`, `dir_entries` |
-| `rmdir` | Delete dir entry + Delete child inode + Update parent (nlink-1, mtime) | `inodes`, `dir_entries` |
-| `rename` | Delete old entry + Put new entry + Update/Delete target + Update parents + Update source ctime | `inodes`, `dir_entries` |
+| `create` | Put new inode + Put dir entry + Append parent delta (`IncNlink`/`SetMtime`) + Persist allocator | `inodes`, `dir_entries`, `delta_entries`, `system` |
+| `mkdir` | Put new inode + Put dir entry + Append parent delta (`IncNlink`, `SetMtime`) + Persist allocator | `inodes`, `dir_entries`, `delta_entries`, `system` |
+| `unlink` | Delete dir entry + Update/Delete child inode (nlink) + Append parent delta (`DecNlink`, `SetMtime`) | `inodes`, `dir_entries`, `delta_entries` |
+| `rmdir` | Delete dir entry + Delete child inode + Append parent delta (`DecNlink`, `SetMtime`) | `inodes`, `dir_entries`, `delta_entries` |
+| `rename` | Delete old entry + Put new entry + Update/Delete target + Append parent deltas + Update source ctime | `inodes`, `dir_entries`, `delta_entries` |
+| `compaction` | Fold deltas into base inode + Clear delta entries for compacted inode | `inodes`, `delta_entries` |
+
+> **Note:** Parent directory inode updates (nlink, mtime) are now recorded as append-only delta entries rather than read-modify-write on the parent inode. This eliminates contention on hot parent directories. The compaction worker periodically folds accumulated deltas back into base inodes.
 
 Operations that are single-key writes (`setattr`, `write` metadata update) do not require WriteBatch but still benefit from RocksDB's WAL durability.
 
@@ -1717,9 +2106,11 @@ The demo implementation uses a **coarse-grained approach** suitable for a single
 #### Strategy: Per-Directory Mutex
 
 ```rust
-pub struct MetadataServer<M, D, I> {
+pub struct MetadataServer<M, D, I, DS> {
     // ...
     dir_locks: DashMap<Inode, Arc<Mutex<()>>>,  // per-directory lock
+    delta_store: DS,                             // append-only delta storage
+    inode_cache: InodeFoldedCache,               // caches folded inode attrs
 }
 ```
 
@@ -1992,3 +2383,9 @@ The following table consolidates all recommended RocksDB parameters for the ruck
 | **Bearer Token** | An authentication scheme where the client includes a secret token in the HTTP `Authorization` header. The server validates it before processing requests. |
 | **bincode** | A compact binary serialization format for Rust. Used to encode `InodeValue` structures for storage in RocksDB. |
 | **fdatasync** | A POSIX system call that flushes file data to disk without flushing metadata (more efficient than `fsync` when only data durability is needed). |
+| **Delta Entry** | An append-only record in the `delta_entries` CF that captures a single incremental mutation to an inode's metadata (e.g., nlink change, mtime/ctime update). Multiple delta entries accumulate between compaction cycles and are folded on read to reconstruct the current inode state. |
+| **DeltaOp** | An enum representing the possible delta operations: `AdjustNlink(i64)` changes the hard-link count; `SetMtime(SystemTime)` / `SetCtime(SystemTime)` update timestamps; `SetSize(u64)` updates the file size. |
+| **Fold (Delta Folding)** | The process of applying a sequence of `DeltaOp` entries, in append order, on top of a base `InodeAttributes` snapshot to produce the up-to-date inode state. Performed on each read (`load_inode`) and during compaction. |
+| **Compaction Worker** | A background task (`CompactionWorker`) that periodically scans the `delta_entries` CF, folds accumulated deltas into the base inode in `inode_attributes`, and then clears the processed deltas. This bounds the number of deltas per inode and keeps read latency low. |
+| **InodeFoldedCache** | An in-memory LRU cache (`DashMap`-based) that stores recently folded `InodeAttributes`. On cache hit the server skips the RocksDB base-read + delta-scan, significantly reducing read latency for hot inodes. The cache is invalidated on write operations and after compaction. |
+| **DeltaStore** | A storage trait that abstracts delta entry persistence. Provides `append_delta`, `scan_deltas`, and `clear_deltas` methods, allowing the server to be generic over different storage backends. |

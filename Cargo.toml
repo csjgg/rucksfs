@@ -6,6 +6,7 @@ members = [
   "client",
   "rpc",
   "demo",
+  "dataserver",
 ]
 resolver = "2"
 

@@ -365,6 +365,14 @@ impl DataStore for MemoryDataStore {
         // In-memory store: nothing to flush.
         Ok(())
     }
+
+    async fn delete(&self, inode: Inode) -> FsResult<()> {
+        let mut guard = self.files.write().map_err(|e| {
+            FsError::Io(format!("MemoryDataStore write lock poisoned: {}", e))
+        })?;
+        guard.remove(&inode);
+        Ok(())
+    }
 }
 
 // ===========================================================================

@@ -50,6 +50,8 @@ pub trait DataStore: Send + Sync {
     async fn write_at(&self, inode: Inode, offset: u64, data: &[u8]) -> FsResult<u32>;
     async fn truncate(&self, inode: Inode, size: u64) -> FsResult<()>;
     async fn flush(&self, inode: Inode) -> FsResult<()>;
+    /// Delete all data for the given inode (used for GC / unlink).
+    async fn delete(&self, inode: Inode) -> FsResult<()>;
 }
 
 pub trait DirectoryIndex: Send + Sync {

@@ -170,6 +170,11 @@ impl DataStore for RawDiskDataStore {
 
         Ok(())
     }
+
+    async fn delete(&self, inode: Inode) -> FsResult<()> {
+        // Zero-fill the entire inode region to "delete" its data.
+        self.truncate(inode, 0).await
+    }
 }
 
 // ---------------------------------------------------------------------------
