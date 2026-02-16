@@ -36,6 +36,33 @@ pub struct DirEntry {
     pub kind: u32,
 }
 
+/// Request for `setattr`. Each field is `Option<T>` to avoid the ambiguity of
+/// using 0 to mean "no change" (e.g. `mode = 0` could be a valid value).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SetAttrRequest {
+    pub mode: Option<u32>,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+    pub size: Option<u64>,
+    pub atime: Option<u64>,
+    pub mtime: Option<u64>,
+}
+
+/// DataServer endpoint information returned by MetadataServer on `open`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct DataLocation {
+    /// Network address of the DataServer, e.g. "127.0.0.1:9001".
+    pub address: String,
+}
+
+/// Response from `MetadataOps::open`, containing a file handle and the
+/// DataServer location for subsequent read/write operations.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct OpenResponse {
+    pub handle: u64,
+    pub data_location: DataLocation,
+}
+
 #[derive(Error, Debug, Serialize, Deserialize)]
 pub enum FsError {
     #[error("not implemented")]
@@ -62,39 +89,75 @@ pub enum FsError {
 
 pub type FsResult<T> = Result<T, FsError>;
 
-pub trait PosixOps: Send + Sync {
-    fn lookup(&self, parent: Inode, name: &str) -> FsResult<FileAttr>;
-    fn getattr(&self, inode: Inode) -> FsResult<FileAttr>;
-    fn readdir(&self, inode: Inode) -> FsResult<Vec<DirEntry>>;
-    fn open(&self, inode: Inode, flags: u32) -> FsResult<u64>;
-    fn read(&self, inode: Inode, offset: u64, size: u32) -> FsResult<Vec<u8>>;
-    fn write(&self, inode: Inode, offset: u64, data: &[u8], flags: u32) -> FsResult<u32>;
-    fn create(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr>;
-    fn mkdir(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr>;
-    fn unlink(&self, parent: Inode, name: &str) -> FsResult<()>;
-    fn rmdir(&self, parent: Inode, name: &str) -> FsResult<()>;
-    fn rename(&self, parent: Inode, name: &str, new_parent: Inode, new_name: &str) -> FsResult<()>;
-    fn setattr(&self, inode: Inode, attr: FileAttr) -> FsResult<FileAttr>;
-    fn statfs(&self, inode: Inode) -> FsResult<StatFs>;
-    fn flush(&self, inode: Inode) -> FsResult<()>;
-    fn fsync(&self, inode: Inode, datasync: bool) -> FsResult<()>;
-}
-
+/// Pure metadata operations. Implemented by MetadataServer.
+///
+/// Does NOT include data I/O methods (read/write/flush/fsync).
+/// When a client needs to read/write file data, it calls `open` first to get
+/// a `DataLocation`, then talks to the DataServer directly.
 #[async_trait]
-pub trait ClientOps: Send + Sync {
+pub trait MetadataOps: Send + Sync {
     async fn lookup(&self, parent: Inode, name: &str) -> FsResult<FileAttr>;
     async fn getattr(&self, inode: Inode) -> FsResult<FileAttr>;
     async fn readdir(&self, inode: Inode) -> FsResult<Vec<DirEntry>>;
-    async fn open(&self, inode: Inode, flags: u32) -> FsResult<u64>;
-    async fn read(&self, inode: Inode, offset: u64, size: u32) -> FsResult<Vec<u8>>;
-    async fn write(&self, inode: Inode, offset: u64, data: &[u8], flags: u32) -> FsResult<u32>;
     async fn create(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr>;
     async fn mkdir(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr>;
     async fn unlink(&self, parent: Inode, name: &str) -> FsResult<()>;
     async fn rmdir(&self, parent: Inode, name: &str) -> FsResult<()>;
-    async fn rename(&self, parent: Inode, name: &str, new_parent: Inode, new_name: &str) -> FsResult<()>;
-    async fn setattr(&self, inode: Inode, attr: FileAttr) -> FsResult<FileAttr>;
+    async fn rename(
+        &self,
+        parent: Inode,
+        name: &str,
+        new_parent: Inode,
+        new_name: &str,
+    ) -> FsResult<()>;
+    async fn setattr(&self, inode: Inode, req: SetAttrRequest) -> FsResult<FileAttr>;
     async fn statfs(&self, inode: Inode) -> FsResult<StatFs>;
+    /// Open a file and return a handle + DataServer location.
+    async fn open(&self, inode: Inode, flags: u32) -> FsResult<OpenResponse>;
+    /// Called by the client after a successful write to the DataServer,
+    /// so that MetadataServer can update size and mtime.
+    async fn report_write(
+        &self,
+        inode: Inode,
+        new_size: u64,
+        mtime: u64,
+    ) -> FsResult<()>;
+}
+
+/// Pure data I/O operations. Implemented by DataServer.
+#[async_trait]
+pub trait DataOps: Send + Sync {
+    async fn read_data(&self, inode: Inode, offset: u64, size: u32) -> FsResult<Vec<u8>>;
+    async fn write_data(&self, inode: Inode, offset: u64, data: &[u8]) -> FsResult<u32>;
+    async fn truncate(&self, inode: Inode, size: u64) -> FsResult<()>;
+    async fn flush(&self, inode: Inode) -> FsResult<()>;
+    async fn delete_data(&self, inode: Inode) -> FsResult<()>;
+}
+
+/// Full POSIX VFS interface. Implemented by the fat client (EmbeddedClient /
+/// RucksClient) which routes metadata ops to MetadataServer and data ops to
+/// DataServer.
+#[async_trait]
+pub trait VfsOps: Send + Sync {
+    async fn lookup(&self, parent: Inode, name: &str) -> FsResult<FileAttr>;
+    async fn getattr(&self, inode: Inode) -> FsResult<FileAttr>;
+    async fn readdir(&self, inode: Inode) -> FsResult<Vec<DirEntry>>;
+    async fn create(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr>;
+    async fn mkdir(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr>;
+    async fn unlink(&self, parent: Inode, name: &str) -> FsResult<()>;
+    async fn rmdir(&self, parent: Inode, name: &str) -> FsResult<()>;
+    async fn rename(
+        &self,
+        parent: Inode,
+        name: &str,
+        new_parent: Inode,
+        new_name: &str,
+    ) -> FsResult<()>;
+    async fn setattr(&self, inode: Inode, req: SetAttrRequest) -> FsResult<FileAttr>;
+    async fn statfs(&self, inode: Inode) -> FsResult<StatFs>;
+    async fn open(&self, inode: Inode, flags: u32) -> FsResult<u64>;
+    async fn read(&self, inode: Inode, offset: u64, size: u32) -> FsResult<Vec<u8>>;
+    async fn write(&self, inode: Inode, offset: u64, data: &[u8], flags: u32) -> FsResult<u32>;
     async fn flush(&self, inode: Inode) -> FsResult<()>;
     async fn fsync(&self, inode: Inode, datasync: bool) -> FsResult<()>;
 }
