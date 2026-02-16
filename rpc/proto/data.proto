@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package rucksfs.data;
+
+// Read data from DataServer
+message ReadDataRequest {
+  uint64 inode = 1;
+  uint64 offset = 2;
+  uint32 size = 3;
+}
+message ReadDataResponse {
+  bytes data = 1;
+}
+
+// Write data to DataServer
+message WriteDataRequest {
+  uint64 inode = 1;
+  uint64 offset = 2;
+  bytes data = 3;
+}
+message WriteDataResponse {
+  uint32 bytes_written = 1;
+}
+
+// Truncate
+message TruncateRequest {
+  uint64 inode = 1;
+  uint64 size = 2;
+}
+
+// Flush
+message FlushRequest {
+  uint64 inode = 1;
+}
+
+// Delete all data for an inode
+message DeleteDataRequest {
+  uint64 inode = 1;
+}
+
+// Empty response
+message EmptyResponse {}
+
+// Data service — pure data I/O operations
+service DataService {
+  rpc ReadData(ReadDataRequest) returns (ReadDataResponse);
+  rpc WriteData(WriteDataRequest) returns (WriteDataResponse);
+  rpc Truncate(TruncateRequest) returns (EmptyResponse);
+  rpc Flush(FlushRequest) returns (EmptyResponse);
+  rpc DeleteData(DeleteDataRequest) returns (EmptyResponse);
+}

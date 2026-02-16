@@ -1,17 +1,18 @@
 syntax = "proto3";
 
-package rucksfs;
+package rucksfs.metadata;
 
-// File system attribute
+// File system attribute (includes nlink)
 message FileAttr {
   uint64 inode = 1;
   uint64 size = 2;
   uint32 mode = 3;
-  uint32 uid = 4;
-  uint32 gid = 5;
-  uint64 atime = 6;
-  uint64 mtime = 7;
-  uint64 ctime = 8;
+  uint32 nlink = 4;
+  uint32 uid = 5;
+  uint32 gid = 6;
+  uint64 atime = 7;
+  uint64 mtime = 8;
+  uint64 ctime = 9;
 }
 
 // File system statistics
@@ -32,96 +33,57 @@ message DirEntry {
   uint32 kind = 3;
 }
 
-// Error response
-message ErrorResponse {
-  string message = 1;
-  int32 code = 2;
+// DataServer endpoint information
+message DataLocation {
+  string address = 1;
 }
 
-// Lookup request
+// Lookup
 message LookupRequest {
   uint64 parent = 1;
   string name = 2;
 }
 
-// Getattr request
+// Getattr
 message GetattrRequest {
   uint64 inode = 1;
 }
 
-// Readdir request
+// Readdir
 message ReaddirRequest {
   uint64 inode = 1;
 }
-
-// Readdir response
 message ReaddirResponse {
   repeated DirEntry entries = 1;
 }
 
-// Open request
-message OpenRequest {
-  uint64 inode = 1;
-  uint32 flags = 2;
-}
-
-// Open response
-message OpenResponse {
-  uint64 handle = 1;
-}
-
-// Read request
-message ReadRequest {
-  uint64 inode = 1;
-  uint64 offset = 2;
-  uint32 size = 3;
-}
-
-// Read response
-message ReadResponse {
-  bytes data = 1;
-}
-
-// Write request
-message WriteRequest {
-  uint64 inode = 1;
-  uint64 offset = 2;
-  bytes data = 3;
-  uint32 flags = 4;
-}
-
-// Write response
-message WriteResponse {
-  uint32 bytes_written = 1;
-}
-
-// Create request
+// Create
 message CreateRequest {
   uint64 parent = 1;
   string name = 2;
   uint32 mode = 3;
 }
 
-// Mkdir request
+// Mkdir
 message MkdirRequest {
   uint64 parent = 1;
   string name = 2;
   uint32 mode = 3;
 }
 
-// Unlink request
+// Unlink
 message UnlinkRequest {
   uint64 parent = 1;
   string name = 2;
 }
 
-// Rmdir request
+// Rmdir
 message RmdirRequest {
   uint64 parent = 1;
   string name = 2;
 }
 
-// Rename request
+// Rename
 message RenameRequest {
   uint64 parent = 1;
   string name = 2;
@@ -129,46 +91,54 @@ message RenameRequest {
   string new_name = 4;
 }
 
-// Setattr request
-message SetattrRequest {
+// Setattr — uses optional fields to express "no change"
+message SetAttrRequest {
   uint64 inode = 1;
-  FileAttr attr = 2;
+  optional uint32 mode = 2;
+  optional uint32 uid = 3;
+  optional uint32 gid = 4;
+  optional uint64 size = 5;
+  optional uint64 atime = 6;
+  optional uint64 mtime = 7;
 }
 
-// Statfs request
+// Statfs
 message StatfsRequest {
   uint64 inode = 1;
 }
 
-// Flush request
-message FlushRequest {
+// Open
+message OpenRequest {
   uint64 inode = 1;
+  uint32 flags = 2;
+}
+message OpenResponse {
+  uint64 handle = 1;
+  DataLocation data_location = 2;
 }
 
-// Fsync request
-message FsyncRequest {
+// ReportWrite — client calls this after writing to DataServer
+message ReportWriteRequest {
   uint64 inode = 1;
-  bool datasync = 2;
+  uint64 new_size = 2;
+  uint64 mtime = 3;
 }
 
-// Empty response for operations that don't return data
+// Empty response
 message EmptyResponse {}
 
-// The file system service
-service FileSystemService {
+// Metadata service — pure metadata operations
+service MetadataService {
   rpc Lookup(LookupRequest) returns (FileAttr);
   rpc Getattr(GetattrRequest) returns (FileAttr);
   rpc Readdir(ReaddirRequest) returns (ReaddirResponse);
-  rpc Open(OpenRequest) returns (OpenResponse);
-  rpc Read(ReadRequest) returns (ReadResponse);
-  rpc Write(WriteRequest) returns (WriteResponse);
   rpc Create(CreateRequest) returns (FileAttr);
   rpc Mkdir(MkdirRequest) returns (FileAttr);
   rpc Unlink(UnlinkRequest) returns (EmptyResponse);
   rpc Rmdir(RmdirRequest) returns (EmptyResponse);
   rpc Rename(RenameRequest) returns (EmptyResponse);
-  rpc Setattr(SetattrRequest) returns (FileAttr);
+  rpc Setattr(SetAttrRequest) returns (FileAttr);
   rpc Statfs(StatfsRequest) returns (StatFs);
-  rpc Flush(FlushRequest) returns (EmptyResponse);
-  rpc Fsync(FsyncRequest) returns (EmptyResponse);
+  rpc Open(OpenRequest) returns (OpenResponse);
+  rpc ReportWrite(ReportWriteRequest) returns (EmptyResponse);
 }
