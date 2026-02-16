@@ -6,13 +6,11 @@ use fuser::{
 #[cfg(target_os = "linux")]
 use libc::{EACCES, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, EEXIST, EOPNOTSUPP};
 #[cfg(target_os = "linux")]
-use rucksfs_core::{FileAttr, FsError, FsResult};
+use rucksfs_core::{FileAttr, FsError, FsResult, SetAttrRequest, VfsOps};
 #[cfg(target_os = "linux")]
 use std::ffi::OsStr;
 #[cfg(target_os = "linux")]
 use std::time::{Duration, SystemTime};
-#[cfg(target_os = "linux")]
-use crate::Client;
 #[cfg(target_os = "linux")]
 use std::sync::Arc;
 
@@ -32,7 +30,7 @@ impl<C> FuseClient<C> {
 #[cfg(target_os = "linux")]
 impl<C> Filesystem for FuseClient<C>
 where
-    C: Client + 'static,
+    C: VfsOps + 'static,
 {
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let name = name.to_string_lossy().to_string();
@@ -47,6 +45,59 @@ where
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
         let client = self.client.clone();
         let result = futures::executor::block_on(async move { client.getattr(ino).await });
+        match result {
+            Ok(attr) => reply.attr(&Duration::from_secs(1), &to_fuse_attr(attr)),
+            Err(e) => reply.error(fs_error_to_errno(e)),
+        }
+    }
+
+    fn setattr(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        atime: Option<fuser::TimeOrNow>,
+        mtime: Option<fuser::TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        _fh: Option<u64>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        let client = self.client.clone();
+        let req = SetAttrRequest {
+            mode,
+            uid,
+            gid,
+            size,
+            atime: atime.map(|t| match t {
+                fuser::TimeOrNow::SpecificTime(st) => st
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                fuser::TimeOrNow::Now => SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            }),
+            mtime: mtime.map(|t| match t {
+                fuser::TimeOrNow::SpecificTime(st) => st
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                fuser::TimeOrNow::Now => SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            }),
+        };
+        let result =
+            futures::executor::block_on(async move { client.setattr(ino, req).await });
         match result {
             Ok(attr) => reply.attr(&Duration::from_secs(1), &to_fuse_attr(attr)),
             Err(e) => reply.error(fs_error_to_errno(e)),
@@ -124,6 +175,39 @@ where
         });
         match result {
             Ok(written) => reply.written(written),
+            Err(e) => reply.error(fs_error_to_errno(e)),
+        }
+    }
+
+    fn flush(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        _lock_owner: u64,
+        reply: ReplyEmpty,
+    ) {
+        let client = self.client.clone();
+        let result = futures::executor::block_on(async move { client.flush(ino).await });
+        match result {
+            Ok(()) => reply.ok(),
+            Err(e) => reply.error(fs_error_to_errno(e)),
+        }
+    }
+
+    fn fsync(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        datasync: bool,
+        reply: ReplyEmpty,
+    ) {
+        let client = self.client.clone();
+        let result =
+            futures::executor::block_on(async move { client.fsync(ino, datasync).await });
+        match result {
+            Ok(()) => reply.ok(),
             Err(e) => reply.error(fs_error_to_errno(e)),
         }
     }
@@ -258,7 +342,7 @@ fn to_fuse_attr(attr: FileAttr) -> FuseAttr {
         crtime: SystemTime::UNIX_EPOCH,
         kind,
         perm: (attr.mode & 0o7777) as u16,
-        nlink: 1,
+        nlink: attr.nlink,
         uid: attr.uid,
         gid: attr.gid,
         rdev: 0,
@@ -268,14 +352,14 @@ fn to_fuse_attr(attr: FileAttr) -> FuseAttr {
 }
 
 #[cfg(target_os = "linux")]
-pub fn mount_fuse<C: Client + 'static>(mountpoint: &str, client: Arc<C>) -> FsResult<()> {
+pub fn mount_fuse<C: VfsOps + 'static>(mountpoint: &str, client: Arc<C>) -> FsResult<()> {
     let fs = FuseClient::new(client);
     let options = vec![MountOption::RO, MountOption::FSName("rucksfs".to_string())];
     fuser::mount2(fs, mountpoint, &options).map_err(|e| FsError::Io(e.to_string()))
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn mount_fuse<C: Client + 'static>(_mountpoint: &str, _client: Arc<C>) -> FsResult<()> {
+pub fn mount_fuse<C: VfsOps + 'static>(_mountpoint: &str, _client: Arc<C>) -> FsResult<()> {
     Err(FsError::NotImplemented)
 }
 
