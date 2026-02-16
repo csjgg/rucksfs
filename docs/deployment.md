@@ -1,10 +1,23 @@
 # Deployment Guide
 
+> **⚠️ Note:** This guide was written for the earlier single-server architecture.
+> RucksFS has since been refactored into a split **MetadataServer + DataServer** design.
+> The TLS/authentication concepts below still apply, but the CLI examples reference
+> a single `rucksfs-server` / `rucksfs-client` binary that has not yet been updated
+> to the new two-service model. A revised deployment guide will be published once the
+> standalone `RucksClient` (gRPC network client) and separate server binaries are implemented.
+> See the project [README](../README.md) TODO section for current status.
+
 This guide explains how to configure authentication and TLS for secure communication between the RucksFS server and client.
 
 ## Overview
 
-The RucksFS RPC layer uses gRPC over TLS for secure communication. The server and client can be configured with:
+The RucksFS RPC layer uses gRPC over TLS for secure communication. In the new architecture, two services need to be deployed:
+
+- **MetadataServer** — handles namespace, inodes, and directory entries (gRPC `MetadataService`)
+- **DataServer** — handles file data I/O (gRPC `DataService`)
+
+Both servers (and the client) can be configured with:
 
 - **Authentication**: Bearer token-based authentication
 - **Encryption**: TLS 1.3 for encrypted connections
