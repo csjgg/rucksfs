@@ -1267,7 +1267,9 @@ name = "rucksfs-server"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "rucksfs-client",
  "rucksfs-core",
+ "rucksfs-dataserver",
  "rucksfs-storage",
  "tokio",
  "tracing",

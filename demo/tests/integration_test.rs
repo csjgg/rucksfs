@@ -1,12 +1,14 @@
 //! End-to-end integration tests for the RucksFS demo stack.
 //!
-//! These tests exercise the full server+client pipeline using in-memory
-//! storage (and optionally RocksDB with the `rocksdb` feature).
+//! These tests exercise the full MetadataServer + DataServer + EmbeddedClient
+//! pipeline using in-memory storage (and optionally RocksDB with the `rocksdb`
+//! feature).
 
 use std::sync::Arc;
 
-use rucksfs_client::build_client;
-use rucksfs_core::ClientOps;
+use rucksfs_client::EmbeddedClient;
+use rucksfs_core::{DataLocation, DataOps, MetadataOps, VfsOps};
+use rucksfs_dataserver::DataServer;
 use rucksfs_server::MetadataServer;
 use rucksfs_storage::{MemoryDataStore, MemoryDeltaStore, MemoryDirectoryIndex, MemoryMetadataStore};
 
@@ -14,13 +16,24 @@ use rucksfs_storage::{MemoryDataStore, MemoryDeltaStore, MemoryDirectoryIndex, M
 const ROOT: u64 = 1;
 
 /// Helper: build an in-memory server+client stack.
-fn mem_client() -> impl ClientOps {
+fn mem_client() -> EmbeddedClient {
     let metadata = Arc::new(MemoryMetadataStore::new());
     let index = Arc::new(MemoryDirectoryIndex::new());
-    let data = Arc::new(MemoryDataStore::new());
     let delta_store = Arc::new(MemoryDeltaStore::new());
-    let server = Arc::new(MetadataServer::new(metadata, data, index, delta_store));
-    build_client(server)
+    let data_store = MemoryDataStore::new();
+
+    let data_server: Arc<dyn DataOps> = Arc::new(DataServer::new(data_store));
+    let metadata_server: Arc<dyn MetadataOps> = Arc::new(MetadataServer::new(
+        metadata,
+        index,
+        delta_store,
+        Arc::clone(&data_server),
+        DataLocation {
+            address: "embedded".to_string(),
+        },
+    ));
+
+    EmbeddedClient::new(metadata_server, data_server)
 }
 
 // ===========================================================================
@@ -33,12 +46,12 @@ async fn auto_demo_full_flow() {
 
     // 1. mkdir /mydir
     let dir_attr = client.mkdir(ROOT, "mydir", 0o755).await.unwrap();
-    assert_eq!(dir_attr.mode & 0o040000, 0o040000); // is directory
+    assert_eq!(dir_attr.mode & 0o040000, 0o040000);
     let mydir_inode = dir_attr.inode;
 
     // 2. create /mydir/hello.txt
     let file_attr = client.create(mydir_inode, "hello.txt", 0o644).await.unwrap();
-    assert_eq!(file_attr.mode & 0o100000, 0o100000); // is regular file
+    assert_eq!(file_attr.mode & 0o100000, 0o100000);
     let file_inode = file_attr.inode;
 
     // 3. write content
@@ -147,7 +160,6 @@ async fn read_empty_file() {
     let client = mem_client();
     let attr = client.create(ROOT, "empty", 0o644).await.unwrap();
     let data = client.read(attr.inode, 0, 100).await.unwrap();
-    // Should be all zeros or empty
     assert!(data.iter().all(|&b| b == 0));
 }
 
@@ -253,20 +265,19 @@ async fn getattr_root() {
     let client = mem_client();
     let attr = client.getattr(ROOT).await.unwrap();
     assert_eq!(attr.inode, ROOT);
-    assert_eq!(attr.mode & 0o040000, 0o040000); // root is a directory
+    assert_eq!(attr.mode & 0o040000, 0o040000);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn setattr_changes_mode() {
     let client = mem_client();
     let attr = client.create(ROOT, "chmod_me", 0o644).await.unwrap();
-    let new_attr = rucksfs_core::FileAttr {
-        inode: attr.inode,
-        mode: 0o100755,
+    let req = rucksfs_core::SetAttrRequest {
+        mode: Some(0o755),
         ..Default::default()
     };
-    let result = client.setattr(attr.inode, new_attr).await.unwrap();
-    assert_eq!(result.mode, 0o100755);
+    let result = client.setattr(attr.inode, req).await.unwrap();
+    assert_eq!(result.mode & 0o7777, 0o755);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -282,21 +293,17 @@ async fn statfs_returns_valid_data() {
 async fn deep_directory_tree() {
     let client = mem_client();
 
-    // Create /a/b/c/d
     let a = client.mkdir(ROOT, "a", 0o755).await.unwrap();
     let b = client.mkdir(a.inode, "b", 0o755).await.unwrap();
     let c = client.mkdir(b.inode, "c", 0o755).await.unwrap();
     let d = client.mkdir(c.inode, "d", 0o755).await.unwrap();
 
-    // Create file in deep path
     let f = client.create(d.inode, "deep.txt", 0o644).await.unwrap();
     client.write(f.inode, 0, b"deep content", 0).await.unwrap();
 
-    // Read back
     let data = client.read(f.inode, 0, 100).await.unwrap();
     assert!(data.starts_with(b"deep content"));
 
-    // Walk path via lookup
     let a2 = client.lookup(ROOT, "a").await.unwrap();
     assert_eq!(a2.inode, a.inode);
     let b2 = client.lookup(a2.inode, "b").await.unwrap();
@@ -319,21 +326,29 @@ mod rocksdb_tests {
     use rucksfs_storage::{open_rocks_db, RawDiskDataStore, RocksDeltaStore, RocksDirectoryIndex, RocksMetadataStore};
 
     /// Build a persistent server+client stack at the given directory.
-    fn persistent_client(
-        dir: &std::path::Path,
-    ) -> impl ClientOps {
+    fn persistent_client(dir: &std::path::Path) -> EmbeddedClient {
         let db_path = dir.join("metadata.db");
         let data_path = dir.join("data.raw");
 
         let db = open_rocks_db(&db_path).expect("open RocksDB");
         let metadata = Arc::new(RocksMetadataStore::new(Arc::clone(&db)));
         let index = Arc::new(RocksDirectoryIndex::new(Arc::clone(&db)));
-        let data = Arc::new(
-            RawDiskDataStore::open(&data_path, 64 * 1024 * 1024).expect("open RawDisk"),
-        );
         let delta_store = Arc::new(RocksDeltaStore::new(Arc::clone(&db)));
-        let server = Arc::new(MetadataServer::new(metadata, data, index, delta_store));
-        build_client(server)
+        let data_store = RawDiskDataStore::open(&data_path, 64 * 1024 * 1024)
+            .expect("open RawDisk");
+
+        let data_server: Arc<dyn DataOps> = Arc::new(DataServer::new(data_store));
+        let metadata_server: Arc<dyn MetadataOps> = Arc::new(MetadataServer::new(
+            metadata,
+            index,
+            delta_store,
+            Arc::clone(&data_server),
+            DataLocation {
+                address: "embedded".to_string(),
+            },
+        ));
+
+        EmbeddedClient::new(metadata_server, data_server)
     }
 
     #[tokio::test]
@@ -372,7 +387,7 @@ mod rocksdb_tests {
     async fn persist_directory_structure() {
         let tmp = tempfile::tempdir().unwrap();
 
-        // Session 1: create nested directories
+        // Session 1
         {
             let client = persistent_client(tmp.path());
             let a = client.mkdir(ROOT, "alpha", 0o755).await.unwrap();
@@ -380,7 +395,7 @@ mod rocksdb_tests {
             client.create(ROOT, "root_file.txt", 0o644).await.unwrap();
         }
 
-        // Session 2: verify structure
+        // Session 2
         {
             let client = persistent_client(tmp.path());
             let entries = client.readdir(ROOT).await.unwrap();

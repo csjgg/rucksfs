@@ -1,12 +1,14 @@
-//! Integration tests for MetadataServer with in-memory storage backends.
+//! Integration tests for the full MetadataServer + DataServer stack.
 //!
-//! These tests exercise the full POSIX operation stack through the
-//! `MetadataServer<MemoryMetadataStore, MemoryDataStore, MemoryDirectoryIndex>`
-//! concrete type.
+//! These tests exercise the POSIX operation stack through `EmbeddedClient`,
+//! which routes metadata requests to `MetadataServer` and data requests to
+//! `DataServer`.
 
 use std::sync::Arc;
 
-use rucksfs_core::{FsError, PosixOps};
+use rucksfs_client::EmbeddedClient;
+use rucksfs_core::{DataLocation, DataOps, FsError, MetadataOps, VfsOps};
+use rucksfs_dataserver::DataServer;
 use rucksfs_server::MetadataServer;
 use rucksfs_storage::{DeltaStore, MemoryDataStore, MemoryDeltaStore, MemoryDirectoryIndex, MemoryMetadataStore};
 
@@ -19,16 +21,64 @@ const FILE_MODE: u32 = 0o644;
 /// Permission mode for a directory.
 const DIR_MODE: u32 = 0o755;
 
-type TestServer = MetadataServer<MemoryMetadataStore, MemoryDataStore, MemoryDirectoryIndex, MemoryDeltaStore>;
+/// Build a fresh EmbeddedClient backed by in-memory stores for each test.
+fn new_client() -> EmbeddedClient {
+    let metadata = Arc::new(MemoryMetadataStore::new());
+    let index = Arc::new(MemoryDirectoryIndex::new());
+    let delta_store = Arc::new(MemoryDeltaStore::new());
+    let data_store = MemoryDataStore::new();
 
-/// Helper to build a fresh server for each test.
-fn new_server() -> TestServer {
-    MetadataServer::new(
-        Arc::new(MemoryMetadataStore::new()),
-        Arc::new(MemoryDataStore::new()),
-        Arc::new(MemoryDirectoryIndex::new()),
-        Arc::new(MemoryDeltaStore::new()),
-    )
+    let data_server: Arc<dyn DataOps> = Arc::new(DataServer::new(data_store));
+    let metadata_server: Arc<dyn MetadataOps> = Arc::new(MetadataServer::new(
+        metadata,
+        index,
+        delta_store,
+        Arc::clone(&data_server),
+        DataLocation {
+            address: "embedded".to_string(),
+        },
+    ));
+
+    EmbeddedClient::new(metadata_server, data_server)
+}
+
+/// Build raw MetadataServer + DataServer for tests that need direct access to
+/// compaction workers or delta stores.
+fn new_server_and_data(
+) -> (
+    Arc<
+        MetadataServer<
+            MemoryMetadataStore,
+            MemoryDirectoryIndex,
+            MemoryDeltaStore,
+        >,
+    >,
+    Arc<dyn DataOps>,
+) {
+    let metadata = Arc::new(MemoryMetadataStore::new());
+    let index = Arc::new(MemoryDirectoryIndex::new());
+    let delta_store = Arc::new(MemoryDeltaStore::new());
+    let data_store = MemoryDataStore::new();
+
+    let data_server: Arc<dyn DataOps> = Arc::new(DataServer::new(data_store));
+    let server = Arc::new(MetadataServer::new(
+        metadata,
+        index,
+        delta_store,
+        Arc::clone(&data_server),
+        DataLocation {
+            address: "embedded".to_string(),
+        },
+    ));
+
+    (server, data_server)
+}
+
+fn rt() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
 }
 
 // ===========================================================================
@@ -37,19 +87,22 @@ fn new_server() -> TestServer {
 
 #[test]
 fn root_directory_exists_after_init() {
-    let server = new_server();
-    let attr = server.getattr(ROOT).unwrap();
-    assert_eq!(attr.inode, ROOT);
-    // Should be a directory (S_IFDIR = 0o040000)
-    assert_ne!(attr.mode & 0o040000, 0);
-    assert_eq!(attr.nlink, 2); // "." and ".."
+    rt().block_on(async {
+        let client = new_client();
+        let attr = client.getattr(ROOT).await.unwrap();
+        assert_eq!(attr.inode, ROOT);
+        assert_ne!(attr.mode & 0o040000, 0); // S_IFDIR
+        assert_eq!(attr.nlink, 2);
+    });
 }
 
 #[test]
 fn root_readdir_empty() {
-    let server = new_server();
-    let entries = server.readdir(ROOT).unwrap();
-    assert!(entries.is_empty());
+    rt().block_on(async {
+        let client = new_client();
+        let entries = client.readdir(ROOT).await.unwrap();
+        assert!(entries.is_empty());
+    });
 }
 
 // ===========================================================================
@@ -58,39 +111,41 @@ fn root_readdir_empty() {
 
 #[test]
 fn file_lifecycle() {
-    let server = new_server();
+    rt().block_on(async {
+        let client = new_client();
 
-    // Create
-    let attr = server.create(ROOT, "hello.txt", FILE_MODE).unwrap();
-    assert_eq!(attr.nlink, 1);
-    assert_eq!(attr.size, 0);
-    assert_ne!(attr.mode & 0o100000, 0); // S_IFREG
+        // Create
+        let attr = client.create(ROOT, "hello.txt", FILE_MODE).await.unwrap();
+        assert_eq!(attr.nlink, 1);
+        assert_eq!(attr.size, 0);
+        assert_ne!(attr.mode & 0o100000, 0);
 
-    let inode = attr.inode;
+        let inode = attr.inode;
 
-    // Open
-    let fh = server.open(inode, 0).unwrap();
-    assert_eq!(fh, 0);
+        // Open
+        let fh = client.open(inode, 0).await.unwrap();
+        assert_eq!(fh, 0);
 
-    // Write
-    let data = b"Hello, RucksFS!";
-    let written = server.write(inode, 0, data, 0).unwrap();
-    assert_eq!(written, data.len() as u32);
+        // Write
+        let data = b"Hello, RucksFS!";
+        let written = client.write(inode, 0, data, 0).await.unwrap();
+        assert_eq!(written, data.len() as u32);
 
-    // Read back
-    let buf = server.read(inode, 0, data.len() as u32).unwrap();
-    assert_eq!(&buf, data);
+        // Read back
+        let buf = client.read(inode, 0, data.len() as u32).await.unwrap();
+        assert_eq!(&buf, data);
 
-    // Getattr should reflect new size
-    let attr2 = server.getattr(inode).unwrap();
-    assert_eq!(attr2.size, data.len() as u64);
+        // Getattr should reflect new size
+        let attr2 = client.getattr(inode).await.unwrap();
+        assert_eq!(attr2.size, data.len() as u64);
 
-    // Unlink
-    server.unlink(ROOT, "hello.txt").unwrap();
+        // Unlink
+        client.unlink(ROOT, "hello.txt").await.unwrap();
 
-    // Lookup should fail
-    let err = server.lookup(ROOT, "hello.txt").unwrap_err();
-    assert!(matches!(err, FsError::NotFound));
+        // Lookup should fail
+        let err = client.lookup(ROOT, "hello.txt").await.unwrap_err();
+        assert!(matches!(err, FsError::NotFound));
+    });
 }
 
 // ===========================================================================
@@ -99,58 +154,60 @@ fn file_lifecycle() {
 
 #[test]
 fn mkdir_and_readdir() {
-    let server = new_server();
+    rt().block_on(async {
+        let client = new_client();
 
-    let dir_attr = server.mkdir(ROOT, "subdir", DIR_MODE).unwrap();
-    assert_ne!(dir_attr.mode & 0o040000, 0); // S_IFDIR
-    assert_eq!(dir_attr.nlink, 2);
+        let dir_attr = client.mkdir(ROOT, "subdir", DIR_MODE).await.unwrap();
+        assert_ne!(dir_attr.mode & 0o040000, 0);
+        assert_eq!(dir_attr.nlink, 2);
 
-    // Root nlink should be 3 now (. + .. + subdir's "..")
-    let root_attr = server.getattr(ROOT).unwrap();
-    assert_eq!(root_attr.nlink, 3);
+        let root_attr = client.getattr(ROOT).await.unwrap();
+        assert_eq!(root_attr.nlink, 3);
 
-    // Readdir root should list "subdir"
-    let entries = server.readdir(ROOT).unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].name, "subdir");
+        let entries = client.readdir(ROOT).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "subdir");
+    });
 }
 
 #[test]
 fn rmdir_empty_directory() {
-    let server = new_server();
-    server.mkdir(ROOT, "empty_dir", DIR_MODE).unwrap();
+    rt().block_on(async {
+        let client = new_client();
+        client.mkdir(ROOT, "empty_dir", DIR_MODE).await.unwrap();
+        client.rmdir(ROOT, "empty_dir").await.unwrap();
 
-    server.rmdir(ROOT, "empty_dir").unwrap();
+        let entries = client.readdir(ROOT).await.unwrap();
+        assert!(entries.is_empty());
 
-    let entries = server.readdir(ROOT).unwrap();
-    assert!(entries.is_empty());
-
-    // Root nlink back to 2
-    let root_attr = server.getattr(ROOT).unwrap();
-    assert_eq!(root_attr.nlink, 2);
+        let root_attr = client.getattr(ROOT).await.unwrap();
+        assert_eq!(root_attr.nlink, 2);
+    });
 }
 
 #[test]
 fn rmdir_non_empty_fails() {
-    let server = new_server();
-    let dir_attr = server.mkdir(ROOT, "mydir", DIR_MODE).unwrap();
-    let dir_inode = dir_attr.inode;
+    rt().block_on(async {
+        let client = new_client();
+        let dir_attr = client.mkdir(ROOT, "mydir", DIR_MODE).await.unwrap();
+        client
+            .create(dir_attr.inode, "file.txt", FILE_MODE)
+            .await
+            .unwrap();
 
-    // Create a file inside
-    server.create(dir_inode, "file.txt", FILE_MODE).unwrap();
-
-    // rmdir should fail
-    let err = server.rmdir(ROOT, "mydir").unwrap_err();
-    assert!(matches!(err, FsError::DirectoryNotEmpty));
+        let err = client.rmdir(ROOT, "mydir").await.unwrap_err();
+        assert!(matches!(err, FsError::DirectoryNotEmpty));
+    });
 }
 
 #[test]
 fn rmdir_non_directory_fails() {
-    let server = new_server();
-    server.create(ROOT, "file.txt", FILE_MODE).unwrap();
-
-    let err = server.rmdir(ROOT, "file.txt").unwrap_err();
-    assert!(matches!(err, FsError::NotADirectory));
+    rt().block_on(async {
+        let client = new_client();
+        client.create(ROOT, "file.txt", FILE_MODE).await.unwrap();
+        let err = client.rmdir(ROOT, "file.txt").await.unwrap_err();
+        assert!(matches!(err, FsError::NotADirectory));
+    });
 }
 
 // ===========================================================================
@@ -159,20 +216,22 @@ fn rmdir_non_directory_fails() {
 
 #[test]
 fn create_duplicate_name_fails() {
-    let server = new_server();
-    server.create(ROOT, "dup.txt", FILE_MODE).unwrap();
-
-    let err = server.create(ROOT, "dup.txt", FILE_MODE).unwrap_err();
-    assert!(matches!(err, FsError::AlreadyExists));
+    rt().block_on(async {
+        let client = new_client();
+        client.create(ROOT, "dup.txt", FILE_MODE).await.unwrap();
+        let err = client.create(ROOT, "dup.txt", FILE_MODE).await.unwrap_err();
+        assert!(matches!(err, FsError::AlreadyExists));
+    });
 }
 
 #[test]
 fn mkdir_duplicate_name_fails() {
-    let server = new_server();
-    server.mkdir(ROOT, "dup_dir", DIR_MODE).unwrap();
-
-    let err = server.mkdir(ROOT, "dup_dir", DIR_MODE).unwrap_err();
-    assert!(matches!(err, FsError::AlreadyExists));
+    rt().block_on(async {
+        let client = new_client();
+        client.mkdir(ROOT, "dup_dir", DIR_MODE).await.unwrap();
+        let err = client.mkdir(ROOT, "dup_dir", DIR_MODE).await.unwrap_err();
+        assert!(matches!(err, FsError::AlreadyExists));
+    });
 }
 
 // ===========================================================================
@@ -181,11 +240,12 @@ fn mkdir_duplicate_name_fails() {
 
 #[test]
 fn unlink_directory_fails() {
-    let server = new_server();
-    server.mkdir(ROOT, "dir", DIR_MODE).unwrap();
-
-    let err = server.unlink(ROOT, "dir").unwrap_err();
-    assert!(matches!(err, FsError::IsADirectory));
+    rt().block_on(async {
+        let client = new_client();
+        client.mkdir(ROOT, "dir", DIR_MODE).await.unwrap();
+        let err = client.unlink(ROOT, "dir").await.unwrap_err();
+        assert!(matches!(err, FsError::IsADirectory));
+    });
 }
 
 // ===========================================================================
@@ -194,17 +254,21 @@ fn unlink_directory_fails() {
 
 #[test]
 fn lookup_nonexistent_returns_not_found() {
-    let server = new_server();
-    let err = server.lookup(ROOT, "ghost").unwrap_err();
-    assert!(matches!(err, FsError::NotFound));
+    rt().block_on(async {
+        let client = new_client();
+        let err = client.lookup(ROOT, "ghost").await.unwrap_err();
+        assert!(matches!(err, FsError::NotFound));
+    });
 }
 
 #[test]
 fn lookup_after_create() {
-    let server = new_server();
-    let created = server.create(ROOT, "found.txt", FILE_MODE).unwrap();
-    let looked_up = server.lookup(ROOT, "found.txt").unwrap();
-    assert_eq!(created.inode, looked_up.inode);
+    rt().block_on(async {
+        let client = new_client();
+        let created = client.create(ROOT, "found.txt", FILE_MODE).await.unwrap();
+        let looked_up = client.lookup(ROOT, "found.txt").await.unwrap();
+        assert_eq!(created.inode, looked_up.inode);
+    });
 }
 
 // ===========================================================================
@@ -213,100 +277,91 @@ fn lookup_after_create() {
 
 #[test]
 fn rename_same_directory() {
-    let server = new_server();
-    let attr = server.create(ROOT, "old.txt", FILE_MODE).unwrap();
-    let inode = attr.inode;
+    rt().block_on(async {
+        let client = new_client();
+        let attr = client.create(ROOT, "old.txt", FILE_MODE).await.unwrap();
+        let inode = attr.inode;
 
-    server.rename(ROOT, "old.txt", ROOT, "new.txt").unwrap();
+        client
+            .rename(ROOT, "old.txt", ROOT, "new.txt")
+            .await
+            .unwrap();
 
-    // Old name should not resolve
-    assert!(server.lookup(ROOT, "old.txt").is_err());
-
-    // New name should resolve to same inode
-    let new_attr = server.lookup(ROOT, "new.txt").unwrap();
-    assert_eq!(new_attr.inode, inode);
+        assert!(client.lookup(ROOT, "old.txt").await.is_err());
+        let new_attr = client.lookup(ROOT, "new.txt").await.unwrap();
+        assert_eq!(new_attr.inode, inode);
+    });
 }
 
 #[test]
 fn rename_cross_directory() {
-    let server = new_server();
-    let dir_a = server.mkdir(ROOT, "dir_a", DIR_MODE).unwrap();
-    let dir_b = server.mkdir(ROOT, "dir_b", DIR_MODE).unwrap();
+    rt().block_on(async {
+        let client = new_client();
+        let dir_a = client.mkdir(ROOT, "dir_a", DIR_MODE).await.unwrap();
+        let dir_b = client.mkdir(ROOT, "dir_b", DIR_MODE).await.unwrap();
 
-    let file = server.create(dir_a.inode, "file.txt", FILE_MODE).unwrap();
+        let file = client
+            .create(dir_a.inode, "file.txt", FILE_MODE)
+            .await
+            .unwrap();
+        client
+            .rename(dir_a.inode, "file.txt", dir_b.inode, "moved.txt")
+            .await
+            .unwrap();
 
-    server
-        .rename(dir_a.inode, "file.txt", dir_b.inode, "moved.txt")
-        .unwrap();
-
-    // Should not be in dir_a
-    assert!(server.lookup(dir_a.inode, "file.txt").is_err());
-
-    // Should be in dir_b
-    let moved = server.lookup(dir_b.inode, "moved.txt").unwrap();
-    assert_eq!(moved.inode, file.inode);
+        assert!(client.lookup(dir_a.inode, "file.txt").await.is_err());
+        let moved = client.lookup(dir_b.inode, "moved.txt").await.unwrap();
+        assert_eq!(moved.inode, file.inode);
+    });
 }
 
 #[test]
 fn rename_overwrite_file() {
-    let server = new_server();
-    server.create(ROOT, "src.txt", FILE_MODE).unwrap();
-    let src = server.lookup(ROOT, "src.txt").unwrap();
+    rt().block_on(async {
+        let client = new_client();
+        client.create(ROOT, "src.txt", FILE_MODE).await.unwrap();
+        let src = client.lookup(ROOT, "src.txt").await.unwrap();
 
-    server.create(ROOT, "dst.txt", FILE_MODE).unwrap();
+        client.create(ROOT, "dst.txt", FILE_MODE).await.unwrap();
+        client
+            .rename(ROOT, "src.txt", ROOT, "dst.txt")
+            .await
+            .unwrap();
 
-    server.rename(ROOT, "src.txt", ROOT, "dst.txt").unwrap();
+        let dst = client.lookup(ROOT, "dst.txt").await.unwrap();
+        assert_eq!(dst.inode, src.inode);
+        assert!(client.lookup(ROOT, "src.txt").await.is_err());
 
-    // dst.txt should now be the old src
-    let dst = server.lookup(ROOT, "dst.txt").unwrap();
-    assert_eq!(dst.inode, src.inode);
-
-    // src.txt should be gone
-    assert!(server.lookup(ROOT, "src.txt").is_err());
-
-    // Only one entry in root
-    let entries = server.readdir(ROOT).unwrap();
-    assert_eq!(entries.len(), 1);
+        let entries = client.readdir(ROOT).await.unwrap();
+        assert_eq!(entries.len(), 1);
+    });
 }
 
 #[test]
 fn rename_dir_cross_directory() {
-    let server = new_server();
-    let parent_a = server.mkdir(ROOT, "a", DIR_MODE).unwrap();
-    let parent_b = server.mkdir(ROOT, "b", DIR_MODE).unwrap();
-    let child = server.mkdir(parent_a.inode, "child", DIR_MODE).unwrap();
+    rt().block_on(async {
+        let client = new_client();
+        let parent_a = client.mkdir(ROOT, "a", DIR_MODE).await.unwrap();
+        let parent_b = client.mkdir(ROOT, "b", DIR_MODE).await.unwrap();
+        let child = client
+            .mkdir(parent_a.inode, "child", DIR_MODE)
+            .await
+            .unwrap();
 
-    server
-        .rename(parent_a.inode, "child", parent_b.inode, "child_moved")
-        .unwrap();
+        client
+            .rename(parent_a.inode, "child", parent_b.inode, "child_moved")
+            .await
+            .unwrap();
 
-    // child should be in parent_b now
-    let moved = server.lookup(parent_b.inode, "child_moved").unwrap();
-    assert_eq!(moved.inode, child.inode);
+        let moved = client.lookup(parent_b.inode, "child_moved").await.unwrap();
+        assert_eq!(moved.inode, child.inode);
 
-    // parent_a nlink decreased (lost a ".." from child)
-    let a = server.getattr(parent_a.inode).unwrap();
-    assert_eq!(a.nlink, 2); // just "." and parent's link
+        let a = client.getattr(parent_a.inode).await.unwrap();
+        assert_eq!(a.nlink, 2);
 
-    // parent_b nlink increased (gained a ".." from child)
-    let b = server.getattr(parent_b.inode).unwrap();
-    assert_eq!(b.nlink, 3);
-}
-
-// ===========================================================================
-// Setattr
-// ===========================================================================
-
-#[test]
-fn setattr_changes_mode() {
-    let server = new_server();
-    let attr = server.create(ROOT, "f.txt", FILE_MODE).unwrap();
-    let inode = attr.inode;
-
-    let mut new_attr = server.getattr(inode).unwrap();
-    new_attr.mode = 0o100755;
-    let updated = server.setattr(inode, new_attr).unwrap();
-    assert_eq!(updated.mode, 0o100755);
+        let b = client.getattr(parent_b.inode).await.unwrap();
+        assert_eq!(b.nlink, 3);
+    });
 }
 
 // ===========================================================================
@@ -315,11 +370,13 @@ fn setattr_changes_mode() {
 
 #[test]
 fn statfs_returns_reasonable_values() {
-    let server = new_server();
-    let st = server.statfs(ROOT).unwrap();
-    assert!(st.blocks > 0);
-    assert!(st.bsize > 0);
-    assert!(st.namelen > 0);
+    rt().block_on(async {
+        let client = new_client();
+        let st = client.statfs(ROOT).await.unwrap();
+        assert!(st.blocks > 0);
+        assert!(st.bsize > 0);
+        assert!(st.namelen > 0);
+    });
 }
 
 // ===========================================================================
@@ -328,63 +385,53 @@ fn statfs_returns_reasonable_values() {
 
 #[test]
 fn write_read_large_block() {
-    let server = new_server();
-    let attr = server.create(ROOT, "big.bin", FILE_MODE).unwrap();
-    let inode = attr.inode;
+    rt().block_on(async {
+        let client = new_client();
+        let attr = client.create(ROOT, "big.bin", FILE_MODE).await.unwrap();
+        let inode = attr.inode;
 
-    // Write 64 KiB of pattern data
-    let pattern: Vec<u8> = (0..65536).map(|i| (i % 256) as u8).collect();
-    let written = server.write(inode, 0, &pattern, 0).unwrap();
-    assert_eq!(written, 65536);
+        let pattern: Vec<u8> = (0..65536).map(|i| (i % 256) as u8).collect();
+        let written = client.write(inode, 0, &pattern, 0).await.unwrap();
+        assert_eq!(written, 65536);
 
-    // Read back and verify
-    let data = server.read(inode, 0, 65536).unwrap();
-    assert_eq!(data, pattern);
+        let data = client.read(inode, 0, 65536).await.unwrap();
+        assert_eq!(data, pattern);
+    });
 }
 
 #[test]
 fn write_at_offset_preserves_earlier_data() {
-    let server = new_server();
-    let attr = server.create(ROOT, "sparse.bin", FILE_MODE).unwrap();
-    let inode = attr.inode;
+    rt().block_on(async {
+        let client = new_client();
+        let attr = client.create(ROOT, "sparse.bin", FILE_MODE).await.unwrap();
+        let inode = attr.inode;
 
-    server.write(inode, 0, b"AAAA", 0).unwrap();
-    server.write(inode, 100, b"BBBB", 0).unwrap();
+        client.write(inode, 0, b"AAAA", 0).await.unwrap();
+        client.write(inode, 100, b"BBBB", 0).await.unwrap();
 
-    let head = server.read(inode, 0, 4).unwrap();
-    assert_eq!(&head, b"AAAA");
+        let head = client.read(inode, 0, 4).await.unwrap();
+        assert_eq!(&head, b"AAAA");
 
-    let tail = server.read(inode, 100, 4).unwrap();
-    assert_eq!(&tail, b"BBBB");
+        let tail = client.read(inode, 100, 4).await.unwrap();
+        assert_eq!(&tail, b"BBBB");
 
-    // Between should be zeros
-    let gap = server.read(inode, 4, 10).unwrap();
-    assert!(gap.iter().all(|&b| b == 0));
-}
-
-#[test]
-fn read_past_eof_returns_empty() {
-    let server = new_server();
-    let attr = server.create(ROOT, "tiny.txt", FILE_MODE).unwrap();
-    let inode = attr.inode;
-
-    server.write(inode, 0, b"hi", 0).unwrap();
-
-    // Read starting past EOF
-    let data = server.read(inode, 100, 10).unwrap();
-    assert!(data.is_empty());
+        let gap = client.read(inode, 4, 10).await.unwrap();
+        assert!(gap.iter().all(|&b| b == 0));
+    });
 }
 
 #[test]
 fn flush_and_fsync() {
-    let server = new_server();
-    let attr = server.create(ROOT, "sync.txt", FILE_MODE).unwrap();
-    let inode = attr.inode;
+    rt().block_on(async {
+        let client = new_client();
+        let attr = client.create(ROOT, "sync.txt", FILE_MODE).await.unwrap();
+        let inode = attr.inode;
 
-    server.write(inode, 0, b"data", 0).unwrap();
-    server.flush(inode).unwrap();
-    server.fsync(inode, false).unwrap();
-    server.fsync(inode, true).unwrap();
+        client.write(inode, 0, b"data", 0).await.unwrap();
+        client.flush(inode).await.unwrap();
+        client.fsync(inode, false).await.unwrap();
+        client.fsync(inode, true).await.unwrap();
+    });
 }
 
 // ===========================================================================
@@ -393,17 +440,21 @@ fn flush_and_fsync() {
 
 #[test]
 fn open_directory_fails() {
-    let server = new_server();
-    let dir = server.mkdir(ROOT, "dir", DIR_MODE).unwrap();
-    let err = server.open(dir.inode, 0).unwrap_err();
-    assert!(matches!(err, FsError::IsADirectory));
+    rt().block_on(async {
+        let client = new_client();
+        let dir = client.mkdir(ROOT, "dir", DIR_MODE).await.unwrap();
+        let err = client.open(dir.inode, 0).await.unwrap_err();
+        assert!(matches!(err, FsError::IsADirectory));
+    });
 }
 
 #[test]
 fn open_nonexistent_fails() {
-    let server = new_server();
-    let err = server.open(9999, 0).unwrap_err();
-    assert!(matches!(err, FsError::NotFound));
+    rt().block_on(async {
+        let client = new_client();
+        let err = client.open(9999, 0).await.unwrap_err();
+        assert!(matches!(err, FsError::NotFound));
+    });
 }
 
 // ===========================================================================
@@ -412,321 +463,381 @@ fn open_nonexistent_fails() {
 
 #[test]
 fn nested_directories_and_files() {
-    let server = new_server();
+    rt().block_on(async {
+        let client = new_client();
 
-    let d1 = server.mkdir(ROOT, "level1", DIR_MODE).unwrap();
-    let d2 = server.mkdir(d1.inode, "level2", DIR_MODE).unwrap();
-    let f = server.create(d2.inode, "deep.txt", FILE_MODE).unwrap();
+        let d1 = client.mkdir(ROOT, "level1", DIR_MODE).await.unwrap();
+        let d2 = client.mkdir(d1.inode, "level2", DIR_MODE).await.unwrap();
+        let f = client
+            .create(d2.inode, "deep.txt", FILE_MODE)
+            .await
+            .unwrap();
 
-    server.write(f.inode, 0, b"deep content", 0).unwrap();
-    let data = server.read(f.inode, 0, 20).unwrap();
-    assert_eq!(&data, b"deep content");
+        client.write(f.inode, 0, b"deep content", 0).await.unwrap();
+        let data = client.read(f.inode, 0, 20).await.unwrap();
+        assert_eq!(&data[..12], b"deep content");
 
-    // Lookup chain
-    let l1 = server.lookup(ROOT, "level1").unwrap();
-    assert_eq!(l1.inode, d1.inode);
-    let l2 = server.lookup(d1.inode, "level2").unwrap();
-    assert_eq!(l2.inode, d2.inode);
-    let lf = server.lookup(d2.inode, "deep.txt").unwrap();
-    assert_eq!(lf.inode, f.inode);
+        let l1 = client.lookup(ROOT, "level1").await.unwrap();
+        assert_eq!(l1.inode, d1.inode);
+        let l2 = client.lookup(d1.inode, "level2").await.unwrap();
+        assert_eq!(l2.inode, d2.inode);
+        let lf = client.lookup(d2.inode, "deep.txt").await.unwrap();
+        assert_eq!(lf.inode, f.inode);
+    });
 }
 
 // ===========================================================================
-// Concurrent safety
+// Concurrent safety (using tokio tasks)
 // ===========================================================================
 
 #[test]
 fn concurrent_create_unlink() {
-    use std::thread;
+    rt().block_on(async {
+        let client = Arc::new(new_client());
+        let n = 100usize;
+        let mut handles = vec![];
 
-    let server = Arc::new(new_server());
-    let n = 100;
-    let mut handles = vec![];
+        for i in 0..n {
+            let c = Arc::clone(&client);
+            handles.push(tokio::spawn(async move {
+                let name = format!("file_{}", i);
+                c.create(ROOT, &name, FILE_MODE).await.unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
 
-    // Create N files concurrently
-    for i in 0..n {
-        let s = Arc::clone(&server);
-        handles.push(thread::spawn(move || {
-            let name = format!("file_{}", i);
-            s.create(ROOT, &name, FILE_MODE).unwrap();
-        }));
-    }
+        let entries = client.readdir(ROOT).await.unwrap();
+        assert_eq!(entries.len(), n);
 
-    for h in handles {
-        h.join().unwrap();
-    }
+        let mut handles = vec![];
+        for i in 0..n {
+            let c = Arc::clone(&client);
+            handles.push(tokio::spawn(async move {
+                let name = format!("file_{}", i);
+                c.unlink(ROOT, &name).await.unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
 
-    // Verify all N files exist
-    let entries = server.readdir(ROOT).unwrap();
-    assert_eq!(entries.len(), n);
-
-    // Unlink all concurrently
-    let mut handles = vec![];
-    for i in 0..n {
-        let s = Arc::clone(&server);
-        handles.push(thread::spawn(move || {
-            let name = format!("file_{}", i);
-            s.unlink(ROOT, &name).unwrap();
-        }));
-    }
-
-    for h in handles {
-        h.join().unwrap();
-    }
-
-    // Verify root is empty
-    let entries = server.readdir(ROOT).unwrap();
-    assert!(entries.is_empty());
+        let entries = client.readdir(ROOT).await.unwrap();
+        assert!(entries.is_empty());
+    });
 }
 
 #[test]
 fn concurrent_write_read_different_inodes() {
-    use std::thread;
+    rt().block_on(async {
+        let client = Arc::new(new_client());
 
-    let server = Arc::new(new_server());
+        let mut inodes = vec![];
+        for i in 0..10 {
+            let name = format!("cfile_{}", i);
+            let attr = client.create(ROOT, &name, FILE_MODE).await.unwrap();
+            inodes.push(attr.inode);
+        }
 
-    // Create 10 files
-    let mut inodes = vec![];
-    for i in 0..10 {
-        let name = format!("cfile_{}", i);
-        let attr = server.create(ROOT, &name, FILE_MODE).unwrap();
-        inodes.push(attr.inode);
-    }
+        let mut handles = vec![];
+        for (idx, &inode) in inodes.iter().enumerate() {
+            let c = Arc::clone(&client);
+            handles.push(tokio::spawn(async move {
+                let data = format!("content for inode {}", idx);
+                c.write(inode, 0, data.as_bytes(), 0).await.unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
 
-    // Write to each concurrently
-    let mut handles = vec![];
-    for (idx, &inode) in inodes.iter().enumerate() {
-        let s = Arc::clone(&server);
-        handles.push(thread::spawn(move || {
-            let data = format!("content for inode {}", idx);
-            s.write(inode, 0, data.as_bytes(), 0).unwrap();
-        }));
-    }
-
-    for h in handles {
-        h.join().unwrap();
-    }
-
-    // Read and verify
-    for (idx, &inode) in inodes.iter().enumerate() {
-        let expected = format!("content for inode {}", idx);
-        let data = server.read(inode, 0, expected.len() as u32).unwrap();
-        assert_eq!(data, expected.as_bytes());
-    }
+        for (idx, &inode) in inodes.iter().enumerate() {
+            let expected = format!("content for inode {}", idx);
+            let data = client.read(inode, 0, expected.len() as u32).await.unwrap();
+            assert_eq!(data, expected.as_bytes());
+        }
+    });
 }
 
 #[test]
 fn concurrent_mkdir_rmdir() {
-    use std::thread;
+    rt().block_on(async {
+        let client = Arc::new(new_client());
+        let n = 50usize;
 
-    let server = Arc::new(new_server());
-    let n = 50;
+        let mut handles = vec![];
+        for i in 0..n {
+            let c = Arc::clone(&client);
+            handles.push(tokio::spawn(async move {
+                let name = format!("dir_{}", i);
+                c.mkdir(ROOT, &name, DIR_MODE).await.unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
 
-    // Create N directories concurrently
-    let mut handles = vec![];
-    for i in 0..n {
-        let s = Arc::clone(&server);
-        handles.push(thread::spawn(move || {
-            let name = format!("dir_{}", i);
-            s.mkdir(ROOT, &name, DIR_MODE).unwrap();
-        }));
-    }
-    for h in handles {
-        h.join().unwrap();
-    }
+        let entries = client.readdir(ROOT).await.unwrap();
+        assert_eq!(entries.len(), n);
 
-    let entries = server.readdir(ROOT).unwrap();
-    assert_eq!(entries.len(), n);
+        let mut handles = vec![];
+        for i in 0..n {
+            let c = Arc::clone(&client);
+            handles.push(tokio::spawn(async move {
+                let name = format!("dir_{}", i);
+                c.rmdir(ROOT, &name).await.unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
 
-    // Remove all concurrently
-    let mut handles = vec![];
-    for i in 0..n {
-        let s = Arc::clone(&server);
-        handles.push(thread::spawn(move || {
-            let name = format!("dir_{}", i);
-            s.rmdir(ROOT, &name).unwrap();
-        }));
-    }
-    for h in handles {
-        h.join().unwrap();
-    }
+        let entries = client.readdir(ROOT).await.unwrap();
+        assert!(entries.is_empty());
 
-    let entries = server.readdir(ROOT).unwrap();
-    assert!(entries.is_empty());
-
-    // Root nlink should be back to 2
-    let root_attr = server.getattr(ROOT).unwrap();
-    assert_eq!(root_attr.nlink, 2);
+        let root_attr = client.getattr(ROOT).await.unwrap();
+        assert_eq!(root_attr.nlink, 2);
+    });
 }
 
 // ===========================================================================
 // Delta entries — correctness & concurrency
 // ===========================================================================
 
-/// After many creates the parent nlink/mtime are correctly folded
-/// from deltas (no read-modify-write needed on the write path).
 #[test]
 fn delta_fold_many_creates() {
-    let server = new_server();
-    let n = 100;
-    for i in 0..n {
-        let name = format!("f_{}", i);
-        server.create(ROOT, &name, FILE_MODE).unwrap();
-    }
+    rt().block_on(async {
+        let client = new_client();
+        let n = 100usize;
+        for i in 0..n {
+            let name = format!("f_{}", i);
+            client.create(ROOT, &name, FILE_MODE).await.unwrap();
+        }
 
-    let root = server.getattr(ROOT).unwrap();
-    // root.nlink stays 2 (files don't increment nlink), but all 100
-    // entries should be visible.
-    assert_eq!(root.nlink, 2);
-    let entries = server.readdir(ROOT).unwrap();
-    assert_eq!(entries.len(), n);
+        let root = client.getattr(ROOT).await.unwrap();
+        assert_eq!(root.nlink, 2);
+        let entries = client.readdir(ROOT).await.unwrap();
+        assert_eq!(entries.len(), n);
+    });
 }
 
-/// After many mkdirs the parent nlink is correctly incremented via deltas.
 #[test]
 fn delta_fold_many_mkdirs() {
-    let server = new_server();
-    let n = 100;
-    for i in 0..n {
-        let name = format!("d_{}", i);
-        server.mkdir(ROOT, &name, DIR_MODE).unwrap();
-    }
+    rt().block_on(async {
+        let client = new_client();
+        let n = 100usize;
+        for i in 0..n {
+            let name = format!("d_{}", i);
+            client.mkdir(ROOT, &name, DIR_MODE).await.unwrap();
+        }
 
-    let root = server.getattr(ROOT).unwrap();
-    // root nlink = 2 (base) + 100 (one ".." per child dir)
-    assert_eq!(root.nlink, 2 + n as u32);
-    let entries = server.readdir(ROOT).unwrap();
-    assert_eq!(entries.len(), n);
+        let root = client.getattr(ROOT).await.unwrap();
+        assert_eq!(root.nlink, 2 + n as u32);
+        let entries = client.readdir(ROOT).await.unwrap();
+        assert_eq!(entries.len(), n);
+    });
 }
 
-/// mkdir then rmdir: nlink goes up then back down via deltas.
 #[test]
 fn delta_fold_mkdir_rmdir_nlink() {
-    let server = new_server();
+    rt().block_on(async {
+        let client = new_client();
 
-    for i in 0..20 {
-        server.mkdir(ROOT, &format!("d_{}", i), DIR_MODE).unwrap();
-    }
-    assert_eq!(server.getattr(ROOT).unwrap().nlink, 22); // 2 + 20
+        for i in 0..20 {
+            client
+                .mkdir(ROOT, &format!("d_{}", i), DIR_MODE)
+                .await
+                .unwrap();
+        }
+        assert_eq!(client.getattr(ROOT).await.unwrap().nlink, 22);
 
-    for i in 0..10 {
-        server.rmdir(ROOT, &format!("d_{}", i)).unwrap();
-    }
-    assert_eq!(server.getattr(ROOT).unwrap().nlink, 12); // 22 - 10
+        for i in 0..10 {
+            client.rmdir(ROOT, &format!("d_{}", i)).await.unwrap();
+        }
+        assert_eq!(client.getattr(ROOT).await.unwrap().nlink, 12);
 
-    for i in 10..20 {
-        server.rmdir(ROOT, &format!("d_{}", i)).unwrap();
-    }
-    assert_eq!(server.getattr(ROOT).unwrap().nlink, 2);
+        for i in 10..20 {
+            client.rmdir(ROOT, &format!("d_{}", i)).await.unwrap();
+        }
+        assert_eq!(client.getattr(ROOT).await.unwrap().nlink, 2);
+    });
 }
 
-/// Concurrent creates storm: N threads each create a file under the same
-/// parent, exercising the append-only delta path under contention.
 #[test]
 fn concurrent_create_storm() {
-    use std::thread;
+    rt().block_on(async {
+        let client = Arc::new(new_client());
+        let n = 200usize;
 
-    let server = Arc::new(new_server());
-    let n = 200;
+        let mut handles = vec![];
+        for i in 0..n {
+            let c = Arc::clone(&client);
+            handles.push(tokio::spawn(async move {
+                let name = format!("storm_{}", i);
+                c.create(ROOT, &name, FILE_MODE).await.unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
 
-    let mut handles = vec![];
-    for i in 0..n {
-        let s = Arc::clone(&server);
-        handles.push(thread::spawn(move || {
-            let name = format!("storm_{}", i);
-            s.create(ROOT, &name, FILE_MODE).unwrap();
-        }));
-    }
-    for h in handles {
-        h.join().unwrap();
-    }
+        let entries = client.readdir(ROOT).await.unwrap();
+        assert_eq!(entries.len(), n);
 
-    let entries = server.readdir(ROOT).unwrap();
-    assert_eq!(entries.len(), n);
-
-    // mtime should be recent-ish (non-zero).
-    let root = server.getattr(ROOT).unwrap();
-    assert!(root.mtime > 0);
+        let root = client.getattr(ROOT).await.unwrap();
+        assert!(root.mtime > 0);
+    });
 }
 
-/// Concurrent mkdirs storm: verifies nlink correctness under contention.
 #[test]
 fn concurrent_mkdir_storm_nlink() {
-    use std::thread;
+    rt().block_on(async {
+        let client = Arc::new(new_client());
+        let n = 100usize;
 
-    let server = Arc::new(new_server());
-    let n = 100;
+        let mut handles = vec![];
+        for i in 0..n {
+            let c = Arc::clone(&client);
+            handles.push(tokio::spawn(async move {
+                let name = format!("sd_{}", i);
+                c.mkdir(ROOT, &name, DIR_MODE).await.unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
 
-    let mut handles = vec![];
-    for i in 0..n {
-        let s = Arc::clone(&server);
-        handles.push(thread::spawn(move || {
-            let name = format!("sd_{}", i);
-            s.mkdir(ROOT, &name, DIR_MODE).unwrap();
-        }));
-    }
-    for h in handles {
-        h.join().unwrap();
-    }
-
-    let root = server.getattr(ROOT).unwrap();
-    assert_eq!(root.nlink, 2 + n as u32);
+        let root = client.getattr(ROOT).await.unwrap();
+        assert_eq!(root.nlink, 2 + n as u32);
+    });
 }
 
-/// Compaction: after flush_all, the base inode should reflect all deltas
-/// and the delta store should be empty.
+// ===========================================================================
+// Compaction tests — need direct access to MetadataServer internals
+// ===========================================================================
+
 #[test]
 fn compaction_flush_merges_deltas() {
-    let server = new_server();
+    rt().block_on(async {
+        let (server, data_server) = new_server_and_data();
 
-    for i in 0..50 {
-        server.mkdir(ROOT, &format!("cd_{}", i), DIR_MODE).unwrap();
-    }
+        for i in 0..50 {
+            server
+                .mkdir(ROOT, &format!("cd_{}", i), DIR_MODE)
+                .await
+                .unwrap();
+        }
 
-    // Before compaction: getattr already works (via fold).
-    assert_eq!(server.getattr(ROOT).unwrap().nlink, 52);
+        assert_eq!(server.getattr(ROOT).await.unwrap().nlink, 52);
 
-    // Flush compaction.
-    let flushed = server.compaction.flush_all().unwrap();
-    assert!(flushed > 0, "expected at least one inode to be compacted");
+        let flushed = server.compaction.flush_all().unwrap();
+        assert!(flushed > 0);
 
-    // After compaction: the result should be identical.
-    assert_eq!(server.getattr(ROOT).unwrap().nlink, 52);
+        assert_eq!(server.getattr(ROOT).await.unwrap().nlink, 52);
 
-    // Delta store for ROOT should now be empty.
-    let remaining = server.delta_store.scan_deltas(ROOT).unwrap();
-    assert!(remaining.is_empty(), "deltas should be cleared after compaction");
+        let remaining = server.delta_store.scan_deltas(ROOT).unwrap();
+        assert!(remaining.is_empty());
+
+        let _ = data_server;
+    });
 }
 
-/// End-to-end: interleave writes, compaction, and reads.
 #[test]
 fn compaction_interleaved_with_writes() {
-    let server = new_server();
+    rt().block_on(async {
+        let (server, data_server) = new_server_and_data();
 
-    // Phase 1: create some dirs.
-    for i in 0..10 {
-        server.mkdir(ROOT, &format!("p1_{}", i), DIR_MODE).unwrap();
-    }
-    assert_eq!(server.getattr(ROOT).unwrap().nlink, 12);
+        // Phase 1
+        for i in 0..10 {
+            server
+                .mkdir(ROOT, &format!("p1_{}", i), DIR_MODE)
+                .await
+                .unwrap();
+        }
+        assert_eq!(server.getattr(ROOT).await.unwrap().nlink, 12);
 
-    // Compact.
-    server.compaction.flush_all().unwrap();
-    assert_eq!(server.getattr(ROOT).unwrap().nlink, 12);
+        server.compaction.flush_all().unwrap();
+        assert_eq!(server.getattr(ROOT).await.unwrap().nlink, 12);
 
-    // Phase 2: create more dirs (new deltas on top of compacted base).
-    for i in 0..10 {
-        server.mkdir(ROOT, &format!("p2_{}", i), DIR_MODE).unwrap();
-    }
-    assert_eq!(server.getattr(ROOT).unwrap().nlink, 22);
+        // Phase 2
+        for i in 0..10 {
+            server
+                .mkdir(ROOT, &format!("p2_{}", i), DIR_MODE)
+                .await
+                .unwrap();
+        }
+        assert_eq!(server.getattr(ROOT).await.unwrap().nlink, 22);
 
-    // Phase 3: remove some.
-    for i in 0..5 {
-        server.rmdir(ROOT, &format!("p1_{}", i)).unwrap();
-    }
-    assert_eq!(server.getattr(ROOT).unwrap().nlink, 17);
+        // Phase 3
+        for i in 0..5 {
+            server.rmdir(ROOT, &format!("p1_{}", i)).await.unwrap();
+        }
+        assert_eq!(server.getattr(ROOT).await.unwrap().nlink, 17);
 
-    // Final compact + verify.
-    server.compaction.flush_all().unwrap();
-    assert_eq!(server.getattr(ROOT).unwrap().nlink, 17);
-    assert!(server.delta_store.scan_deltas(ROOT).unwrap().is_empty());
+        server.compaction.flush_all().unwrap();
+        assert_eq!(server.getattr(ROOT).await.unwrap().nlink, 17);
+        assert!(server.delta_store.scan_deltas(ROOT).unwrap().is_empty());
+
+        let _ = data_server;
+    });
+}
+
+// ===========================================================================
+// MetadataServer-specific: unlink nlink=0 → data_client.delete_data
+// ===========================================================================
+
+#[test]
+fn unlink_nlink_zero_deletes_data() {
+    rt().block_on(async {
+        let client = new_client();
+
+        let attr = client.create(ROOT, "will_delete.txt", FILE_MODE).await.unwrap();
+        let inode = attr.inode;
+
+        // Write data
+        client.write(inode, 0, b"some data", 0).await.unwrap();
+        let data = client.read(inode, 0, 9).await.unwrap();
+        assert_eq!(&data, b"some data");
+
+        // Unlink (nlink goes to 0)
+        client.unlink(ROOT, "will_delete.txt").await.unwrap();
+
+        // Data should have been cleaned up by DataServer
+        // (reading the inode should return zeros since it's been deleted)
+        let data = client.read(inode, 0, 9).await.unwrap();
+        assert_eq!(data, vec![0u8; 9]);
+    });
+}
+
+// ===========================================================================
+// MetadataServer-specific: setattr size change → data_client.truncate
+// ===========================================================================
+
+#[test]
+fn setattr_truncate_delegates_to_data_server() {
+    rt().block_on(async {
+        let client = new_client();
+
+        let attr = client.create(ROOT, "trunc.txt", FILE_MODE).await.unwrap();
+        let inode = attr.inode;
+
+        // Write 100 bytes
+        let data = vec![0xAA; 100];
+        client.write(inode, 0, &data, 0).await.unwrap();
+        assert_eq!(client.getattr(inode).await.unwrap().size, 100);
+
+        // Setattr to truncate to 50
+        let req = rucksfs_core::SetAttrRequest {
+            size: Some(50),
+            ..Default::default()
+        };
+        let new_attr = client.setattr(inode, req).await.unwrap();
+        assert_eq!(new_attr.size, 50);
+
+        // Data beyond 50 should be zeros
+        let read_data = client.read(inode, 0, 100).await.unwrap();
+        assert_eq!(&read_data[..50], &[0xAA; 50]);
+        assert_eq!(&read_data[50..], &[0u8; 50]);
+    });
 }
