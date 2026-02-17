@@ -114,16 +114,17 @@ rucksfs is a user-space file system implemented in Rust. It exposes a standard P
 
 | Crate | Role |
 |-------|------|
-| `core` | Shared types (`FileAttr`, `DirEntry`, `StatFs`, `FsError`) and trait definitions (`PosixOps`, `ClientOps`) |
+| `core` | Shared types (`FileAttr`, `DirEntry`, `StatFs`, `FsError`, `OpenResponse`, `DataLocation`) and trait definitions (`MetadataOps`, `DataOps`, `VfsOps`) |
 | `storage` | Storage trait abstractions (`MetadataStore`, `DataStore`, `DirectoryIndex`, `DeltaStore`) and implementations (memory, RocksDB) |
-| `server` | Server-side POSIX logic — `MetadataServer<M, D, I>` implements `PosixOps` by composing the three storage traits |
-| `client` | FUSE mount layer (`FuseClient`) and client-side `ClientOps` adapter |
-| `rpc` | gRPC transport layer — protobuf definitions (`fuse.proto`), TLS, Bearer Token auth |
-| `demo` | Single-binary assembly — wires dummy storage into `MetadataServer`, bypasses gRPC for local testing |
+| `server` | `MetadataServer` — namespace & attribute engine, implements `MetadataOps`, delegates data I/O to DataServer via `Arc<dyn DataOps>` |
+| `dataserver` | `DataServer<D: DataStore>` — file data I/O engine, implements `DataOps` |
+| `client` | `VfsCore` (routing), `EmbeddedClient` (in-process), FUSE adapter (`FuseClient`), `mount_fuse` |
+| `rpc` | gRPC transport layer — `MetadataService` and `DataService` protobuf definitions, TLS, Bearer Token auth |
+| `demo` | Single-binary assembly — embeds MetadataServer + DataServer + EmbeddedClient, bypasses gRPC for local testing |
 
 ### 1.2 Core Design Goals
 
-1. **POSIX Compliance** — Implement all 15 operations defined in the `PosixOps` trait with correct POSIX semantics (atomic rename, nlink maintenance, permission checks, etc.).
+1. **POSIX Compliance** — Implement all POSIX operations defined in the `MetadataOps` / `DataOps` / `VfsOps` traits with correct POSIX semantics (atomic rename, nlink maintenance, permission checks, etc.).
 2. **Metadata / Data Separation** — Metadata (inode attributes, directory structure) and file content are stored in independent, pluggable engines linked only by inode ID.
 3. **Module Decoupling** — Each storage module is defined by a trait (`MetadataStore`, `DataStore`, `DirectoryIndex`). Implementations can be swapped without changing upper-layer logic.
 4. **Client / Server Separation** — The FUSE client and the storage server are independent components communicating via gRPC. They can be deployed on separate machines or compiled into a single binary for demo purposes.
@@ -159,42 +160,34 @@ rucksfs follows a strict **client / server** separation. The FUSE client handles
                      │  /dev/fuse
                      ▼
 ┌─────────────────────────────────────────────────┐
-│           client crate (FuseClient)             │
+│           client crate (VfsCore + FuseClient)   │
 │  ┌──────────────────────────────────────────┐   │
-│  │  fuser::Filesystem impl                  │   │
-│  │  Translates FUSE requests → ClientOps    │   │
+│  │  fuser::Filesystem impl (FuseClient)     │   │
+│  │  Translates FUSE requests → VfsOps       │   │
 │  └──────────────────┬───────────────────────┘   │
-│                     │ ClientOps trait            │
+│                     │ VfsOps trait               │
 │  ┌──────────────────▼───────────────────────┐   │
-│  │  RPC Client (tonic gRPC stub)            │   │
-│  │  Serializes to protobuf, sends over TLS  │   │
-│  └──────────────────┬───────────────────────┘   │
-└─────────────────────┼───────────────────────────┘
-                      │  gRPC / TLS + Bearer Token
-                      ▼
-┌─────────────────────────────────────────────────┐
-│           rpc crate (gRPC Server)               │
-│  ┌──────────────────────────────────────────┐   │
-│  │  FileSystemService impl                  │   │
-│  │  Deserializes protobuf → PosixOps calls  │   │
-│  └──────────────────┬───────────────────────┘   │
-└─────────────────────┼───────────────────────────┘
-                      │  PosixOps trait
-                      ▼
-┌─────────────────────────────────────────────────┐
-│       server crate (MetadataServer<M,D,I>)      │
-│  ┌──────────┐  ┌──────────┐  ┌──────────────┐  │
-│  │MetadataS.│  │DataStore │  │DirectoryIndex│  │
-│  │  (M)     │  │  (D)     │  │  (I)         │  │
-│  └────┬─────┘  └────┬─────┘  └──────┬───────┘  │
-└───────┼──────────────┼───────────────┼──────────┘
-        │              │               │
-        ▼              ▼               ▼
-   ┌─────────┐   ┌──────────┐   ┌──────────────┐
-   │ RocksDB │   │ Raw Disk │   │ RocksDB      │
-   │ (inode  │   │ data.img │   │ (dir index)  │
-   │  attrs) │   │          │   │              │
-   └─────────┘   └──────────┘   └──────────────┘
+│  │  EmbeddedClient / RucksClient (gRPC)     │   │
+│  │  Routes via VfsCore                      │   │
+│  └────────┬─────────────────┬───────────────┘   │
+└───────────┼─────────────────┼───────────────────┘
+            │ MetadataOps     │ DataOps
+            ▼                 ▼
+┌────────────────────┐  ┌─────────────────────────┐
+│ server crate       │  │ dataserver crate        │
+│ (MetadataServer)   │  │ (DataServer<D>)         │
+│ ┌────────────────┐ │  │ ┌───────────────────┐   │
+│ │MetadataStore   │ │  │ │DataStore          │   │
+│ │DirectoryIndex  │ │  │ │(Memory / RawDisk) │   │
+│ │DeltaStore      │ │  │ └─────────┬─────────┘   │
+│ └──────┬─────────┘ │  └───────────┼─────────────┘
+└────────┼───────────┘              │
+         │                          │
+         ▼                          ▼
+   ┌──────────────┐           ┌──────────┐
+   │ RocksDB /    │           │ Raw Disk │
+   │ Memory       │           │ / Memory │
+   └──────────────┘           └──────────┘
 ```
 
 ### 2.2 Crate Dependency Graph
@@ -203,7 +196,7 @@ Dependencies flow **downward only** — no circular dependencies exist.
 
 ```
                     ┌──────┐
-                    │ core │  (types + traits: PosixOps, ClientOps)
+                    │ core │  (types + traits: MetadataOps, DataOps, VfsOps)
                     └──┬───┘
             ┌──────────┼──────────────┐
             ▼          ▼              ▼
@@ -244,7 +237,7 @@ Precise dependency edges per crate:
 
 ### 2.3 gRPC Communication Protocol
 
-The `rpc` crate defines a `FileSystemService` in `fuse.proto` with 15 RPC methods, one for each `PosixOps` method. Each RPC maps 1:1:
+The `rpc` crate defines two gRPC services — `MetadataService` (in `metadata.proto`) and `DataService` (in `data.proto`). The metadata service exposes namespace operations corresponding to `MetadataOps`, while the data service exposes I/O operations corresponding to `DataOps`. The RPC methods map as follows:
 
 | RPC Method | Request Type | Response Type |
 |-----------|-------------|--------------|
@@ -323,25 +316,28 @@ Client and server run as separate processes, potentially on different machines:
 
 #### Mode B: Single-Binary Demo (Development / Testing)
 
-The `demo` crate compiles client and server into one process, **bypassing gRPC entirely**. The server's `PosixOps` implementation is injected directly into the client's FUSE layer via `Arc<dyn PosixOps>`.
+The `demo` crate compiles MetadataServer, DataServer, and EmbeddedClient into one process, **bypassing gRPC entirely**. The servers are injected directly into the client's VFS layer via `Arc<dyn MetadataOps>` and `Arc<dyn DataOps>`.
 
 ```rust
 // demo/src/main.rs — assembly sequence
-let metadata = Arc::new(DummyMetadataStore);   // → replace with RocksDB
-let index    = Arc::new(DummyDirectoryIndex);  // → replace with RocksDB
-let data     = Arc::new(DummyDataStore);       // → replace with RawDiskDataStore
+let metadata_store = Arc::new(MemoryMetadataStore::new());
+let dir_index      = Arc::new(MemoryDirectoryIndex::new());
+let delta_store    = Arc::new(MemoryDeltaStore::new());
+let data_store     = Arc::new(MemoryDataStore::new());
 
-let server = MetadataServer::new(metadata, data, index);
-// server implements PosixOps
+let data_server = Arc::new(DataServer::new(data_store));
+// data_server implements DataOps
 
-let client = build_client(Arc::new(server));
-// client wraps PosixOps as ClientOps (direct function call, no gRPC)
+let meta_server = Arc::new(MetadataServer::new(
+    metadata_store, dir_index, delta_store, data_server.clone(),
+));
+// meta_server implements MetadataOps
 
-mount_fuse("/tmp/rucksfs", Arc::new(client));
-// FuseClient receives FUSE requests → calls ClientOps → calls PosixOps
+let client = EmbeddedClient::new(meta_server, data_server);
+// client implements VfsOps, routes metadata → MetadataOps, data → DataOps
 ```
 
-**Injection chain:** `Concrete Storage Impls` → `MetadataServer<M,D,I>` (implements `PosixOps`) → `build_client()` (wraps as `ClientOps`) → `FuseClient` (implements `fuser::Filesystem`)
+**Injection chain:** `Concrete Storage Impls` → `DataServer<D>` (implements `DataOps`) + `MetadataServer` (implements `MetadataOps`) → `EmbeddedClient` (implements `VfsOps`) → `FuseClient` (implements `fuser::Filesystem`)
 
 This demo mode is the primary development target. All design decisions in this document are implementable within this single-binary assembly.
 
@@ -970,18 +966,22 @@ The trait-based design ensures that any storage backend can be replaced without 
 
 | Replacement Scenario | What Changes | What Stays |
 |---|---|---|
-| RocksDB → SQLite for metadata | Implement `MetadataStore` + `DirectoryIndex` for SQLite | `MetadataServer<M,D,I>`, `PosixOps` logic, client, FUSE layer |
-| Raw file → S3 for data | Implement `DataStore` for S3 | `MetadataServer<M,D,I>`, `PosixOps` logic, client, FUSE layer |
-| Single-node → distributed | Add sharding in `MetadataStore` impl | `PosixOps` semantics remain identical |
+| RocksDB → SQLite for metadata | Implement `MetadataStore` + `DirectoryIndex` for SQLite | `MetadataServer`, `MetadataOps` logic, client, FUSE layer |
+| Raw file → S3 for data | Implement `DataStore` for S3 | `DataServer`, `DataOps` logic, client, FUSE layer |
+| Single-node → distributed | Add sharding in `MetadataStore` impl | `MetadataOps` / `DataOps` semantics remain identical |
 
-The generic parameter constraints enforce this at compile time:
+The trait-based constraints enforce this at runtime via dynamic dispatch:
 ```rust
-impl<M, D, I> PosixOps for MetadataServer<M, D, I>
-where
-    M: MetadataStore,
-    D: DataStore,
-    I: DirectoryIndex,
-{ ... }
+impl MetadataOps for MetadataServer {
+    // MetadataServer holds Arc<dyn MetadataStore>, Arc<dyn DirectoryIndex>,
+    // Arc<dyn DeltaStore>, Arc<dyn DataOps>
+    ...
+}
+
+impl<D: DataStore> DataOps for DataServer<D> {
+    // DataServer<D> holds D: DataStore
+    ...
+}
 ```
 
 ### 5.4 RocksDB Recommended Configuration
@@ -2214,12 +2214,12 @@ Server → auth.rs: extract token, constant-time compare with configured secret
          If mismatch → return gRPC Status::Unauthenticated
          If match → extract caller identity (uid, gid) from token claims or metadata
          ↓
-         Pass (uid, gid) to PosixOps methods for permission checks
+         Pass (uid, gid) to MetadataOps / DataOps methods for permission checks
 ```
 
 **In demo mode (single binary):** Authentication is bypassed. The caller identity is hardcoded (e.g., uid=1000, gid=1000) or derived from the process's real UID.
 
-**In distributed mode:** The gRPC interceptor (`tonic::service::interceptor`) validates the Bearer Token before any `PosixOps` method is invoked. The token is verified using constant-time comparison to prevent timing attacks.
+**In distributed mode:** The gRPC interceptor (`tonic::service::interceptor`) validates the Bearer Token before any `MetadataOps` / `DataOps` method is invoked. The token is verified using constant-time comparison to prevent timing attacks.
 
 ### 8.3 Data Integrity
 

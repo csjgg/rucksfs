@@ -192,8 +192,8 @@ graph TB
     end
 
     APP -->|"POSIX syscalls"| FUSE_CLIENT
-    FUSE_CLIENT -->|"ClientOps → gRPC"| GRPC
-    GRPC -->|"PosixOps"| SERVER
+    FUSE_CLIENT -->|"VfsOps → gRPC"| GRPC
+    GRPC -->|"MetadataOps + DataOps"| SERVER
     SERVER -->|"MetadataStore"| ROCKS_META
     SERVER -->|"DirectoryIndex"| ROCKS_DIR
     SERVER -->|"counters"| ROCKS_SYS

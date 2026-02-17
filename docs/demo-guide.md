@@ -278,21 +278,28 @@ Without `--features rocksdb`, the `--persist` flag will print an error and exit.
 ## Architecture Overview
 
 ```
-┌────────────────────────────────────┐
-│           rucksfs-demo             │
-│  (CLI: auto / interactive / FUSE)  │
-├────────────┬───────────────────────┤
-│ rucksfs-   │    rucksfs-server     │
-│ client     │  (MetadataServer:     │
-│            │   PosixOps+ClientOps) │
-├────────────┴───────────────────────┤
-│         rucksfs-storage            │
-│  ┌────────────┐  ┌──────────────┐  │
-│  │ Memory*    │  │ RocksDB*     │  │
-│  │ (default)  │  │ (--persist)  │  │
-│  └────────────┘  └──────────────┘  │
-├────────────────────────────────────┤
-│           rucksfs-core             │
-│  (ClientOps, PosixOps, types)      │
-└────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│               rucksfs-demo                   │
+│  (CLI: auto-demo / interactive / FUSE)       │
+├──────────────────────────────────────────────┤
+│             rucksfs-client                   │
+│  ┌────────────────────────────────────────┐  │
+│  │ EmbeddedClient (in-process)            │  │
+│  │ VfsCore (routing: metadata ↔ data)     │  │
+│  └────────────┬───────────┬───────────────┘  │
+│         MetadataOps     DataOps              │
+├──────────────┬────────────┬──────────────────┤
+│ rucksfs-     │            │ rucksfs-         │
+│ server       │            │ dataserver       │
+│ (MetadataServer)          │ (DataServer)     │
+├──────────────┴────────────┴──────────────────┤
+│            rucksfs-storage                   │
+│  ┌──────────────┐  ┌─────────────────────┐   │
+│  │ Memory*      │  │ RocksDB + RawDisk*  │   │
+│  │ (default)    │  │ (--persist)         │   │
+│  └──────────────┘  └─────────────────────┘   │
+├──────────────────────────────────────────────┤
+│              rucksfs-core                    │
+│  (MetadataOps, DataOps, VfsOps, types)       │
+└──────────────────────────────────────────────┘
 ```
