@@ -702,3 +702,194 @@ async fn concurrent_statfs() {
         assert!(st.bsize > 0);
     }
 }
+
+// ===========================================================================
+// 16. Concurrent open on different files
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_open() {
+    let client = shared_client();
+    let n = 50;
+    let mut inodes = Vec::with_capacity(n);
+
+    for i in 0..n {
+        let name = format!("open_{}", i);
+        let attr = client.create(ROOT, &name, 0o644).await.unwrap();
+        inodes.push(attr.inode);
+    }
+
+    // Open all files concurrently
+    let mut handles = Vec::with_capacity(n);
+    for &inode in &inodes {
+        let c = Arc::clone(&client);
+        handles.push(tokio::spawn(async move {
+            // flags=0 for read
+            c.open(inode, 0).await
+        }));
+    }
+
+    for h in handles {
+        h.await.unwrap().unwrap();
+    }
+
+    // Open the same file concurrently from multiple tasks
+    let shared_inode = inodes[0];
+    let mut handles2 = Vec::with_capacity(n);
+    for _ in 0..n {
+        let c = Arc::clone(&client);
+        handles2.push(tokio::spawn(async move {
+            c.open(shared_inode, 0).await
+        }));
+    }
+
+    for h in handles2 {
+        h.await.unwrap().unwrap();
+    }
+}
+
+// ===========================================================================
+// 17. Concurrent flush on different files
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_flush() {
+    let client = shared_client();
+    let n = 50;
+    let mut inodes = Vec::with_capacity(n);
+
+    for i in 0..n {
+        let name = format!("flush_{}", i);
+        let attr = client.create(ROOT, &name, 0o644).await.unwrap();
+        // Write some data so flush has something to work with
+        let data = format!("flush data {}", i);
+        client.write(attr.inode, 0, data.as_bytes(), 0).await.unwrap();
+        inodes.push(attr.inode);
+    }
+
+    // Flush all files concurrently
+    let mut handles = Vec::with_capacity(n);
+    for &inode in &inodes {
+        let c = Arc::clone(&client);
+        handles.push(tokio::spawn(async move {
+            c.flush(inode).await
+        }));
+    }
+
+    for h in handles {
+        h.await.unwrap().unwrap();
+    }
+
+    // Verify data is still intact after flush
+    for (i, &inode) in inodes.iter().enumerate() {
+        let data = client.read(inode, 0, 4096).await.unwrap();
+        let expected = format!("flush data {}", i);
+        assert!(
+            data.starts_with(expected.as_bytes()),
+            "data mismatch after flush for file {}",
+            i
+        );
+    }
+}
+
+// ===========================================================================
+// 18. Concurrent fsync on different files
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_fsync() {
+    let client = shared_client();
+    let n = 50;
+    let mut inodes = Vec::with_capacity(n);
+
+    for i in 0..n {
+        let name = format!("fsync_{}", i);
+        let attr = client.create(ROOT, &name, 0o644).await.unwrap();
+        let data = format!("fsync data {}", i);
+        client.write(attr.inode, 0, data.as_bytes(), 0).await.unwrap();
+        inodes.push(attr.inode);
+    }
+
+    // fsync all files concurrently (datasync=false)
+    let mut handles = Vec::with_capacity(n);
+    for &inode in &inodes {
+        let c = Arc::clone(&client);
+        handles.push(tokio::spawn(async move {
+            c.fsync(inode, false).await
+        }));
+    }
+
+    for h in handles {
+        h.await.unwrap().unwrap();
+    }
+
+    // Also test datasync=true concurrently
+    let mut handles2 = Vec::with_capacity(n);
+    for &inode in &inodes {
+        let c = Arc::clone(&client);
+        handles2.push(tokio::spawn(async move {
+            c.fsync(inode, true).await
+        }));
+    }
+
+    for h in handles2 {
+        h.await.unwrap().unwrap();
+    }
+
+    // Verify data is still intact after fsync
+    for (i, &inode) in inodes.iter().enumerate() {
+        let data = client.read(inode, 0, 4096).await.unwrap();
+        let expected = format!("fsync data {}", i);
+        assert!(
+            data.starts_with(expected.as_bytes()),
+            "data mismatch after fsync for file {}",
+            i
+        );
+    }
+}
+
+// ===========================================================================
+// 19. Interleaved open + write + flush + fsync + read lifecycle
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_full_file_lifecycle() {
+    let client = shared_client();
+    let n = 50;
+
+    // Each task performs a complete file lifecycle: create → open → write → flush → fsync → read → unlink
+    let mut handles = Vec::with_capacity(n);
+    for i in 0..n {
+        let c = Arc::clone(&client);
+        handles.push(tokio::spawn(async move {
+            let name = format!("lifecycle_{}", i);
+            let attr = c.create(ROOT, &name, 0o644).await?;
+            let inode = attr.inode;
+
+            c.open(inode, 0).await?;
+
+            let content = format!("lifecycle content {}", i);
+            c.write(inode, 0, content.as_bytes(), 0).await?;
+
+            c.flush(inode).await?;
+            c.fsync(inode, false).await?;
+
+            let data = c.read(inode, 0, 4096).await?;
+            assert!(
+                data.starts_with(content.as_bytes()),
+                "lifecycle data mismatch for file {}",
+                i
+            );
+
+            c.unlink(ROOT, &name).await?;
+            Ok::<(), FsError>(())
+        }));
+    }
+
+    for h in handles {
+        h.await.unwrap().unwrap();
+    }
+
+    let entries = client.readdir(ROOT).await.unwrap();
+    assert_eq!(entries.len(), 0, "root should be empty after lifecycle storm");
+}
