@@ -224,6 +224,218 @@ cargo test --workspace -p rucksfs-storage --features rocksdb
 
 ---
 
+## E2E Testing Guide
+
+This section describes how to run end-to-end tests against a live RucksFS FUSE mount to verify correctness, concurrency safety, and POSIX compliance.
+
+### E2E Prerequisites
+
+- **Linux** with FUSE support (`fuse3` or `fuse` kernel module)
+- Rust toolchain (for building the project)
+- `fusermount` or `fusermount3` available in `$PATH`
+
+### Testing Layers
+
+RucksFS E2E testing is organized into two layers:
+
+| Layer | Scope | Platform | Tool |
+|-------|-------|----------|------|
+| **VfsOps stress tests** | In-process concurrency via `EmbeddedClient` | Any (macOS, Linux) | `cargo test` |
+| **FUSE E2E tests** | Real FUSE mount with POSIX operations | Linux only | Shell script + pjdfstest |
+
+#### Layer 1: VfsOps Stress Tests (Any OS)
+
+These tests exercise the full MetadataServer + DataServer + EmbeddedClient stack
+using in-memory storage with heavy concurrency via `tokio::spawn`.
+
+```bash
+# Run all stress / concurrency tests
+cargo test -p rucksfs-demo --test stress_test
+
+# Run with output visible
+cargo test -p rucksfs-demo --test stress_test -- --nocapture
+```
+
+**What they verify:**
+
+- Concurrent file creation (100+ files in parallel)
+- Concurrent mkdir in the same parent
+- Race condition on same-name creation (exactly 1 winner)
+- Concurrent writes at different offsets (data integrity)
+- Mixed concurrent read + write
+- Concurrent readdir + mkdir (consistent snapshots)
+- Concurrent rename (no ghost / lost files)
+- Concurrent unlink + lookup (no panics)
+- Metadata consistency after mass mutations
+- Large-scale creation (500+ files)
+- Concurrent setattr
+- Cross-directory concurrent rename
+- Create + write + read + unlink storm
+- Deep nested concurrent operations
+- Concurrent statfs
+
+#### Layer 2: FUSE E2E Tests (Linux Only)
+
+##### Option A: Built-in E2E Script
+
+The project includes an E2E shell script at `scripts/e2e_fuse_test.sh` that:
+
+1. Builds the project
+2. Mounts RucksFS via FUSE
+3. Runs basic operations (mkdir, write, read, rename, unlink, rmdir)
+4. Runs write-pattern tests (large files, append, data integrity via checksum)
+5. Runs concurrent stress tests (parallel create, write, mkdir, create-delete storm)
+6. Checks metadata consistency (stat sizes, chmod)
+7. Unmounts and reports results
+
+**Usage:**
+
+```bash
+# Basic run with in-memory storage
+./scripts/e2e_fuse_test.sh
+
+# With persistent RocksDB storage
+./scripts/e2e_fuse_test.sh --persist /tmp/rucksfs_data
+
+# Custom mount point
+./scripts/e2e_fuse_test.sh --mountpoint /mnt/rucksfs
+
+# Combined
+./scripts/e2e_fuse_test.sh --persist /tmp/rucksfs_data --mountpoint /mnt/rucksfs
+```
+
+**Example output:**
+
+```
+╔══════════════════════════════════════════════════════╗
+║       RucksFS — E2E FUSE Test Suite                 ║
+╚══════════════════════════════════════════════════════╝
+
+── Building rucksfs-demo ──
+Build OK
+
+── Mounting FUSE at /tmp/rucksfs_e2e ──
+FUSE mounted (PID=12345)
+
+══ Test Suite 1: Basic File Operations ══
+  ✓ PASS: mkdir creates directory
+  ✓ PASS: create file
+  ✓ PASS: write and read
+  ...
+
+══════════════════════════════════════════════════
+Results: 20 passed, 0 failed, 20 total
+══════════════════════════════════════════════════
+```
+
+##### Option B: pjdfstest (POSIX Compliance)
+
+[pjdfstest](https://github.com/pjd/pjdfstest) is an industry-standard POSIX
+filesystem compliance test suite. It covers `chmod`, `chown`, `link`, `mkdir`,
+`mkfifo`, `open`, `rename`, `rmdir`, `symlink`, `truncate`, `unlink`, and more.
+
+###### Installing pjdfstest
+
+```bash
+# Clone
+git clone https://github.com/pjd/pjdfstest.git
+cd pjdfstest
+
+# Build
+autoreconf -ifs
+./configure
+make
+```
+
+###### Running pjdfstest Against RucksFS
+
+**Step 1**: Mount RucksFS via FUSE.
+
+```bash
+# Build with RocksDB if you want persistence
+cargo build -p rucksfs-demo --features rocksdb
+
+# Mount (in-memory)
+./target/debug/rucksfs-demo --mount /tmp/rucksfs_e2e &
+
+# Or mount with persistence
+./target/debug/rucksfs-demo --mount /tmp/rucksfs_e2e --persist /tmp/rucksfs_data &
+```
+
+**Step 2**: Run pjdfstest.
+
+```bash
+cd /tmp/rucksfs_e2e
+
+# Run all tests (as root — required for chown/chmod tests)
+sudo prove -r /path/to/pjdfstest/tests/
+
+# Run specific test categories
+sudo prove /path/to/pjdfstest/tests/mkdir/
+sudo prove /path/to/pjdfstest/tests/open/
+sudo prove /path/to/pjdfstest/tests/rename/
+sudo prove /path/to/pjdfstest/tests/unlink/
+sudo prove /path/to/pjdfstest/tests/rmdir/
+sudo prove /path/to/pjdfstest/tests/truncate/
+```
+
+> **Note:** Some pjdfstest tests require root privileges for `chown` and special
+> file operations. Tests for `link` (hard links), `symlink`, and `mkfifo` will
+> fail if RucksFS does not yet implement those operations — this is expected.
+
+###### Interpreting pjdfstest Results
+
+```
+/path/to/pjdfstest/tests/mkdir/00.t .. ok
+/path/to/pjdfstest/tests/mkdir/01.t .. ok
+/path/to/pjdfstest/tests/open/00.t  .. ok
+/path/to/pjdfstest/tests/rename/00.t .. ok
+...
+All tests successful.
+Files=42, Tests=580, 12 wallclock secs
+Result: PASS
+```
+
+Tests that fail indicate POSIX operations that need to be implemented or fixed.
+Focus on the following categories first (which RucksFS already supports):
+
+| Category | Priority | Status |
+|----------|----------|--------|
+| `mkdir` | High | Should pass |
+| `rmdir` | High | Should pass |
+| `open` / `create` | High | Should pass |
+| `unlink` | High | Should pass |
+| `rename` | High | Should pass |
+| `truncate` | Medium | Should pass |
+| `chmod` | Medium | Should pass (via setattr) |
+| `chown` | Low | Partial support |
+| `link` (hard link) | Low | Not yet implemented |
+| `symlink` | Low | Not yet implemented |
+| `mkfifo` | Low | Not applicable |
+
+**Step 3**: Unmount.
+
+```bash
+fusermount -u /tmp/rucksfs_e2e
+```
+
+### Recommended Testing Workflow
+
+```
+1. Development (macOS / any OS)
+   └─> cargo test -p rucksfs-demo --test stress_test
+
+2. Pre-release (Linux)
+   └─> ./scripts/e2e_fuse_test.sh --persist /tmp/rucksfs_data
+   └─> Run pjdfstest for POSIX compliance
+
+3. CI (Linux with FUSE)
+   └─> cargo test (all unit + integration + stress tests)
+   └─> ./scripts/e2e_fuse_test.sh
+```
+
+---
+
 ## Troubleshooting
 
 ### RocksDB compilation fails
