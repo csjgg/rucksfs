@@ -49,15 +49,14 @@ async fn auto_demo_full_flow() {
     let (_tmp, client) = new_client();
 
     // 1. mkdir /mydir
-    let dir_attr = client.mkdir(ROOT, "mydir", 0o755).await.unwrap();
+    let dir_attr = client.mkdir(ROOT, "mydir", 0o755, 0, 0).await.unwrap();
     assert_eq!(dir_attr.mode & 0o040000, 0o040000);
     let mydir_inode = dir_attr.inode;
 
     // 2. create /mydir/hello.txt
-    let file_attr = client.create(mydir_inode, "hello.txt", 0o644).await.unwrap();
+    let file_attr = client.create(mydir_inode, "hello.txt", 0o644, 0, 0).await.unwrap();
     assert_eq!(file_attr.mode & 0o100000, 0o100000);
     let file_inode = file_attr.inode;
-
     // 3. write content
     let content = b"Hello, RucksFS!\n";
     let written = client.write(file_inode, 0, content, 0).await.unwrap();
@@ -103,7 +102,7 @@ async fn auto_demo_full_flow() {
 #[tokio::test(flavor = "multi_thread")]
 async fn mkdir_creates_directory() {
     let (_tmp, client) = new_client();
-    let attr = client.mkdir(ROOT, "testdir", 0o755).await.unwrap();
+    let attr = client.mkdir(ROOT, "testdir", 0o755, 0, 0).await.unwrap();
     assert_ne!(attr.inode, ROOT);
     assert_eq!(attr.mode & 0o040000, 0o040000);
 }
@@ -111,15 +110,15 @@ async fn mkdir_creates_directory() {
 #[tokio::test(flavor = "multi_thread")]
 async fn mkdir_duplicate_fails() {
     let (_tmp, client) = new_client();
-    client.mkdir(ROOT, "dup", 0o755).await.unwrap();
-    let result = client.mkdir(ROOT, "dup", 0o755).await;
+    client.mkdir(ROOT, "dup", 0o755, 0, 0).await.unwrap();
+    let result = client.mkdir(ROOT, "dup", 0o755, 0, 0).await;
     assert!(result.is_err());
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn create_file() {
     let (_tmp, client) = new_client();
-    let attr = client.create(ROOT, "myfile.txt", 0o644).await.unwrap();
+    let attr = client.create(ROOT, "myfile.txt", 0o644, 0, 0).await.unwrap();
     assert_eq!(attr.mode & 0o100000, 0o100000);
     assert_eq!(attr.size, 0);
 }
@@ -127,15 +126,15 @@ async fn create_file() {
 #[tokio::test(flavor = "multi_thread")]
 async fn create_duplicate_fails() {
     let (_tmp, client) = new_client();
-    client.create(ROOT, "dup.txt", 0o644).await.unwrap();
-    let result = client.create(ROOT, "dup.txt", 0o644).await;
+    client.create(ROOT, "dup.txt", 0o644, 0, 0).await.unwrap();
+    let result = client.create(ROOT, "dup.txt", 0o644, 0, 0).await;
     assert!(result.is_err());
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn write_and_read() {
     let (_tmp, client) = new_client();
-    let attr = client.create(ROOT, "data.bin", 0o644).await.unwrap();
+    let attr = client.create(ROOT, "data.bin", 0o644, 0, 0).await.unwrap();
     let inode = attr.inode;
 
     let data = b"test data 12345";
@@ -149,7 +148,7 @@ async fn write_and_read() {
 #[tokio::test(flavor = "multi_thread")]
 async fn write_at_offset() {
     let (_tmp, client) = new_client();
-    let attr = client.create(ROOT, "offset.bin", 0o644).await.unwrap();
+    let attr = client.create(ROOT, "offset.bin", 0o644, 0, 0).await.unwrap();
     let inode = attr.inode;
 
     client.write(inode, 0, b"AAAA", 0).await.unwrap();
@@ -162,7 +161,7 @@ async fn write_at_offset() {
 #[tokio::test(flavor = "multi_thread")]
 async fn read_empty_file() {
     let (_tmp, client) = new_client();
-    let attr = client.create(ROOT, "empty", 0o644).await.unwrap();
+    let attr = client.create(ROOT, "empty", 0o644, 0, 0).await.unwrap();
     let data = client.read(attr.inode, 0, 100).await.unwrap();
     assert!(data.iter().all(|&b| b == 0));
 }
@@ -170,7 +169,7 @@ async fn read_empty_file() {
 #[tokio::test(flavor = "multi_thread")]
 async fn lookup_existing() {
     let (_tmp, client) = new_client();
-    let created = client.create(ROOT, "findme", 0o644).await.unwrap();
+    let created = client.create(ROOT, "findme", 0o644, 0, 0).await.unwrap();
     let found = client.lookup(ROOT, "findme").await.unwrap();
     assert_eq!(found.inode, created.inode);
 }
@@ -192,9 +191,9 @@ async fn readdir_root_empty() {
 #[tokio::test(flavor = "multi_thread")]
 async fn readdir_multiple_entries() {
     let (_tmp, client) = new_client();
-    client.mkdir(ROOT, "d1", 0o755).await.unwrap();
-    client.mkdir(ROOT, "d2", 0o755).await.unwrap();
-    client.create(ROOT, "f1", 0o644).await.unwrap();
+    client.mkdir(ROOT, "d1", 0o755, 0, 0).await.unwrap();
+    client.mkdir(ROOT, "d2", 0o755, 0, 0).await.unwrap();
+    client.create(ROOT, "f1", 0o644, 0, 0).await.unwrap();
 
     let entries = client.readdir(ROOT).await.unwrap();
     assert_eq!(entries.len(), 3);
@@ -207,7 +206,7 @@ async fn readdir_multiple_entries() {
 #[tokio::test(flavor = "multi_thread")]
 async fn unlink_file() {
     let (_tmp, client) = new_client();
-    client.create(ROOT, "todelete", 0o644).await.unwrap();
+    client.create(ROOT, "todelete", 0o644, 0, 0).await.unwrap();
     client.unlink(ROOT, "todelete").await.unwrap();
     assert!(client.lookup(ROOT, "todelete").await.is_err());
 }
@@ -222,7 +221,7 @@ async fn unlink_nonexistent_fails() {
 #[tokio::test(flavor = "multi_thread")]
 async fn rmdir_empty() {
     let (_tmp, client) = new_client();
-    client.mkdir(ROOT, "emptydir", 0o755).await.unwrap();
+    client.mkdir(ROOT, "emptydir", 0o755, 0, 0).await.unwrap();
     client.rmdir(ROOT, "emptydir").await.unwrap();
     assert!(client.lookup(ROOT, "emptydir").await.is_err());
 }
@@ -230,8 +229,8 @@ async fn rmdir_empty() {
 #[tokio::test(flavor = "multi_thread")]
 async fn rmdir_nonempty_fails() {
     let (_tmp, client) = new_client();
-    let dir = client.mkdir(ROOT, "full", 0o755).await.unwrap();
-    client.create(dir.inode, "child", 0o644).await.unwrap();
+    let dir = client.mkdir(ROOT, "full", 0o755, 0, 0).await.unwrap();
+    client.create(dir.inode, "child", 0o644, 0, 0).await.unwrap();
     let result = client.rmdir(ROOT, "full").await;
     assert!(result.is_err());
 }
@@ -239,7 +238,7 @@ async fn rmdir_nonempty_fails() {
 #[tokio::test(flavor = "multi_thread")]
 async fn rename_same_parent() {
     let (_tmp, client) = new_client();
-    let attr = client.create(ROOT, "old", 0o644).await.unwrap();
+    let attr = client.create(ROOT, "old", 0o644, 0, 0).await.unwrap();
     client.rename(ROOT, "old", ROOT, "new").await.unwrap();
 
     assert!(client.lookup(ROOT, "old").await.is_err());
@@ -250,9 +249,9 @@ async fn rename_same_parent() {
 #[tokio::test(flavor = "multi_thread")]
 async fn rename_cross_parent() {
     let (_tmp, client) = new_client();
-    let d1 = client.mkdir(ROOT, "src", 0o755).await.unwrap();
-    let d2 = client.mkdir(ROOT, "dst", 0o755).await.unwrap();
-    let f = client.create(d1.inode, "moveme", 0o644).await.unwrap();
+    let d1 = client.mkdir(ROOT, "src", 0o755, 0, 0).await.unwrap();
+    let d2 = client.mkdir(ROOT, "dst", 0o755, 0, 0).await.unwrap();
+    let f = client.create(d1.inode, "moveme", 0o644, 0, 0).await.unwrap();
 
     client
         .rename(d1.inode, "moveme", d2.inode, "moved")
@@ -275,7 +274,7 @@ async fn getattr_root() {
 #[tokio::test(flavor = "multi_thread")]
 async fn setattr_changes_mode() {
     let (_tmp, client) = new_client();
-    let attr = client.create(ROOT, "chmod_me", 0o644).await.unwrap();
+    let attr = client.create(ROOT, "chmod_me", 0o644, 0, 0).await.unwrap();
     let req = rucksfs_core::SetAttrRequest {
         mode: Some(0o755),
         ..Default::default()
@@ -297,12 +296,12 @@ async fn statfs_returns_valid_data() {
 async fn deep_directory_tree() {
     let (_tmp, client) = new_client();
 
-    let a = client.mkdir(ROOT, "a", 0o755).await.unwrap();
-    let b = client.mkdir(a.inode, "b", 0o755).await.unwrap();
-    let c = client.mkdir(b.inode, "c", 0o755).await.unwrap();
-    let d = client.mkdir(c.inode, "d", 0o755).await.unwrap();
+    let a = client.mkdir(ROOT, "a", 0o755, 0, 0).await.unwrap();
+    let b = client.mkdir(a.inode, "b", 0o755, 0, 0).await.unwrap();
+    let c = client.mkdir(b.inode, "c", 0o755, 0, 0).await.unwrap();
+    let d = client.mkdir(c.inode, "d", 0o755, 0, 0).await.unwrap();
 
-    let f = client.create(d.inode, "deep.txt", 0o644).await.unwrap();
+    let f = client.create(d.inode, "deep.txt", 0o644, 0, 0).await.unwrap();
     client.write(f.inode, 0, b"deep content", 0).await.unwrap();
 
     let data = client.read(f.inode, 0, 100).await.unwrap();
@@ -363,10 +362,10 @@ mod rocksdb_tests {
         // Session 1: create files and write data
         {
             let client = persistent_client(tmp.path());
-            client.mkdir(ROOT, "persist_dir", 0o755).await.unwrap();
+            client.mkdir(ROOT, "persist_dir", 0o755, 0, 0).await.unwrap();
             let dir_attr = client.lookup(ROOT, "persist_dir").await.unwrap();
             let file_attr = client
-                .create(dir_attr.inode, "hello.txt", 0o644)
+                .create(dir_attr.inode, "hello.txt", 0o644, 0, 0)
                 .await
                 .unwrap();
             client
@@ -395,9 +394,9 @@ mod rocksdb_tests {
         // Session 1
         {
             let client = persistent_client(tmp.path());
-            let a = client.mkdir(ROOT, "alpha", 0o755).await.unwrap();
-            client.mkdir(a.inode, "beta", 0o755).await.unwrap();
-            client.create(ROOT, "root_file.txt", 0o644).await.unwrap();
+            let a = client.mkdir(ROOT, "alpha", 0o755, 0, 0).await.unwrap();
+            client.mkdir(a.inode, "beta", 0o755, 0, 0).await.unwrap();
+            client.create(ROOT, "root_file.txt", 0o644, 0, 0).await.unwrap();
         }
 
         // Session 2

@@ -41,17 +41,17 @@ Memory backends are for **tests only**; production uses RocksDB + RawDisk (`--pe
 | ID | Status | Task | Details | Affected Files |
 |----|--------|------|---------|----------------|
 | T-10 | ⬜ | RawDiskDataStore: `Mutex<File>` → `pread`/`pwrite` | Current code serializes all I/O through a global `Mutex<File>` + seek. Design §5.2 specifies `FileExt::read_at/write_at` which allow lock-free concurrent I/O. **Performance-critical.** | `storage/src/rawdisk.rs` |
-| T-11 | ⬜ | FUSE create/mkdir: respect caller `uid`/`gid` and `umask` | Hardcoded `uid: 0, gid: 0`. The `mode` is used but `umask` is ignored. | `client/src/fuse.rs`, `server/src/lib.rs` |
+| T-11 | ✅ | FUSE create/mkdir: respect caller `uid`/`gid` and `umask` | Added `uid`/`gid` params to `MetadataOps`/`VfsOps` traits. FUSE layer extracts `req.uid()`/`req.gid()` and applies `umask`. Server `InodeValue` now uses caller-supplied values. | `core/src/lib.rs`, `client/src/fuse.rs`, `client/src/vfs_core.rs`, `client/src/embedded.rs`, `server/src/lib.rs` |
 | T-12 | ✅ | rmdir/rename: fix TOCTOU on empty-check | Added `AtomicWriteBatch::is_dir_empty()` using `txn.prefix_iterator_cf()` for transactional reads. Both `rmdir` and `rename` now check emptiness inside the PCC transaction. | `storage/src/lib.rs`, `storage/src/rocks.rs`, `server/src/lib.rs` |
 
 ### P1 — Unimplemented Features (from design.md)
 
 | ID | Status | Task | Details | Affected Files |
 |----|--------|------|---------|----------------|
-| T-20 | ⬜ | POSIX permission model | Design §8.1: `check_permission(uid/gid/mode)` for every op. Currently all ops run as uid=0 with no checks. | `server/src/lib.rs`, `core/src/lib.rs` |
-| T-21 | ⬜ | `open()` flags validation | Design §6.3.1: check O_RDONLY/O_WRONLY/O_RDWR vs file permissions. Currently `_flags` is ignored. | `server/src/lib.rs` |
+| T-20 | ✅ | POSIX permission model | Covered by FUSE `default_permissions` mount option (T-24). Kernel VFS performs permission checks before requests reach the daemon. Server-side `check_permission()` deferred to future gRPC mode. | `client/src/fuse.rs` |
+| T-21 | ✅ | `open()` flags validation | Covered by FUSE `default_permissions` mount option (T-24). Kernel VFS checks open flags against inode permissions before forwarding to daemon. | `client/src/fuse.rs` |
 | T-22 | ⬜ | Deferred unlink (open handle tracking) | Design §6.2.4: unlinked files with open handles defer deletion until last close. No handle tracking exists. | `server/src/lib.rs`, `client/src/fuse.rs` |
 | T-23 | ⬜ | RocksDB per-CF tuning | Design §5.4: bloom filter, prefix extractor, compression per CF. Currently all default options. | `storage/src/rocks.rs` |
-| T-24 | ⬜ | FUSE mount options | Design §10.3: `allow_other`, `default_permissions`, `noatime`, `max_read`/`max_write`. Only `FSName` + `AutoUnmount` set. | `client/src/fuse.rs` |
+| T-24 | ✅ | FUSE mount options | Added `DefaultPermissions` + `AllowOther` to `mount_fuse()`. Kernel now enforces POSIX permission checks. Requires `user_allow_other` in `/etc/fuse.conf`. | `client/src/fuse.rs` |
 | T-25 | ⬜ | gRPC transport layer (Mode A) | Design §2.3/§2.5A: full gRPC client/server with protobuf + TLS + Bearer Token. `rpc` crate has no implementation. | `rpc/` |
 | T-26 | ⬜ | RawDiskDataStore crash recovery | Design §9.3: recovery mechanisms for the data file. No crash recovery logic exists. | `storage/src/rawdisk.rs` |

@@ -214,18 +214,22 @@ where
 
     fn create(
         &mut self,
-        _req: &Request<'_>,
+        req: &Request<'_>,
         parent: u64,
         name: &OsStr,
-        _mode: u32,
-        _umask: u32,
+        mode: u32,
+        umask: u32,
         _flags: i32,
         reply: ReplyCreate,
     ) {
         let name = name.to_string_lossy().to_string();
+        let uid = req.uid();
+        let gid = req.gid();
+        // Apply umask: strip bits that umask disallows, keep file-type bits.
+        let effective_mode = mode & !umask & 0o7777;
         let client = self.client.clone();
         let result = futures::executor::block_on(async move {
-            client.create(parent, &name, libc::S_IFREG as u32 | 0o644).await
+            client.create(parent, &name, effective_mode, uid, gid).await
         });
         match result {
             Ok(attr) => {
@@ -239,17 +243,21 @@ where
 
     fn mkdir(
         &mut self,
-        _req: &Request<'_>,
+        req: &Request<'_>,
         parent: u64,
         name: &OsStr,
-        _mode: u32,
-        _umask: u32,
+        mode: u32,
+        umask: u32,
         reply: ReplyEntry,
     ) {
         let name = name.to_string_lossy().to_string();
+        let uid = req.uid();
+        let gid = req.gid();
+        // Apply umask: strip bits that umask disallows, keep file-type bits.
+        let effective_mode = mode & !umask & 0o7777;
         let client = self.client.clone();
         let result = futures::executor::block_on(async move {
-            client.mkdir(parent, &name, libc::S_IFDIR as u32 | 0o755).await
+            client.mkdir(parent, &name, effective_mode, uid, gid).await
         });
         match result {
             Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
@@ -320,7 +328,7 @@ where
 
 #[cfg(target_os = "linux")]
 fn dir_entry_kind_to_file_type(kind: u32) -> FileType {
-    use libc::{S_IFDIR, S_IFREG};
+    use libc::S_IFDIR;
     let mt = kind & libc::S_IFMT;
     if mt == S_IFDIR {
         FileType::Directory
@@ -357,6 +365,8 @@ pub fn mount_fuse<C: VfsOps + 'static>(mountpoint: &str, client: Arc<C>) -> FsRe
     let options = vec![
         MountOption::FSName("rucksfs".to_string()),
         MountOption::AutoUnmount,
+        MountOption::DefaultPermissions,
+        MountOption::AllowOther,
     ];
     fuser::mount2(fs, mountpoint, &options).map_err(|e| FsError::Io(e.to_string()))
 }

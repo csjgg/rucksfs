@@ -119,7 +119,7 @@ fn file_lifecycle() {
         let (_tmp, client) = new_client();
 
         // Create
-        let attr = client.create(ROOT, "hello.txt", FILE_MODE).await.unwrap();
+        let attr = client.create(ROOT, "hello.txt", FILE_MODE, 0, 0).await.unwrap();
         assert_eq!(attr.nlink, 1);
         assert_eq!(attr.size, 0);
         assert_ne!(attr.mode & 0o100000, 0);
@@ -161,7 +161,7 @@ fn mkdir_and_readdir() {
     rt().block_on(async {
         let (_tmp, client) = new_client();
 
-        let dir_attr = client.mkdir(ROOT, "subdir", DIR_MODE).await.unwrap();
+        let dir_attr = client.mkdir(ROOT, "subdir", DIR_MODE, 0, 0).await.unwrap();
         assert_ne!(dir_attr.mode & 0o040000, 0);
         assert_eq!(dir_attr.nlink, 2);
 
@@ -178,7 +178,7 @@ fn mkdir_and_readdir() {
 fn rmdir_empty_directory() {
     rt().block_on(async {
         let (_tmp, client) = new_client();
-        client.mkdir(ROOT, "empty_dir", DIR_MODE).await.unwrap();
+        client.mkdir(ROOT, "empty_dir", DIR_MODE, 0, 0).await.unwrap();
         client.rmdir(ROOT, "empty_dir").await.unwrap();
 
         let entries = client.readdir(ROOT).await.unwrap();
@@ -193,9 +193,9 @@ fn rmdir_empty_directory() {
 fn rmdir_non_empty_fails() {
     rt().block_on(async {
         let (_tmp, client) = new_client();
-        let dir_attr = client.mkdir(ROOT, "mydir", DIR_MODE).await.unwrap();
+        let dir_attr = client.mkdir(ROOT, "mydir", DIR_MODE, 0, 0).await.unwrap();
         client
-            .create(dir_attr.inode, "file.txt", FILE_MODE)
+            .create(dir_attr.inode, "file.txt", FILE_MODE, 0, 0)
             .await
             .unwrap();
 
@@ -208,7 +208,7 @@ fn rmdir_non_empty_fails() {
 fn rmdir_non_directory_fails() {
     rt().block_on(async {
         let (_tmp, client) = new_client();
-        client.create(ROOT, "file.txt", FILE_MODE).await.unwrap();
+        client.create(ROOT, "file.txt", FILE_MODE, 0, 0).await.unwrap();
         let err = client.rmdir(ROOT, "file.txt").await.unwrap_err();
         assert!(matches!(err, FsError::NotADirectory));
     });
@@ -222,8 +222,8 @@ fn rmdir_non_directory_fails() {
 fn create_duplicate_name_fails() {
     rt().block_on(async {
         let (_tmp, client) = new_client();
-        client.create(ROOT, "dup.txt", FILE_MODE).await.unwrap();
-        let err = client.create(ROOT, "dup.txt", FILE_MODE).await.unwrap_err();
+        client.create(ROOT, "dup.txt", FILE_MODE, 0, 0).await.unwrap();
+        let err = client.create(ROOT, "dup.txt", FILE_MODE, 0, 0).await.unwrap_err();
         assert!(matches!(err, FsError::AlreadyExists));
     });
 }
@@ -232,8 +232,8 @@ fn create_duplicate_name_fails() {
 fn mkdir_duplicate_name_fails() {
     rt().block_on(async {
         let (_tmp, client) = new_client();
-        client.mkdir(ROOT, "dup_dir", DIR_MODE).await.unwrap();
-        let err = client.mkdir(ROOT, "dup_dir", DIR_MODE).await.unwrap_err();
+        client.mkdir(ROOT, "dup_dir", DIR_MODE, 0, 0).await.unwrap();
+        let err = client.mkdir(ROOT, "dup_dir", DIR_MODE, 0, 0).await.unwrap_err();
         assert!(matches!(err, FsError::AlreadyExists));
     });
 }
@@ -246,7 +246,7 @@ fn mkdir_duplicate_name_fails() {
 fn unlink_directory_fails() {
     rt().block_on(async {
         let (_tmp, client) = new_client();
-        client.mkdir(ROOT, "dir", DIR_MODE).await.unwrap();
+        client.mkdir(ROOT, "dir", DIR_MODE, 0, 0).await.unwrap();
         let err = client.unlink(ROOT, "dir").await.unwrap_err();
         assert!(matches!(err, FsError::IsADirectory));
     });
@@ -269,7 +269,7 @@ fn lookup_nonexistent_returns_not_found() {
 fn lookup_after_create() {
     rt().block_on(async {
         let (_tmp, client) = new_client();
-        let created = client.create(ROOT, "found.txt", FILE_MODE).await.unwrap();
+        let created = client.create(ROOT, "found.txt", FILE_MODE, 0, 0).await.unwrap();
         let looked_up = client.lookup(ROOT, "found.txt").await.unwrap();
         assert_eq!(created.inode, looked_up.inode);
     });
@@ -283,7 +283,7 @@ fn lookup_after_create() {
 fn rename_same_directory() {
     rt().block_on(async {
         let (_tmp, client) = new_client();
-        let attr = client.create(ROOT, "old.txt", FILE_MODE).await.unwrap();
+        let attr = client.create(ROOT, "old.txt", FILE_MODE, 0, 0).await.unwrap();
         let inode = attr.inode;
 
         client
@@ -301,11 +301,11 @@ fn rename_same_directory() {
 fn rename_cross_directory() {
     rt().block_on(async {
         let (_tmp, client) = new_client();
-        let dir_a = client.mkdir(ROOT, "dir_a", DIR_MODE).await.unwrap();
-        let dir_b = client.mkdir(ROOT, "dir_b", DIR_MODE).await.unwrap();
+        let dir_a = client.mkdir(ROOT, "dir_a", DIR_MODE, 0, 0).await.unwrap();
+        let dir_b = client.mkdir(ROOT, "dir_b", DIR_MODE, 0, 0).await.unwrap();
 
         let file = client
-            .create(dir_a.inode, "file.txt", FILE_MODE)
+            .create(dir_a.inode, "file.txt", FILE_MODE, 0, 0)
             .await
             .unwrap();
         client
@@ -323,10 +323,10 @@ fn rename_cross_directory() {
 fn rename_overwrite_file() {
     rt().block_on(async {
         let (_tmp, client) = new_client();
-        client.create(ROOT, "src.txt", FILE_MODE).await.unwrap();
+        client.create(ROOT, "src.txt", FILE_MODE, 0, 0).await.unwrap();
         let src = client.lookup(ROOT, "src.txt").await.unwrap();
 
-        client.create(ROOT, "dst.txt", FILE_MODE).await.unwrap();
+        client.create(ROOT, "dst.txt", FILE_MODE, 0, 0).await.unwrap();
         client
             .rename(ROOT, "src.txt", ROOT, "dst.txt")
             .await
@@ -345,10 +345,10 @@ fn rename_overwrite_file() {
 fn rename_dir_cross_directory() {
     rt().block_on(async {
         let (_tmp, client) = new_client();
-        let parent_a = client.mkdir(ROOT, "a", DIR_MODE).await.unwrap();
-        let parent_b = client.mkdir(ROOT, "b", DIR_MODE).await.unwrap();
+        let parent_a = client.mkdir(ROOT, "a", DIR_MODE, 0, 0).await.unwrap();
+        let parent_b = client.mkdir(ROOT, "b", DIR_MODE, 0, 0).await.unwrap();
         let child = client
-            .mkdir(parent_a.inode, "child", DIR_MODE)
+            .mkdir(parent_a.inode, "child", DIR_MODE, 0, 0)
             .await
             .unwrap();
 
@@ -391,7 +391,7 @@ fn statfs_returns_reasonable_values() {
 fn write_read_large_block() {
     rt().block_on(async {
         let (_tmp, client) = new_client();
-        let attr = client.create(ROOT, "big.bin", FILE_MODE).await.unwrap();
+        let attr = client.create(ROOT, "big.bin", FILE_MODE, 0, 0).await.unwrap();
         let inode = attr.inode;
 
         let pattern: Vec<u8> = (0..65536).map(|i| (i % 256) as u8).collect();
@@ -407,7 +407,7 @@ fn write_read_large_block() {
 fn write_at_offset_preserves_earlier_data() {
     rt().block_on(async {
         let (_tmp, client) = new_client();
-        let attr = client.create(ROOT, "sparse.bin", FILE_MODE).await.unwrap();
+        let attr = client.create(ROOT, "sparse.bin", FILE_MODE, 0, 0).await.unwrap();
         let inode = attr.inode;
 
         client.write(inode, 0, b"AAAA", 0).await.unwrap();
@@ -428,7 +428,7 @@ fn write_at_offset_preserves_earlier_data() {
 fn flush_and_fsync() {
     rt().block_on(async {
         let (_tmp, client) = new_client();
-        let attr = client.create(ROOT, "sync.txt", FILE_MODE).await.unwrap();
+        let attr = client.create(ROOT, "sync.txt", FILE_MODE, 0, 0).await.unwrap();
         let inode = attr.inode;
 
         client.write(inode, 0, b"data", 0).await.unwrap();
@@ -446,7 +446,7 @@ fn flush_and_fsync() {
 fn open_directory_fails() {
     rt().block_on(async {
         let (_tmp, client) = new_client();
-        let dir = client.mkdir(ROOT, "dir", DIR_MODE).await.unwrap();
+        let dir = client.mkdir(ROOT, "dir", DIR_MODE, 0, 0).await.unwrap();
         let err = client.open(dir.inode, 0).await.unwrap_err();
         assert!(matches!(err, FsError::IsADirectory));
     });
@@ -470,10 +470,10 @@ fn nested_directories_and_files() {
     rt().block_on(async {
         let (_tmp, client) = new_client();
 
-        let d1 = client.mkdir(ROOT, "level1", DIR_MODE).await.unwrap();
-        let d2 = client.mkdir(d1.inode, "level2", DIR_MODE).await.unwrap();
+        let d1 = client.mkdir(ROOT, "level1", DIR_MODE, 0, 0).await.unwrap();
+        let d2 = client.mkdir(d1.inode, "level2", DIR_MODE, 0, 0).await.unwrap();
         let f = client
-            .create(d2.inode, "deep.txt", FILE_MODE)
+            .create(d2.inode, "deep.txt", FILE_MODE, 0, 0)
             .await
             .unwrap();
 
@@ -506,7 +506,7 @@ fn concurrent_create_unlink() {
             let c = Arc::clone(&client);
             handles.push(tokio::spawn(async move {
                 let name = format!("file_{}", i);
-                c.create(ROOT, &name, FILE_MODE).await.unwrap();
+                c.create(ROOT, &name, FILE_MODE, 0, 0).await.unwrap();
             }));
         }
         for h in handles {
@@ -542,7 +542,7 @@ fn concurrent_write_read_different_inodes() {
         let mut inodes = vec![];
         for i in 0..10 {
             let name = format!("cfile_{}", i);
-            let attr = client.create(ROOT, &name, FILE_MODE).await.unwrap();
+            let attr = client.create(ROOT, &name, FILE_MODE, 0, 0).await.unwrap();
             inodes.push(attr.inode);
         }
 
@@ -578,7 +578,7 @@ fn concurrent_mkdir_rmdir() {
             let c = Arc::clone(&client);
             handles.push(tokio::spawn(async move {
                 let name = format!("dir_{}", i);
-                c.mkdir(ROOT, &name, DIR_MODE).await.unwrap();
+                c.mkdir(ROOT, &name, DIR_MODE, 0, 0).await.unwrap();
             }));
         }
         for h in handles {
@@ -619,7 +619,7 @@ fn delta_fold_many_creates() {
         let n = 100usize;
         for i in 0..n {
             let name = format!("f_{}", i);
-            client.create(ROOT, &name, FILE_MODE).await.unwrap();
+            client.create(ROOT, &name, FILE_MODE, 0, 0).await.unwrap();
         }
 
         let root = client.getattr(ROOT).await.unwrap();
@@ -636,7 +636,7 @@ fn delta_fold_many_mkdirs() {
         let n = 100usize;
         for i in 0..n {
             let name = format!("d_{}", i);
-            client.mkdir(ROOT, &name, DIR_MODE).await.unwrap();
+            client.mkdir(ROOT, &name, DIR_MODE, 0, 0).await.unwrap();
         }
 
         let root = client.getattr(ROOT).await.unwrap();
@@ -653,7 +653,7 @@ fn delta_fold_mkdir_rmdir_nlink() {
 
         for i in 0..20 {
             client
-                .mkdir(ROOT, &format!("d_{}", i), DIR_MODE)
+                .mkdir(ROOT, &format!("d_{}", i), DIR_MODE, 0, 0)
                 .await
                 .unwrap();
         }
@@ -683,7 +683,7 @@ fn concurrent_create_storm() {
             let c = Arc::clone(&client);
             handles.push(tokio::spawn(async move {
                 let name = format!("storm_{}", i);
-                c.create(ROOT, &name, FILE_MODE).await.unwrap();
+                c.create(ROOT, &name, FILE_MODE, 0, 0).await.unwrap();
             }));
         }
         for h in handles {
@@ -710,7 +710,7 @@ fn concurrent_mkdir_storm_nlink() {
             let c = Arc::clone(&client);
             handles.push(tokio::spawn(async move {
                 let name = format!("sd_{}", i);
-                c.mkdir(ROOT, &name, DIR_MODE).await.unwrap();
+                c.mkdir(ROOT, &name, DIR_MODE, 0, 0).await.unwrap();
             }));
         }
         for h in handles {
@@ -733,7 +733,7 @@ fn compaction_flush_merges_deltas() {
 
         for i in 0..50 {
             server
-                .mkdir(ROOT, &format!("cd_{}", i), DIR_MODE)
+                .mkdir(ROOT, &format!("cd_{}", i), DIR_MODE, 0, 0)
                 .await
                 .unwrap();
         }
@@ -760,7 +760,7 @@ fn compaction_interleaved_with_writes() {
         // Phase 1
         for i in 0..10 {
             server
-                .mkdir(ROOT, &format!("p1_{}", i), DIR_MODE)
+                .mkdir(ROOT, &format!("p1_{}", i), DIR_MODE, 0, 0)
                 .await
                 .unwrap();
         }
@@ -772,7 +772,7 @@ fn compaction_interleaved_with_writes() {
         // Phase 2
         for i in 0..10 {
             server
-                .mkdir(ROOT, &format!("p2_{}", i), DIR_MODE)
+                .mkdir(ROOT, &format!("p2_{}", i), DIR_MODE, 0, 0)
                 .await
                 .unwrap();
         }
@@ -801,7 +801,7 @@ fn unlink_nlink_zero_deletes_data() {
     rt().block_on(async {
         let (_tmp, client) = new_client();
 
-        let attr = client.create(ROOT, "will_delete.txt", FILE_MODE).await.unwrap();
+        let attr = client.create(ROOT, "will_delete.txt", FILE_MODE, 0, 0).await.unwrap();
         let inode = attr.inode;
 
         // Write data
@@ -828,7 +828,7 @@ fn setattr_truncate_delegates_to_data_server() {
     rt().block_on(async {
         let (_tmp, client) = new_client();
 
-        let attr = client.create(ROOT, "trunc.txt", FILE_MODE).await.unwrap();
+        let attr = client.create(ROOT, "trunc.txt", FILE_MODE, 0, 0).await.unwrap();
         let inode = attr.inode;
 
         // Write 100 bytes
@@ -883,7 +883,7 @@ fn rmdir_create_race_no_orphan_entries() {
 
         for round in 0..iterations {
             let dir_name = format!("race_dir_{}", round);
-            let dir_attr = client.mkdir(ROOT, &dir_name, DIR_MODE).await.unwrap();
+            let dir_attr = client.mkdir(ROOT, &dir_name, DIR_MODE, 0, 0).await.unwrap();
             let dir_inode = dir_attr.inode;
 
             let c1 = Arc::clone(&client);
@@ -893,7 +893,7 @@ fn rmdir_create_race_no_orphan_entries() {
 
             // Spawn: create a file inside the directory
             let create_handle = tokio::spawn(async move {
-                c1.create(dir_inode, "child.txt", FILE_MODE).await
+                c1.create(dir_inode, "child.txt", FILE_MODE, 0, 0).await
             });
 
             // Spawn: rmdir the directory
@@ -949,8 +949,8 @@ fn rename_onto_nonempty_dir_race() {
             let dst_name = format!("rdst_{}", round);
 
             // Create source dir and destination dir.
-            let _src = client.mkdir(ROOT, &src_name, DIR_MODE).await.unwrap();
-            let dst = client.mkdir(ROOT, &dst_name, DIR_MODE).await.unwrap();
+            let _src = client.mkdir(ROOT, &src_name, DIR_MODE, 0, 0).await.unwrap();
+            let dst = client.mkdir(ROOT, &dst_name, DIR_MODE, 0, 0).await.unwrap();
             let dst_inode = dst.inode;
 
             let c1 = Arc::clone(&client);
@@ -960,7 +960,7 @@ fn rename_onto_nonempty_dir_race() {
 
             // Spawn: create a file inside the destination directory.
             let create_handle = tokio::spawn(async move {
-                c1.create(dst_inode, "blocker.txt", FILE_MODE).await
+                c1.create(dst_inode, "blocker.txt", FILE_MODE, 0, 0).await
             });
 
             // Spawn: rename source onto destination (should fail if dst non-empty).

@@ -101,8 +101,8 @@ pub trait MetadataOps: Send + Sync {
     async fn lookup(&self, parent: Inode, name: &str) -> FsResult<FileAttr>;
     async fn getattr(&self, inode: Inode) -> FsResult<FileAttr>;
     async fn readdir(&self, inode: Inode) -> FsResult<Vec<DirEntry>>;
-    async fn create(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr>;
-    async fn mkdir(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr>;
+    async fn create(&self, parent: Inode, name: &str, mode: u32, uid: u32, gid: u32) -> FsResult<FileAttr>;
+    async fn mkdir(&self, parent: Inode, name: &str, mode: u32, uid: u32, gid: u32) -> FsResult<FileAttr>;
     async fn unlink(&self, parent: Inode, name: &str) -> FsResult<()>;
     async fn rmdir(&self, parent: Inode, name: &str) -> FsResult<()>;
     async fn rename(
@@ -144,8 +144,8 @@ pub trait VfsOps: Send + Sync {
     async fn lookup(&self, parent: Inode, name: &str) -> FsResult<FileAttr>;
     async fn getattr(&self, inode: Inode) -> FsResult<FileAttr>;
     async fn readdir(&self, inode: Inode) -> FsResult<Vec<DirEntry>>;
-    async fn create(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr>;
-    async fn mkdir(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr>;
+    async fn create(&self, parent: Inode, name: &str, mode: u32, uid: u32, gid: u32) -> FsResult<FileAttr>;
+    async fn mkdir(&self, parent: Inode, name: &str, mode: u32, uid: u32, gid: u32) -> FsResult<FileAttr>;
     async fn unlink(&self, parent: Inode, name: &str) -> FsResult<()>;
     async fn rmdir(&self, parent: Inode, name: &str) -> FsResult<()>;
     async fn rename(

@@ -426,7 +426,7 @@ where
         self.index.list_dir(inode)
     }
 
-    async fn create(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr> {
+    async fn create(&self, parent: Inode, name: &str, mode: u32, uid: u32, gid: u32) -> FsResult<FileAttr> {
         let name_owned = name.to_string();
 
         let (iv, new_inode) = self.execute_with_retry(|| {
@@ -446,8 +446,8 @@ where
                 size: 0,
                 mode: S_IFREG | (mode & 0o7777),
                 nlink: 1,
-                uid: 0,
-                gid: 0,
+                uid,
+                gid,
                 atime: ts,
                 mtime: ts,
                 ctime: ts,
@@ -479,7 +479,7 @@ where
         Ok(iv.to_attr())
     }
 
-    async fn mkdir(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr> {
+    async fn mkdir(&self, parent: Inode, name: &str, mode: u32, uid: u32, gid: u32) -> FsResult<FileAttr> {
         let name_owned = name.to_string();
 
         let (iv, new_inode) = self.execute_with_retry(|| {
@@ -499,8 +499,8 @@ where
                 size: 0,
                 mode: S_IFDIR | (mode & 0o7777),
                 nlink: 2,
-                uid: 0,
-                gid: 0,
+                uid,
+                gid,
                 atime: ts,
                 mtime: ts,
                 ctime: ts,

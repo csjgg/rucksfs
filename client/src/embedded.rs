@@ -42,12 +42,12 @@ impl VfsOps for EmbeddedClient {
         self.vfs.readdir(inode).await
     }
 
-    async fn create(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr> {
-        self.vfs.create(parent, name, mode).await
+    async fn create(&self, parent: Inode, name: &str, mode: u32, uid: u32, gid: u32) -> FsResult<FileAttr> {
+        self.vfs.create(parent, name, mode, uid, gid).await
     }
 
-    async fn mkdir(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr> {
-        self.vfs.mkdir(parent, name, mode).await
+    async fn mkdir(&self, parent: Inode, name: &str, mode: u32, uid: u32, gid: u32) -> FsResult<FileAttr> {
+        self.vfs.mkdir(parent, name, mode, uid, gid).await
     }
 
     async fn unlink(&self, parent: Inode, name: &str) -> FsResult<()> {

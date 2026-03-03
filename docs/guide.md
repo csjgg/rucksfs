@@ -202,6 +202,38 @@ fusermount -u /mnt/rucksfs
 
 On non-Linux platforms, `--mount` prints a warning and falls back to the auto-demo.
 
+### FUSE Mount Options
+
+RucksFS automatically sets the following FUSE mount options:
+
+| Option | Purpose |
+|---|---|
+| `fsname=rucksfs` | Identifies the filesystem in `/proc/mounts` |
+| `auto_unmount` | Automatically unmounts on process exit |
+| `default_permissions` | **Delegates POSIX permission checks to the Linux kernel VFS layer.** The kernel enforces `rwx` bits, ownership (`uid`/`gid`), and open flags before requests reach the FUSE daemon. |
+| `allow_other` | Allows users other than the mounter to access the filesystem |
+
+#### Enabling `allow_other`
+
+The `allow_other` option requires configuration in `/etc/fuse.conf`:
+
+```bash
+# Edit /etc/fuse.conf and uncomment or add:
+user_allow_other
+```
+
+Without this setting, mounting will fail with a permission error. If you are running as root, this restriction does not apply.
+
+#### How Permission Enforcement Works
+
+With `default_permissions` enabled:
+
+1. When a user calls `open()`, `mkdir()`, `unlink()`, etc., the **kernel** checks the inode's `uid`/`gid`/`mode` against the caller's credentials.
+2. If the check fails, the kernel returns `EACCES` immediately — the request **never reaches** the RucksFS FUSE daemon.
+3. RucksFS correctly sets `uid`/`gid` from the calling process on `create` and `mkdir`, and applies the user's `umask` to the file mode.
+
+This provides standard POSIX permission semantics (owner/group/other, `rwx` bits) with zero overhead in the FUSE daemon.
+
 ---
 
 ## TLS & Authentication

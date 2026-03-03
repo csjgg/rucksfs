@@ -52,7 +52,7 @@ fn shared_client() -> (tempfile::TempDir, Arc<EmbeddedClient>) {
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_create_files_in_same_dir() {
     let (_tmp, client) = shared_client();
-    let dir = client.mkdir(ROOT, "cdir", 0o755).await.unwrap();
+    let dir = client.mkdir(ROOT, "cdir", 0o755, 0, 0).await.unwrap();
     let dir_inode = dir.inode;
 
     let n = 100;
@@ -62,7 +62,7 @@ async fn concurrent_create_files_in_same_dir() {
         let c = Arc::clone(&client);
         handles.push(tokio::spawn(async move {
             let name = format!("file_{}", i);
-            c.create(dir_inode, &name, 0o644).await
+            c.create(dir_inode, &name, 0o644, 0, 0).await
         }));
     }
 
@@ -93,7 +93,7 @@ async fn concurrent_mkdir_in_same_parent() {
         let c = Arc::clone(&client);
         handles.push(tokio::spawn(async move {
             let name = format!("subdir_{}", i);
-            c.mkdir(ROOT, &name, 0o755).await
+            c.mkdir(ROOT, &name, 0o755, 0, 0).await
         }));
     }
 
@@ -122,7 +122,7 @@ async fn concurrent_create_same_name() {
     for _ in 0..n {
         let c = Arc::clone(&client);
         handles.push(tokio::spawn(async move {
-            c.create(ROOT, "collision", 0o644).await
+            c.create(ROOT, "collision", 0o644, 0, 0).await
         }));
     }
 
@@ -147,7 +147,7 @@ async fn concurrent_create_same_name() {
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_write_different_offsets() {
     let (_tmp, client) = shared_client();
-    let file = client.create(ROOT, "multi_write", 0o644).await.unwrap();
+    let file = client.create(ROOT, "multi_write", 0o644, 0, 0).await.unwrap();
     let inode = file.inode;
 
     let chunk_size: u64 = 64;
@@ -192,7 +192,7 @@ async fn concurrent_write_different_offsets() {
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_read_write_same_file() {
     let (_tmp, client) = shared_client();
-    let file = client.create(ROOT, "rw_mix", 0o644).await.unwrap();
+    let file = client.create(ROOT, "rw_mix", 0o644, 0, 0).await.unwrap();
     let inode = file.inode;
 
     // Pre-fill with known data
@@ -236,7 +236,7 @@ async fn concurrent_read_write_same_file() {
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_readdir_and_mkdir() {
     let (_tmp, client) = shared_client();
-    let parent = client.mkdir(ROOT, "readdir_parent", 0o755).await.unwrap();
+    let parent = client.mkdir(ROOT, "readdir_parent", 0o755, 0, 0).await.unwrap();
     let parent_inode = parent.inode;
 
     let n = 40;
@@ -247,7 +247,7 @@ async fn concurrent_readdir_and_mkdir() {
         let c = Arc::clone(&client);
         handles.push(tokio::spawn(async move {
             let name = format!("child_{}", i);
-            c.mkdir(parent_inode, &name, 0o755).await.map(|_| ())
+            c.mkdir(parent_inode, &name, 0o755, 0, 0).await.map(|_| ())
         }));
     }
 
@@ -288,7 +288,7 @@ async fn concurrent_rename_different_files() {
     let mut inodes = Vec::with_capacity(n);
     for i in 0..n {
         let name = format!("before_{}", i);
-        let attr = client.create(ROOT, &name, 0o644).await.unwrap();
+        let attr = client.create(ROOT, &name, 0o644, 0, 0).await.unwrap();
         inodes.push(attr.inode);
     }
 
@@ -329,7 +329,7 @@ async fn concurrent_unlink_and_lookup() {
     // Create files
     for i in 0..n {
         let name = format!("ephemeral_{}", i);
-        client.create(ROOT, &name, 0o644).await.unwrap();
+        client.create(ROOT, &name, 0o644, 0, 0).await.unwrap();
     }
 
     let mut handles = Vec::new();
@@ -380,12 +380,12 @@ async fn metadata_consistency_after_stress() {
 
     for d in 0..n_dirs {
         let name = format!("stressdir_{}", d);
-        let dir = client.mkdir(ROOT, &name, 0o755).await.unwrap();
+        let dir = client.mkdir(ROOT, &name, 0o755, 0, 0).await.unwrap();
         dir_inodes.push(dir.inode);
 
         for f in 0..n_files_per_dir {
             let fname = format!("file_{}", f);
-            let file = client.create(dir.inode, &fname, 0o644).await.unwrap();
+            let file = client.create(dir.inode, &fname, 0o644, 0, 0).await.unwrap();
             // Write some data
             let content = format!("dir{}file{}", d, f);
             client
@@ -470,7 +470,7 @@ async fn metadata_consistency_after_stress() {
 #[tokio::test(flavor = "multi_thread")]
 async fn large_scale_concurrent_create() {
     let (_tmp, client) = shared_client();
-    let dir = client.mkdir(ROOT, "bigdir", 0o755).await.unwrap();
+    let dir = client.mkdir(ROOT, "bigdir", 0o755, 0, 0).await.unwrap();
     let dir_inode = dir.inode;
 
     let n = 500;
@@ -480,7 +480,7 @@ async fn large_scale_concurrent_create() {
         let c = Arc::clone(&client);
         handles.push(tokio::spawn(async move {
             let name = format!("item_{:04}", i);
-            c.create(dir_inode, &name, 0o644).await
+            c.create(dir_inode, &name, 0o644, 0, 0).await
         }));
     }
 
@@ -511,7 +511,7 @@ async fn concurrent_setattr() {
 
     for i in 0..n {
         let name = format!("chmod_{}", i);
-        let attr = client.create(ROOT, &name, 0o644).await.unwrap();
+        let attr = client.create(ROOT, &name, 0o644, 0, 0).await.unwrap();
         inodes.push(attr.inode);
     }
 
@@ -542,14 +542,14 @@ async fn concurrent_setattr() {
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_cross_directory_rename() {
     let (_tmp, client) = shared_client();
-    let src_dir = client.mkdir(ROOT, "src_dir", 0o755).await.unwrap();
-    let dst_dir = client.mkdir(ROOT, "dst_dir", 0o755).await.unwrap();
+    let src_dir = client.mkdir(ROOT, "src_dir", 0o755, 0, 0).await.unwrap();
+    let dst_dir = client.mkdir(ROOT, "dst_dir", 0o755, 0, 0).await.unwrap();
 
     let n = 30;
     let mut original_inodes = Vec::with_capacity(n);
     for i in 0..n {
         let name = format!("mover_{}", i);
-        let attr = client.create(src_dir.inode, &name, 0o644).await.unwrap();
+        let attr = client.create(src_dir.inode, &name, 0o644, 0, 0).await.unwrap();
         original_inodes.push(attr.inode);
     }
 
@@ -600,7 +600,7 @@ async fn create_unlink_storm() {
         let c = Arc::clone(&client);
         handles.push(tokio::spawn(async move {
             let name = format!("storm_{}", i);
-            let attr = c.create(ROOT, &name, 0o644).await?;
+            let attr = c.create(ROOT, &name, 0o644, 0, 0).await?;
             let content = format!("storm data {}", i);
             c.write(attr.inode, 0, content.as_bytes(), 0).await?;
 
@@ -634,11 +634,11 @@ async fn deep_nested_concurrent_ops() {
     let (_tmp, client) = shared_client();
 
     // Build a deep tree: /a/b/c/d/e
-    let a = client.mkdir(ROOT, "a", 0o755).await.unwrap();
-    let b = client.mkdir(a.inode, "b", 0o755).await.unwrap();
-    let c = client.mkdir(b.inode, "c", 0o755).await.unwrap();
-    let d = client.mkdir(c.inode, "d", 0o755).await.unwrap();
-    let e = client.mkdir(d.inode, "e", 0o755).await.unwrap();
+    let a = client.mkdir(ROOT, "a", 0o755, 0, 0).await.unwrap();
+    let b = client.mkdir(a.inode, "b", 0o755, 0, 0).await.unwrap();
+    let c = client.mkdir(b.inode, "c", 0o755, 0, 0).await.unwrap();
+    let d = client.mkdir(c.inode, "d", 0o755, 0, 0).await.unwrap();
+    let e = client.mkdir(d.inode, "e", 0o755, 0, 0).await.unwrap();
 
     let leaf_inode = e.inode;
     let n = 50;
@@ -649,7 +649,7 @@ async fn deep_nested_concurrent_ops() {
         let c = Arc::clone(&client);
         handles.push(tokio::spawn(async move {
             let name = format!("deep_{}", i);
-            let attr = c.create(leaf_inode, &name, 0o644).await?;
+            let attr = c.create(leaf_inode, &name, 0o644, 0, 0).await?;
             let data = format!("deep content {}", i);
             c.write(attr.inode, 0, data.as_bytes(), 0).await?;
             Ok::<_, FsError>(attr.inode)
@@ -719,7 +719,7 @@ async fn concurrent_open() {
 
     for i in 0..n {
         let name = format!("open_{}", i);
-        let attr = client.create(ROOT, &name, 0o644).await.unwrap();
+        let attr = client.create(ROOT, &name, 0o644, 0, 0).await.unwrap();
         inodes.push(attr.inode);
     }
 
@@ -764,7 +764,7 @@ async fn concurrent_flush() {
 
     for i in 0..n {
         let name = format!("flush_{}", i);
-        let attr = client.create(ROOT, &name, 0o644).await.unwrap();
+        let attr = client.create(ROOT, &name, 0o644, 0, 0).await.unwrap();
         // Write some data so flush has something to work with
         let data = format!("flush data {}", i);
         client.write(attr.inode, 0, data.as_bytes(), 0).await.unwrap();
@@ -808,7 +808,7 @@ async fn concurrent_fsync() {
 
     for i in 0..n {
         let name = format!("fsync_{}", i);
-        let attr = client.create(ROOT, &name, 0o644).await.unwrap();
+        let attr = client.create(ROOT, &name, 0o644, 0, 0).await.unwrap();
         let data = format!("fsync data {}", i);
         client.write(attr.inode, 0, data.as_bytes(), 0).await.unwrap();
         inodes.push(attr.inode);
@@ -867,7 +867,7 @@ async fn concurrent_full_file_lifecycle() {
         let c = Arc::clone(&client);
         handles.push(tokio::spawn(async move {
             let name = format!("lifecycle_{}", i);
-            let attr = c.create(ROOT, &name, 0o644).await?;
+            let attr = c.create(ROOT, &name, 0o644, 0, 0).await?;
             let inode = attr.inode;
 
             c.open(inode, 0).await?;

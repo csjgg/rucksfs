@@ -117,7 +117,7 @@ async fn run_auto_demo(client: &impl VfsOps) {
 
     // 1. mkdir /mydir
     print_step(1, "mkdir /mydir");
-    match client.mkdir(ROOT, "mydir", 0o755).await {
+    match client.mkdir(ROOT, "mydir", 0o755, 0, 0).await {
         Ok(attr) => println!("   ✓ Created directory inode={}, mode={:#o}", attr.inode, attr.mode),
         Err(e) => println!("   ✗ {}", e),
     }
@@ -131,7 +131,7 @@ async fn run_auto_demo(client: &impl VfsOps) {
             return;
         }
     };
-    let file_inode = match client.create(mydir_inode, "hello.txt", 0o644).await {
+    let file_inode = match client.create(mydir_inode, "hello.txt", 0o644, 0, 0).await {
         Ok(attr) => {
             println!("   ✓ Created file inode={}, mode={:#o}", attr.inode, attr.mode);
             attr.inode
@@ -362,7 +362,7 @@ async fn run_repl(client: &impl VfsOps) {
                     None => { eprintln!("  usage: mkdir <path>"); continue; }
                 };
                 match resolve_parent(client, path).await {
-                    Ok((parent, name)) => match client.mkdir(parent, &name, 0o755).await {
+                    Ok((parent, name)) => match client.mkdir(parent, &name, 0o755, 0, 0).await {
                         Ok(attr) => println!("  created directory inode={}", attr.inode),
                         Err(e) => eprintln!("  error: {}", e),
                     },
@@ -376,7 +376,7 @@ async fn run_repl(client: &impl VfsOps) {
                     None => { eprintln!("  usage: touch <path>"); continue; }
                 };
                 match resolve_parent(client, path).await {
-                    Ok((parent, name)) => match client.create(parent, &name, 0o644).await {
+                    Ok((parent, name)) => match client.create(parent, &name, 0o644, 0, 0).await {
                         Ok(attr) => println!("  created file inode={}", attr.inode),
                         Err(e) => eprintln!("  error: {}", e),
                     },
