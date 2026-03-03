@@ -1,18 +1,18 @@
 # RucksFS
 
-A modular, trait-based user-space file system built in Rust. Inspired by JuiceFS, RucksFS cleanly separates **metadata** and **data** paths: the MetadataServer manages the namespace, and the DataServer stores file contents. Clients route operations through a thin VFS layer.
+A standalone, single-process POSIX file system built in Rust, backed by **RocksDB** for metadata and **RawDisk** for file data. RucksFS runs as a single binary — metadata and data engines are embedded in the same process, eliminating network overhead while maintaining a clean separation of concerns through trait-based abstractions.
 
 ---
 
-## Features
+## Highlights
 
-- **Full POSIX semantics**: `mkdir`, `create`, `read`, `write`, `rename`, `unlink`, `rmdir`, `readdir`, `getattr`, `setattr`, `statfs`, `flush`, `fsync`
-- **Metadata / Data split**: MetadataServer handles namespace and attributes; DataServer handles file I/O
-- **Pluggable storage**: In-memory (default) or persistent (RocksDB + RawDisk) via feature flags
-- **Delta-based metadata updates**: Append-only deltas with background compaction for high write throughput
-- **FUSE mount**: Mount as a real filesystem on Linux
-- **gRPC RPC**: MetadataService and DataService defined in Protocol Buffers
-- **Single-binary demo**: Embed MetadataServer + DataServer + EmbeddedClient in one process
+- **Single binary, zero deployment complexity** — one executable, no daemons or external databases
+- **Full POSIX semantics** — `mkdir`, `create`, `read`, `write`, `rename`, `unlink`, `rmdir`, `readdir`, `getattr`, `setattr`, `statfs`, `flush`, `fsync`
+- **RocksDB-backed metadata** — LSM-tree optimized for write-heavy workloads with structured key encoding
+- **Delta-based metadata updates** — append-only deltas with background compaction for high write throughput
+- **FUSE mount** — mount as a real Linux filesystem, usable by any program
+- **Interactive REPL** — built-in shell for exploring and manipulating the filesystem
+- **Pluggable storage traits** — `MetadataStore`, `DataStore`, `DirectoryIndex`, `DeltaStore` abstractions enable alternative backends
 
 ---
 
@@ -20,95 +20,59 @@ A modular, trait-based user-space file system built in Rust. Inspired by JuiceFS
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│                   rucksfs-demo                       │
-│  (CLI: auto-demo / interactive REPL / FUSE mount)    │
+│                     rucksfs (binary)                 │
+│  CLI: auto-demo │ interactive REPL │ FUSE mount      │
 ├──────────────────────────────────────────────────────┤
-│           rucksfs-client                             │
-│  ┌──────────────────┐  ┌──────────────────────────┐  │
-│  │ EmbeddedClient   │  │ RucksClient (gRPC)       │  │
-│  │ (in-process)     │  │ (network, planned)       │  │
-│  └────────┬─────────┘  └────────┬─────────────────┘  │
-│           └─────────┬───────────┘                    │
-│                VfsCore (routing)                     │
-│           ┌─────────┴───────────┐                    │
-│    MetadataOps              DataOps                  │
-├──────────────────┬───────────────────────────────────┤
-│ rucksfs-server   │         rucksfs-dataserver        │
-│ (MetadataServer) │         (DataServer<D>)           │
-├──────────────────┴───────────────────────────────────┤
+│                   rucksfs-client                     │
+│  ┌────────────────────────────────────────────────┐  │
+│  │ EmbeddedClient (in-process, no network)        │  │
+│  │ VfsCore (routes metadata ↔ data operations)    │  │
+│  └────────────┬──────────────┬────────────────────┘  │
+│        MetadataOps         DataOps                   │
+├───────────────┬──────────────┬───────────────────────┤
+│ rucksfs-server│              │ rucksfs-dataserver     │
+│ MetadataServer│              │ DataServer             │
+│ (namespace,   │              │ (file I/O,             │
+│  attributes,  │              │  block allocation)     │
+│  delta engine)│              │                        │
+├───────────────┴──────────────┴───────────────────────┤
 │                  rucksfs-storage                     │
-│  ┌─────────────────┐  ┌──────────────────────────┐   │
-│  │ MetadataStore   │  │ DataStore                │   │
-│  │ DirectoryIndex  │  │ (Memory / RawDisk)       │   │
-│  │ DeltaStore      │  └──────────────────────────┘   │
-│  │ (Memory/Rocks)  │                                 │
-│  └─────────────────┘                                 │
+│  ┌───────────────────┐  ┌────────────────────────┐   │
+│  │ RocksMetadataStore│  │ RawDiskDataStore        │   │
+│  │ RocksDirectoryIdx │  │ (pre-allocated file,    │   │
+│  │ RocksDeltaStore   │  │  offset-based I/O)      │   │
+│  └───────────────────┘  └────────────────────────┘   │
 ├──────────────────────────────────────────────────────┤
 │                   rucksfs-core                       │
-│  (MetadataOps, DataOps, VfsOps, types)               │
+│  Traits: MetadataOps, DataOps, VfsOps                │
+│  Types:  FileAttr, DirEntry, StatFs, FsError         │
 └──────────────────────────────────────────────────────┘
 ```
 
-```mermaid
-flowchart TB
-    subgraph App["User Space"]
-        VFS["VFS / Applications"]
-    end
+### Data Flow
 
-    subgraph Client["① Client"]
-        FUSE["FUSE (fuser)"]
-        VfsOps["VfsOps trait"]
-        Embedded["EmbeddedClient"]
-        Rucks["RucksClient (gRPC)"]
-        VfsCore["VfsCore router"]
-        FUSE --> VfsOps
-        VfsOps --> Embedded
-        VfsOps --> Rucks
-        Embedded --> VfsCore
-        Rucks --> VfsCore
-    end
-
-    subgraph MServer["② MetadataServer"]
-        MetaOps["MetadataOps"]
-        MetaSrv["MetadataServer"]
-        MetaOps --> MetaSrv
-    end
-
-    subgraph DServer["③ DataServer"]
-        DataOps["DataOps"]
-        DataSrv["DataServer"]
-        DataOps --> DataSrv
-    end
-
-    subgraph Storage["④ Storage"]
-        MetaStore["MetadataStore\n(Memory / RocksDB)"]
-        DirIndex["DirectoryIndex\n(Memory / RocksDB)"]
-        DeltaStore["DeltaStore\n(Memory / RocksDB)"]
-        DataStore["DataStore\n(Memory / RawDisk)"]
-    end
-
-    VFS --> FUSE
-    VfsCore -->|"metadata"| MetaOps
-    VfsCore -->|"data I/O"| DataOps
-    MetaSrv --> MetaStore
-    MetaSrv --> DirIndex
-    MetaSrv --> DeltaStore
-    DataSrv --> DataStore
-```
+1. **Metadata path** — Client → `VfsCore` → `MetadataOps` → `MetadataServer` → RocksDB (`MetadataStore` + `DirectoryIndex` + `DeltaStore`)
+2. **Data path** — Client → `VfsCore` → `DataOps` → `DataServer` → `RawDiskDataStore`
+3. **Write flow** — client writes data to DataServer, then calls `MetadataServer::report_write()` to update file size / mtime
+4. **Persistence** — all state lives in `~/.rucksfs/` (configurable via `--data-dir`):
+   - `metadata.db/` — RocksDB database (inodes, directory entries, deltas)
+   - `data.raw` — pre-allocated raw file for block-level data storage
 
 ---
 
 ## Crate Overview
 
-| Crate | Description |
-|---|---|
-| **core** | Shared types (`FileAttr`, `DirEntry`, `StatFs`, `FsError`, `SetAttrRequest`, `OpenResponse`, `DataLocation`) and trait definitions (`MetadataOps`, `DataOps`, `VfsOps`) |
-| **storage** | Storage trait abstractions (`MetadataStore`, `DataStore`, `DirectoryIndex`, `DeltaStore`) with Memory and RocksDB/RawDisk backends |
-| **server** | `MetadataServer` — namespace & attribute engine, delegates data I/O to DataServer via `Arc<dyn DataOps>` |
-| **dataserver** | `DataServer<D: DataStore>` — file data I/O engine, implements `DataOps` |
-| **client** | `VfsCore` (routing), `EmbeddedClient` (in-process), FUSE adapter (`FuseClient`), `mount_fuse` |
-| **rpc** | gRPC layer: `MetadataRpcServer/Client` + `DataRpcServer/Client` with Protocol Buffers |
-| **demo** | Single-binary demo with three modes: auto-demo, interactive REPL, FUSE mount |
+| Crate | Lines | Description |
+|---|---|---|
+| **core** | ~165 | Shared types (`FileAttr`, `DirEntry`, `StatFs`, `FsError`) and trait definitions (`MetadataOps`, `DataOps`, `VfsOps`) |
+| **storage** | ~2,200 | Storage abstractions and implementations: RocksDB-backed metadata/index/delta stores, RawDisk data store, structured key encoding, block allocator |
+| **server** | ~2,600 | `MetadataServer` — namespace engine with LRU cache, delta-based updates, and background compaction |
+| **dataserver** | ~160 | `DataServer` — file data I/O engine, implements `DataOps` |
+| **client** | ~900 | `VfsCore` (routing), `EmbeddedClient` (in-process), FUSE adapter (`FuseClient`), `mount_fuse` |
+| **rpc** | ~800 | gRPC layer (Protocol Buffers): reserved for future distributed mode |
+| **demo** | ~1,900 | Single-binary entry point with three modes: auto-demo, interactive REPL, FUSE mount |
+
+**Total: ~8,800 lines of Rust**
 
 ---
 
@@ -119,20 +83,35 @@ flowchart TB
 git clone https://github.com/csjgg/rucksfs.git
 cd rucksfs
 
-# Run the automatic demo (in-memory, no extra deps)
-cargo run -p rucksfs-demo
+# Build
+cargo build -p rucksfs
 
-# Interactive REPL mode
-cargo run -p rucksfs-demo -- --interactive
+# Run the automatic demo (data stored at ~/.rucksfs by default)
+cargo run -p rucksfs
 
-# Persistent storage (RocksDB)
-cargo run -p rucksfs-demo --features rocksdb -- --persist /tmp/rucksfs-data
+# Interactive REPL
+cargo run -p rucksfs -- --interactive
+
+# Custom data directory
+cargo run -p rucksfs -- --data-dir /tmp/my-rucksfs
 ```
 
-### FUSE Mount via Demo (Linux Only)
+### FUSE Mount (Linux Only)
 
 ```bash
-cargo run -p rucksfs-demo -- --mount /mnt/rucksfs
+# Install FUSE dev libraries
+sudo apt-get install libfuse-dev fuse    # Debian/Ubuntu
+
+# Mount
+cargo run -p rucksfs -- --mount /mnt/rucksfs
+
+# Use with standard tools
+ls /mnt/rucksfs
+echo "hello" > /mnt/rucksfs/test.txt
+cat /mnt/rucksfs/test.txt
+
+# Unmount
+fusermount -u /mnt/rucksfs
 ```
 
 ---
@@ -140,41 +119,27 @@ cargo run -p rucksfs-demo -- --mount /mnt/rucksfs
 ## Running Tests
 
 ```bash
-# All workspace tests (171+ tests)
+# All workspace tests
 cargo test --workspace
 
-# Demo integration tests only
-cargo test -p rucksfs-demo
-
-# DataServer unit tests
-cargo test -p rucksfs-dataserver
+# Stress tests (concurrent operations, race conditions)
+cargo test -p rucksfs --test stress_test
 
 # Server integration tests
 cargo test -p rucksfs-server
-
-# Include RocksDB persistence tests
-cargo test -p rucksfs-demo --features rocksdb
 ```
 
 ---
 
-## Data Flow
+## Key Design Decisions
 
-1. **Metadata path**: Client → `VfsCore` → `MetadataOps` → `MetadataServer` → `MetadataStore` + `DirectoryIndex` + `DeltaStore`
-2. **Data path**: Client → `VfsCore` → `DataOps` → `DataServer` → `DataStore`
-3. **Write flow**: Client writes data directly to DataServer, then calls `MetadataServer::report_write()` to update file size/mtime
-4. **Open flow**: `MetadataServer::open()` returns an `OpenResponse` containing the `DataLocation` (address of the DataServer to talk to)
-
----
-
-## TODO
-
-- [ ] Implement `RucksClient` — network client using gRPC (MetadataRpcClient + DataRpcClient)
-- [ ] Restore standalone server/client binaries with gRPC transport
-- [ ] Evaluate TiKV-compatible metadata backend (for distributed metadata)
-- [ ] Client-side read/write caching to reduce round-trips
-- [ ] Multi-DataServer support with chunk-level placement
-- [ ] Evaluate replacing FUSE with a kernel module
+| Decision | Rationale |
+|---|---|
+| **RocksDB for metadata** | LSM-tree write amplification is acceptable; sequential write throughput and WriteBatch atomicity outperform B-tree for metadata-heavy workloads (see TableFS, LocoFS) |
+| **Structured key encoding** | `<parent_inode, child_name>` prefix layout enables efficient `readdir` via prefix scan; dictionary order matches numeric order |
+| **Delta-based updates** | Append-only attribute deltas avoid read-modify-write; background compaction merges deltas into base inodes |
+| **RawDisk data store** | Pre-allocated file with block allocator avoids host filesystem overhead for data I/O |
+| **Trait-based separation** | `MetadataOps` / `DataOps` / `VfsOps` traits enable in-process embedding today and potential networked backends in the future |
 
 ---
 
