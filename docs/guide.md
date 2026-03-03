@@ -1,6 +1,6 @@
-# RucksFS Demo Guide
+# RucksFS Usage Guide
 
-This guide walks you through building, running, and exploring the RucksFS demo — a single-binary program that embeds both the metadata server and the client in one process.
+RucksFS is a single-binary FUSE filesystem backed by RocksDB metadata and local file storage. This guide covers building, running, and testing.
 
 ---
 
@@ -14,12 +14,12 @@ This guide walks you through building, running, and exploring the RucksFS demo �
 
 ### Platform Notes
 
-- **macOS / Windows**: The demo runs in auto-demo and interactive modes. FUSE mount is Linux-only.
+- **macOS / Windows**: Auto-demo and interactive modes work. FUSE mount is Linux-only.
 - **Linux**: All three modes (auto-demo, interactive, FUSE mount) are available.
 
 ---
 
-## Quick Start (≤ 5 Steps)
+## Quick Start
 
 ```bash
 # 1. Clone the repository
@@ -68,13 +68,11 @@ The `--persist` flag can be combined with any mode to switch from in-memory stor
 
 ## Automatic Demo Mode (Default)
 
-Simply run:
-
 ```bash
 cargo run -p rucksfs-demo
 ```
 
-This executes 10 steps:
+Executes 10 steps:
 
 | Step | Operation | Description |
 |---:|---|---|
@@ -158,7 +156,7 @@ Goodbye!
 ## Persistent Storage Mode
 
 By default, the demo uses in-memory storage — data is lost when the process exits.
-To persist data across restarts, use the `--persist` flag with the `rocksdb` feature:
+To persist data across restarts:
 
 ```bash
 # Build and run with persistence
@@ -206,7 +204,49 @@ On non-Linux platforms, `--mount` prints a warning and falls back to the auto-de
 
 ---
 
-## Running Tests
+## TLS & Authentication
+
+For distributed or security-sensitive deployments, RucksFS supports TLS encryption and Bearer token authentication via the gRPC layer.
+
+### Generating TLS Certificates
+
+#### Self-Signed (Development)
+
+```bash
+# Generate CA
+openssl genrsa -out ca.key 4096
+openssl req -new -x509 -days 365 -key ca.key -out ca.crt -subj "/CN=RucksFS CA"
+
+# Generate server cert
+openssl genrsa -out server.key 4096
+openssl req -new -key server.key -out server.csr -subj "/CN=localhost"
+openssl x509 -req -days 365 -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt
+```
+
+#### Production
+
+Use certificates from a trusted CA (e.g., Let's Encrypt):
+
+```bash
+certbot certonly --standalone -d your-server.example.com
+```
+
+### Security Best Practices
+
+1. **Always use TLS in production** — prevents eavesdropping and MITM attacks.
+2. **Use strong tokens** — generate with `openssl rand -hex 32`.
+3. **Restrict network access** — firewall rules, bind to specific interfaces.
+4. **Secure certificate storage** — `chmod 600 server.key`, rotate before expiration.
+5. **Use environment variables for secrets**:
+   ```bash
+   export RUCKSFS_TOKEN="your-secret-token"
+   ```
+
+---
+
+## Testing
+
+### Unit & Integration Tests
 
 ```bash
 # Run all tests (in-memory only)
@@ -222,37 +262,12 @@ cargo test -p rucksfs-demo --features rocksdb
 cargo test --workspace -p rucksfs-storage --features rocksdb
 ```
 
----
+### VfsOps Stress Tests (Any OS)
 
-## E2E Testing Guide
-
-This section describes how to run end-to-end tests against a live RucksFS FUSE mount to verify correctness, concurrency safety, and POSIX compliance.
-
-### E2E Prerequisites
-
-- **Linux** with FUSE support (`fuse3` or `fuse` kernel module)
-- Rust toolchain (for building the project)
-- `fusermount` or `fusermount3` available in `$PATH`
-
-### Testing Layers
-
-RucksFS E2E testing is organized into two layers:
-
-| Layer | Scope | Platform | Tool |
-|-------|-------|----------|------|
-| **VfsOps stress tests** | In-process concurrency via `EmbeddedClient` | Any (macOS, Linux) | `cargo test` |
-| **FUSE E2E tests** | Real FUSE mount with POSIX operations | Linux only | Shell script + pjdfstest |
-
-#### Layer 1: VfsOps Stress Tests (Any OS)
-
-These tests exercise the full MetadataServer + DataServer + EmbeddedClient stack
-using in-memory storage with heavy concurrency via `tokio::spawn`.
+In-process concurrency tests via `EmbeddedClient` + `tokio::spawn`:
 
 ```bash
-# Run all stress / concurrency tests
 cargo test -p rucksfs-demo --test stress_test
-
-# Run with output visible
 cargo test -p rucksfs-demo --test stress_test -- --nocapture
 ```
 
@@ -274,21 +289,9 @@ cargo test -p rucksfs-demo --test stress_test -- --nocapture
 - Deep nested concurrent operations
 - Concurrent statfs
 
-#### Layer 2: FUSE E2E Tests (Linux Only)
+### FUSE E2E Tests (Linux Only)
 
-##### Option A: Built-in E2E Script
-
-The project includes an E2E shell script at `scripts/e2e_fuse_test.sh` that:
-
-1. Builds the project
-2. Mounts RucksFS via FUSE
-3. Runs basic operations (mkdir, write, read, rename, unlink, rmdir)
-4. Runs write-pattern tests (large files, append, data integrity via checksum)
-5. Runs concurrent stress tests (parallel create, write, mkdir, create-delete storm)
-6. Checks metadata consistency (stat sizes, chmod)
-7. Unmounts and reports results
-
-**Usage:**
+#### Built-in E2E Script
 
 ```bash
 # Basic run with in-memory storage
@@ -304,100 +307,29 @@ The project includes an E2E shell script at `scripts/e2e_fuse_test.sh` that:
 ./scripts/e2e_fuse_test.sh --persist /tmp/rucksfs_data --mountpoint /mnt/rucksfs
 ```
 
-**Example output:**
+The script builds the project, mounts via FUSE, runs basic operations + write-pattern tests + concurrent stress tests + metadata consistency checks, then unmounts and reports results.
 
-```
-╔══════════════════════════════════════════════════════╗
-║       RucksFS — E2E FUSE Test Suite                 ║
-╚══════════════════════════════════════════════════════╝
+#### pjdfstest (POSIX Compliance)
 
-── Building rucksfs-demo ──
-Build OK
-
-── Mounting FUSE at /tmp/rucksfs_e2e ──
-FUSE mounted (PID=12345)
-
-══ Test Suite 1: Basic File Operations ══
-  ✓ PASS: mkdir creates directory
-  ✓ PASS: create file
-  ✓ PASS: write and read
-  ...
-
-══════════════════════════════════════════════════
-Results: 20 passed, 0 failed, 20 total
-══════════════════════════════════════════════════
-```
-
-##### Option B: pjdfstest (POSIX Compliance)
-
-[pjdfstest](https://github.com/pjd/pjdfstest) is an industry-standard POSIX
-filesystem compliance test suite. It covers `chmod`, `chown`, `link`, `mkdir`,
-`mkfifo`, `open`, `rename`, `rmdir`, `symlink`, `truncate`, `unlink`, and more.
-
-###### Installing pjdfstest
+[pjdfstest](https://github.com/pjd/pjdfstest) is an industry-standard POSIX filesystem compliance test suite.
 
 ```bash
-# Clone
-git clone https://github.com/pjd/pjdfstest.git
-cd pjdfstest
+# Install
+git clone https://github.com/pjd/pjdfstest.git && cd pjdfstest
+autoreconf -ifs && ./configure && make
 
-# Build
-autoreconf -ifs
-./configure
-make
-```
-
-###### Running pjdfstest Against RucksFS
-
-**Step 1**: Mount RucksFS via FUSE.
-
-```bash
-# Build with RocksDB if you want persistence
-cargo build -p rucksfs-demo --features rocksdb
-
-# Mount (in-memory)
+# Mount RucksFS
 ./target/debug/rucksfs-demo --mount /tmp/rucksfs_e2e &
 
-# Or mount with persistence
-./target/debug/rucksfs-demo --mount /tmp/rucksfs_e2e --persist /tmp/rucksfs_data &
-```
-
-**Step 2**: Run pjdfstest.
-
-```bash
+# Run tests
 cd /tmp/rucksfs_e2e
-
-# Run all tests (as root — required for chown/chmod tests)
 sudo prove -r /path/to/pjdfstest/tests/
 
-# Run specific test categories
-sudo prove /path/to/pjdfstest/tests/mkdir/
-sudo prove /path/to/pjdfstest/tests/open/
-sudo prove /path/to/pjdfstest/tests/rename/
-sudo prove /path/to/pjdfstest/tests/unlink/
-sudo prove /path/to/pjdfstest/tests/rmdir/
-sudo prove /path/to/pjdfstest/tests/truncate/
+# Unmount
+fusermount -u /tmp/rucksfs_e2e
 ```
 
-> **Note:** Some pjdfstest tests require root privileges for `chown` and special
-> file operations. Tests for `link` (hard links), `symlink`, and `mkfifo` will
-> fail if RucksFS does not yet implement those operations — this is expected.
-
-###### Interpreting pjdfstest Results
-
-```
-/path/to/pjdfstest/tests/mkdir/00.t .. ok
-/path/to/pjdfstest/tests/mkdir/01.t .. ok
-/path/to/pjdfstest/tests/open/00.t  .. ok
-/path/to/pjdfstest/tests/rename/00.t .. ok
-...
-All tests successful.
-Files=42, Tests=580, 12 wallclock secs
-Result: PASS
-```
-
-Tests that fail indicate POSIX operations that need to be implemented or fixed.
-Focus on the following categories first (which RucksFS already supports):
+**Expected test status:**
 
 | Category | Priority | Status |
 |----------|----------|--------|
@@ -413,12 +345,6 @@ Focus on the following categories first (which RucksFS already supports):
 | `symlink` | Low | Not yet implemented |
 | `mkfifo` | Low | Not applicable |
 
-**Step 3**: Unmount.
-
-```bash
-fusermount -u /tmp/rucksfs_e2e
-```
-
 ### Recommended Testing Workflow
 
 ```
@@ -433,57 +359,6 @@ fusermount -u /tmp/rucksfs_e2e
    └─> cargo test (all unit + integration + stress tests)
    └─> ./scripts/e2e_fuse_test.sh
 ```
-
----
-
-## Troubleshooting
-
-### RocksDB compilation fails
-
-**Symptom**: Errors about missing `libclang`, `cmake`, or C++ compiler.
-
-**Fix**: Install build tools:
-```bash
-# Debian/Ubuntu
-sudo apt-get install cmake clang libclang-dev
-
-# macOS
-brew install cmake llvm
-
-# Fedora
-sudo dnf install cmake clang clang-devel
-```
-
-### FUSE is not available
-
-**Symptom**: `Error: not implemented` when using `--mount`.
-
-**Fix**: Ensure you're on Linux with FUSE installed:
-```bash
-sudo apt-get install libfuse-dev fuse
-sudo modprobe fuse
-```
-
-### Permission denied on mount
-
-**Symptom**: `Permission denied` when mounting FUSE.
-
-**Fix**: Ensure your user is in the `fuse` group, or run with `sudo`:
-```bash
-sudo usermod -a -G fuse $USER
-# Log out and back in, then retry
-```
-
-### Data not persisting
-
-**Symptom**: Files disappear after restart.
-
-**Fix**: Make sure you're using `--persist` with the `rocksdb` feature:
-```bash
-cargo run -p rucksfs-demo --features rocksdb -- --persist /path/to/data
-```
-
-Without `--features rocksdb`, the `--persist` flag will print an error and exit.
 
 ---
 
@@ -515,3 +390,46 @@ Without `--features rocksdb`, the `--persist` flag will print an error and exit.
 │  (MetadataOps, DataOps, VfsOps, types)       │
 └──────────────────────────────────────────────┘
 ```
+
+---
+
+## Troubleshooting
+
+### RocksDB compilation fails
+
+Install build tools:
+```bash
+# Debian/Ubuntu
+sudo apt-get install cmake clang libclang-dev
+
+# macOS
+brew install cmake llvm
+
+# Fedora
+sudo dnf install cmake clang clang-devel
+```
+
+### FUSE is not available
+
+Ensure you're on Linux with FUSE installed:
+```bash
+sudo apt-get install libfuse-dev fuse
+sudo modprobe fuse
+```
+
+### Permission denied on mount
+
+Ensure your user is in the `fuse` group:
+```bash
+sudo usermod -a -G fuse $USER
+# Log out and back in, then retry
+```
+
+### Data not persisting
+
+Make sure you're using `--persist` with the `rocksdb` feature:
+```bash
+cargo run -p rucksfs-demo --features rocksdb -- --persist /path/to/data
+```
+
+Without `--features rocksdb`, the `--persist` flag will print an error and exit.

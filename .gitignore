@@ -2,5 +2,6 @@
 /.idea/
 .vscode/
 *.swp
-.codebuddy/
-/task/
+.codebuddy/plan/
+/tasks/
+.claude/ralph-loop.local.md
