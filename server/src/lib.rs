@@ -624,9 +624,8 @@ where
                 .get_for_update_inode(&inode_key)?
                 .ok_or(FsError::NotFound)?;
 
-            // Check if directory is empty.
-            let entries = self.index.list_dir(child_inode)?;
-            if !entries.is_empty() {
+            // Check if directory is empty (inside transaction to avoid TOCTOU).
+            if !batch.is_dir_empty(child_inode)? {
                 return Err(FsError::DirectoryNotEmpty);
             }
 
@@ -728,8 +727,7 @@ where
                 }
 
                 if dst_is_dir {
-                    let entries = self.index.list_dir(dst_inode)?;
-                    if !entries.is_empty() {
+                    if !batch.is_dir_empty(dst_inode)? {
                         return Err(FsError::DirectoryNotEmpty);
                     }
                     dst_was_dir = true;

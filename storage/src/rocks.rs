@@ -560,6 +560,23 @@ impl<'db> AtomicWriteBatch for RocksWriteBatch<'db> {
             .get_for_update_cf(&cf, key, true)
             .map_err(map_txn_err)
     }
+
+    fn is_dir_empty(&self, parent: Inode) -> FsResult<bool> {
+        let cf = self.db.cf_handle(CF_DIR_ENTRIES)
+            .ok_or_else(|| FsError::Io("CF 'dir_entries' not found".into()))?;
+        let prefix = dir_entry_prefix(parent);
+        // Use transaction-level iterator so the read participates in
+        // the transaction's snapshot, avoiding TOCTOU races.
+        let iter = self.txn.prefix_iterator_cf(&cf, &prefix);
+        for item in iter {
+            let (k, _) = item.map_err(|e| FsError::Io(format!("RocksDB txn iterator: {}", e)))?;
+            if k.starts_with(&prefix) {
+                return Ok(false);
+            }
+            break;
+        }
+        Ok(true)
+    }
 }
 
 impl StorageBundle for RocksStorageBundle {
@@ -1118,6 +1135,93 @@ mod tests {
             assert!(meta.get(&encode_inode_key(42)).unwrap().is_some());
             assert_eq!(dir_idx.resolve_path(1, "test.txt").unwrap(), Some(42));
             assert_eq!(delta.scan_deltas(42).unwrap(), vec![v]);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // AtomicWriteBatch::is_dir_empty — transactional emptiness check
+    // -----------------------------------------------------------------------
+    mod is_dir_empty {
+        use super::*;
+
+        #[test]
+        fn empty_dir_returns_true() {
+            let (_tmp, db) = temp_db();
+            let bundle = RocksStorageBundle::new(Arc::clone(&db));
+            let batch = bundle.begin_write();
+
+            // Directory 42 has no children at all.
+            assert!(batch.is_dir_empty(42).unwrap());
+        }
+
+        #[test]
+        fn non_empty_dir_returns_false() {
+            let (_tmp, db) = temp_db();
+            let dir_idx = RocksDirectoryIndex::new(Arc::clone(&db));
+            dir_idx
+                .insert_child(
+                    42,
+                    "child.txt",
+                    100,
+                    FileAttr {
+                        inode: 100,
+                        mode: 0o100644,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+
+            let bundle = RocksStorageBundle::new(Arc::clone(&db));
+            let batch = bundle.begin_write();
+
+            assert!(!batch.is_dir_empty(42).unwrap());
+        }
+
+        #[test]
+        fn sees_uncommitted_writes_in_same_txn() {
+            let (_tmp, db) = temp_db();
+            let bundle = RocksStorageBundle::new(Arc::clone(&db));
+            let mut batch = bundle.begin_write();
+
+            // Directory 42 is empty before the transaction write.
+            assert!(batch.is_dir_empty(42).unwrap());
+
+            // Write a dir entry inside the same transaction.
+            let key = encode_dir_entry_key(42, "new_child");
+            let mut value = Vec::with_capacity(12);
+            value.extend_from_slice(&100u64.to_be_bytes());
+            value.extend_from_slice(&0o100644u32.to_be_bytes());
+            batch.push(BatchOp::PutDirEntry { key, value });
+
+            // The transaction-local iterator should see the uncommitted entry.
+            assert!(!batch.is_dir_empty(42).unwrap());
+        }
+
+        #[test]
+        fn does_not_see_other_parent_entries() {
+            let (_tmp, db) = temp_db();
+            let dir_idx = RocksDirectoryIndex::new(Arc::clone(&db));
+            // Insert a child under parent 10, not parent 42.
+            dir_idx
+                .insert_child(
+                    10,
+                    "other.txt",
+                    200,
+                    FileAttr {
+                        inode: 200,
+                        mode: 0o100644,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+
+            let bundle = RocksStorageBundle::new(Arc::clone(&db));
+            let batch = bundle.begin_write();
+
+            // Parent 42 should still be empty.
+            assert!(batch.is_dir_empty(42).unwrap());
+            // Parent 10 should not be empty.
+            assert!(!batch.is_dir_empty(10).unwrap());
         }
     }
 }

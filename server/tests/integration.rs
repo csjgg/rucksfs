@@ -850,3 +850,141 @@ fn setattr_truncate_delegates_to_data_server() {
         assert_eq!(&read_data[50..], &[0u8; 50]);
     });
 }
+
+// ===========================================================================
+// TOCTOU race: concurrent rmdir + create into the same directory
+// ===========================================================================
+
+/// Stress test for the rmdir / create TOCTOU race (T-12).
+///
+/// Scenario: one task repeatedly tries to rmdir a directory while another
+/// task concurrently creates a file inside it.  Without a transactional
+/// `is_dir_empty` check, the rmdir could observe an empty directory (via
+/// non-transactional `list_dir`) and commit the delete even though the
+/// create has already placed a new entry in the dir_entries CF.
+///
+/// After the fix (using `batch.is_dir_empty()` inside the PCC transaction),
+/// the rmdir should either:
+/// - Fail with `DirectoryNotEmpty` (create committed first), or
+/// - Succeed, and the create should then fail with `NotFound` (rmdir
+///   committed first, parent dir entry gone — or get a TransactionConflict).
+///
+/// The invariant we verify: at no point should the directory be deleted
+/// while it still contains children.
+#[test]
+fn rmdir_create_race_no_orphan_entries() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    rt().block_on(async {
+        let (_tmp, client) = new_client();
+        let client = Arc::new(client);
+        let iterations = 200;
+        let orphan_detected = Arc::new(AtomicBool::new(false));
+
+        for round in 0..iterations {
+            let dir_name = format!("race_dir_{}", round);
+            let dir_attr = client.mkdir(ROOT, &dir_name, DIR_MODE).await.unwrap();
+            let dir_inode = dir_attr.inode;
+
+            let c1 = Arc::clone(&client);
+            let c2 = Arc::clone(&client);
+            let dn = dir_name.clone();
+            let orphan = Arc::clone(&orphan_detected);
+
+            // Spawn: create a file inside the directory
+            let create_handle = tokio::spawn(async move {
+                c1.create(dir_inode, "child.txt", FILE_MODE).await
+            });
+
+            // Spawn: rmdir the directory
+            let rmdir_handle = tokio::spawn(async move {
+                c2.rmdir(ROOT, &dn).await
+            });
+
+            let (create_res, rmdir_res) = tokio::join!(create_handle, rmdir_handle);
+            let create_res = create_res.unwrap();
+            let rmdir_res = rmdir_res.unwrap();
+
+            match (create_res.is_ok(), rmdir_res.is_ok()) {
+                (true, true) => {
+                    // Both succeeded — this is the TOCTOU bug!
+                    // The directory was removed but a child entry was created.
+                    orphan.store(true, Ordering::SeqCst);
+                }
+                (true, false) => {
+                    // Create won, rmdir should have gotten DirectoryNotEmpty.
+                    // Clean up: unlink the child, then rmdir.
+                    let _ = client.unlink(dir_inode, "child.txt").await;
+                    let _ = client.rmdir(ROOT, &dir_name).await;
+                }
+                (false, true) => {
+                    // Rmdir won, create failed (NotFound or TransactionConflict).
+                    // Directory is already gone — nothing to clean up.
+                }
+                (false, false) => {
+                    // Both failed — possible under heavy contention. Clean up.
+                    let _ = client.rmdir(ROOT, &dir_name).await;
+                }
+            }
+        }
+
+        assert!(
+            !orphan_detected.load(Ordering::SeqCst),
+            "TOCTOU race detected: rmdir succeeded while create also succeeded (orphan entry)"
+        );
+    });
+}
+
+/// Verify that rename onto a non-empty directory correctly fails with
+/// `DirectoryNotEmpty`, even under concurrent create pressure.
+#[test]
+fn rename_onto_nonempty_dir_race() {
+    rt().block_on(async {
+        let (_tmp, client) = new_client();
+        let client = Arc::new(client);
+        let iterations = 100;
+
+        for round in 0..iterations {
+            let src_name = format!("rsrc_{}", round);
+            let dst_name = format!("rdst_{}", round);
+
+            // Create source dir and destination dir.
+            let _src = client.mkdir(ROOT, &src_name, DIR_MODE).await.unwrap();
+            let dst = client.mkdir(ROOT, &dst_name, DIR_MODE).await.unwrap();
+            let dst_inode = dst.inode;
+
+            let c1 = Arc::clone(&client);
+            let c2 = Arc::clone(&client);
+            let sn = src_name.clone();
+            let dn = dst_name.clone();
+
+            // Spawn: create a file inside the destination directory.
+            let create_handle = tokio::spawn(async move {
+                c1.create(dst_inode, "blocker.txt", FILE_MODE).await
+            });
+
+            // Spawn: rename source onto destination (should fail if dst non-empty).
+            let rename_handle = tokio::spawn(async move {
+                c2.rename(ROOT, &sn, ROOT, &dn).await
+            });
+
+            let (create_res, rename_res) = tokio::join!(create_handle, rename_handle);
+            let create_ok = create_res.unwrap().is_ok();
+            let rename_ok = rename_res.unwrap().is_ok();
+
+            if create_ok && rename_ok {
+                panic!(
+                    "TOCTOU race in rename: both create and rename-over-dir succeeded in round {}",
+                    round
+                );
+            }
+
+            // Clean up for next round.
+            if create_ok {
+                let _ = client.unlink(dst_inode, "blocker.txt").await;
+            }
+            let _ = client.rmdir(ROOT, &src_name).await;
+            let _ = client.rmdir(ROOT, &dst_name).await;
+        }
+    });
+}

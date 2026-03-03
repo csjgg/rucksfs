@@ -42,7 +42,7 @@ Memory backends are for **tests only**; production uses RocksDB + RawDisk (`--pe
 |----|--------|------|---------|----------------|
 | T-10 | ⬜ | RawDiskDataStore: `Mutex<File>` → `pread`/`pwrite` | Current code serializes all I/O through a global `Mutex<File>` + seek. Design §5.2 specifies `FileExt::read_at/write_at` which allow lock-free concurrent I/O. **Performance-critical.** | `storage/src/rawdisk.rs` |
 | T-11 | ⬜ | FUSE create/mkdir: respect caller `uid`/`gid` and `umask` | Hardcoded `uid: 0, gid: 0`. The `mode` is used but `umask` is ignored. | `client/src/fuse.rs`, `server/src/lib.rs` |
-| T-12 | ⬜ | rmdir: fix TOCTOU on empty-check | `list_dir()` uses non-transactional `prefix_iterator` inside PCC txn. Concurrent `create` can insert child between empty-check and delete. | `server/src/lib.rs` |
+| T-12 | ✅ | rmdir/rename: fix TOCTOU on empty-check | Added `AtomicWriteBatch::is_dir_empty()` using `txn.prefix_iterator_cf()` for transactional reads. Both `rmdir` and `rename` now check emptiness inside the PCC transaction. | `storage/src/lib.rs`, `storage/src/rocks.rs`, `server/src/lib.rs` |
 
 ### P1 — Unimplemented Features (from design.md)
 

@@ -112,6 +112,15 @@ pub trait AtomicWriteBatch: Send {
     fn get_for_update_dir_entry(&self, _key: &[u8]) -> FsResult<Option<Vec<u8>>> {
         unimplemented!("get_for_update_dir_entry not supported by this backend")
     }
+
+    /// Check whether a directory has any child entries, reading inside the
+    /// transaction's snapshot to avoid TOCTOU races.
+    ///
+    /// Uses a prefix scan over the `dir_entries` CF within the transaction,
+    /// returning `true` if no children exist.
+    fn is_dir_empty(&self, _parent: Inode) -> FsResult<bool> {
+        unimplemented!("is_dir_empty not supported by this backend")
+    }
 }
 
 /// Trait for storage backends that support atomic cross-store writes.
