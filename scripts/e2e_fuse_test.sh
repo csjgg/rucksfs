@@ -3,11 +3,11 @@
 # scripts/e2e_fuse_test.sh — Deploy RucksFS FUSE mount and run E2E tests
 #
 # Usage:
-#   ./scripts/e2e_fuse_test.sh [--persist <dir>] [--mountpoint <path>]
+#   ./scripts/e2e_fuse_test.sh [--data-dir <dir>] [--mountpoint <path>]
 #
 # Requirements (Linux only):
 #   - FUSE support (fuse3 or fuse)
-#   - Built rucksfs-demo binary (optionally with rocksdb feature)
+#   - Built rucksfs binary
 #
 # What it does:
 #   1. Builds the project
@@ -26,8 +26,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 MOUNTPOINT="/tmp/rucksfs_e2e"
-PERSIST_DIR=""
-FEATURES=""
+DATA_DIR=""
 DEMO_BIN=""
 DEMO_PID=""
 PASSED=0
@@ -39,9 +38,8 @@ FAILED=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --persist)
-            PERSIST_DIR="$2"
-            FEATURES="--features rocksdb"
+        --data-dir)
+            DATA_DIR="$2"
             shift 2
             ;;
         --mountpoint)
@@ -49,10 +47,10 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -h|--help)
-            echo "Usage: $0 [--persist <dir>] [--mountpoint <path>]"
+            echo "Usage: $0 [--data-dir <dir>] [--mountpoint <path>]"
             echo ""
             echo "Options:"
-            echo "  --persist <dir>      Use persistent RocksDB storage at <dir>"
+            echo "  --data-dir <dir>     Data directory for RocksDB storage (default: temp dir)"
             echo "  --mountpoint <path>  FUSE mount point (default: /tmp/rucksfs_e2e)"
             exit 0
             ;;
@@ -164,14 +162,10 @@ echo "║       RucksFS — E2E FUSE Test Suite                 ║"
 echo "╚══════════════════════════════════════════════════════╝"
 echo ""
 
-echo "── Building rucksfs-demo ──"
+echo "── Building rucksfs ──"
 cd "$PROJECT_ROOT"
-if [[ -n "$FEATURES" ]]; then
-    cargo build -p rucksfs-demo $FEATURES 2>&1
-else
-    cargo build -p rucksfs-demo 2>&1
-fi
-DEMO_BIN="$PROJECT_ROOT/target/debug/rucksfs-demo"
+cargo build -p rucksfs 2>&1
+DEMO_BIN="$PROJECT_ROOT/target/debug/rucksfs"
 
 if [[ ! -x "$DEMO_BIN" ]]; then
     echo -e "${RED}ERROR: Demo binary not found at $DEMO_BIN${NC}"
@@ -188,10 +182,10 @@ echo "── Mounting FUSE at $MOUNTPOINT ──"
 mkdir -p "$MOUNTPOINT"
 
 MOUNT_ARGS=(--mount "$MOUNTPOINT")
-if [[ -n "$PERSIST_DIR" ]]; then
-    mkdir -p "$PERSIST_DIR"
-    MOUNT_ARGS+=(--persist "$PERSIST_DIR")
-    echo "  Using persistent storage at: $PERSIST_DIR"
+if [[ -n "$DATA_DIR" ]]; then
+    mkdir -p "$DATA_DIR"
+    MOUNT_ARGS+=(--data-dir "$DATA_DIR")
+    echo "  Using persistent storage at: $DATA_DIR"
 fi
 
 "$DEMO_BIN" "${MOUNT_ARGS[@]}" &
@@ -199,7 +193,7 @@ DEMO_PID=$!
 sleep 2
 
 if ! kill -0 "$DEMO_PID" 2>/dev/null; then
-    echo -e "${RED}ERROR: rucksfs-demo process exited unexpectedly${NC}"
+    echo -e "${RED}ERROR: rucksfs process exited unexpectedly${NC}"
     exit 1
 fi
 

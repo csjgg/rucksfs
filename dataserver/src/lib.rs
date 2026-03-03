@@ -49,7 +49,7 @@ impl<D: DataStore> DataOps for DataServer<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rucksfs_storage::MemoryDataStore;
+    use rucksfs_storage::RawDiskDataStore;
 
     fn rt() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
@@ -61,7 +61,8 @@ mod tests {
     #[test]
     fn write_then_read() {
         rt().block_on(async {
-            let ds = DataServer::new(MemoryDataStore::new());
+            let tmp = tempfile::tempdir().unwrap();
+            let ds = DataServer::new(RawDiskDataStore::open(&tmp.path().join("data.raw"), 64 * 1024 * 1024).unwrap());
             let written = ds.write_data(1, 0, b"hello dataserver").await.unwrap();
             assert_eq!(written, 16);
             let data = ds.read_data(1, 0, 16).await.unwrap();
@@ -72,7 +73,8 @@ mod tests {
     #[test]
     fn read_unwritten_returns_zeros() {
         rt().block_on(async {
-            let ds = DataServer::new(MemoryDataStore::new());
+            let tmp = tempfile::tempdir().unwrap();
+            let ds = DataServer::new(RawDiskDataStore::open(&tmp.path().join("data.raw"), 64 * 1024 * 1024).unwrap());
             let data = ds.read_data(1, 0, 10).await.unwrap();
             assert_eq!(data, vec![0u8; 10]);
         });
@@ -81,7 +83,8 @@ mod tests {
     #[test]
     fn write_at_offset() {
         rt().block_on(async {
-            let ds = DataServer::new(MemoryDataStore::new());
+            let tmp = tempfile::tempdir().unwrap();
+            let ds = DataServer::new(RawDiskDataStore::open(&tmp.path().join("data.raw"), 64 * 1024 * 1024).unwrap());
             ds.write_data(1, 5, b"world").await.unwrap();
             let data = ds.read_data(1, 0, 10).await.unwrap();
             assert_eq!(&data[..5], &[0, 0, 0, 0, 0]);
@@ -92,7 +95,8 @@ mod tests {
     #[test]
     fn truncate_shrink() {
         rt().block_on(async {
-            let ds = DataServer::new(MemoryDataStore::new());
+            let tmp = tempfile::tempdir().unwrap();
+            let ds = DataServer::new(RawDiskDataStore::open(&tmp.path().join("data.raw"), 64 * 1024 * 1024).unwrap());
             ds.write_data(1, 0, b"hello world").await.unwrap();
             ds.truncate(1, 5).await.unwrap();
             let data = ds.read_data(1, 0, 11).await.unwrap();
@@ -104,7 +108,8 @@ mod tests {
     #[test]
     fn truncate_expand() {
         rt().block_on(async {
-            let ds = DataServer::new(MemoryDataStore::new());
+            let tmp = tempfile::tempdir().unwrap();
+            let ds = DataServer::new(RawDiskDataStore::open(&tmp.path().join("data.raw"), 64 * 1024 * 1024).unwrap());
             ds.write_data(1, 0, b"hi").await.unwrap();
             ds.truncate(1, 10).await.unwrap();
             let data = ds.read_data(1, 0, 10).await.unwrap();
@@ -116,7 +121,8 @@ mod tests {
     #[test]
     fn delete_data_removes_inode() {
         rt().block_on(async {
-            let ds = DataServer::new(MemoryDataStore::new());
+            let tmp = tempfile::tempdir().unwrap();
+            let ds = DataServer::new(RawDiskDataStore::open(&tmp.path().join("data.raw"), 64 * 1024 * 1024).unwrap());
             ds.write_data(1, 0, b"some data").await.unwrap();
             ds.delete_data(1).await.unwrap();
             // After delete, reading should return zeros
@@ -126,9 +132,10 @@ mod tests {
     }
 
     #[test]
-    fn flush_is_noop_for_memory() {
+    fn flush_succeeds() {
         rt().block_on(async {
-            let ds = DataServer::new(MemoryDataStore::new());
+            let tmp = tempfile::tempdir().unwrap();
+            let ds = DataServer::new(RawDiskDataStore::open(&tmp.path().join("data.raw"), 64 * 1024 * 1024).unwrap());
             ds.flush(1).await.unwrap();
         });
     }
@@ -136,7 +143,8 @@ mod tests {
     #[test]
     fn cross_inode_isolation() {
         rt().block_on(async {
-            let ds = DataServer::new(MemoryDataStore::new());
+            let tmp = tempfile::tempdir().unwrap();
+            let ds = DataServer::new(RawDiskDataStore::open(&tmp.path().join("data.raw"), 64 * 1024 * 1024).unwrap());
             ds.write_data(1, 0, b"inode1").await.unwrap();
             ds.write_data(2, 0, b"inode2").await.unwrap();
             assert_eq!(ds.read_data(1, 0, 6).await.unwrap(), b"inode1");

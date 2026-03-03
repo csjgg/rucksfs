@@ -1,11 +1,13 @@
-//! RucksFS Demo — demonstrates the full file-system stack in a single process.
+//! RucksFS — a standalone single-process POSIX file system backed by RocksDB.
 //!
 //! Modes:
 //!   (default)         Run an automatic demo showcasing all POSIX operations.
 //!   --interactive     Enter an interactive REPL shell.
 //!   --mount <path>    Mount as a FUSE filesystem (Linux only).
-//!   --persist <dir>   Use RocksDB + RawDisk backends for persistent storage.
+//!
+//! Data is stored persistently at `--data-dir` (default: `~/.rucksfs`).
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
@@ -13,15 +15,11 @@ use rucksfs_client::EmbeddedClient;
 use rucksfs_core::{DataLocation, DataOps, MetadataOps, VfsOps};
 use rucksfs_dataserver::DataServer;
 use rucksfs_server::MetadataServer;
-use rucksfs_storage::{MemoryDataStore, MemoryDeltaStore, MemoryDirectoryIndex, MemoryMetadataStore};
-#[cfg(feature = "rocksdb")]
-use rucksfs_storage::{open_rocks_db, RocksDeltaStore, RocksDirectoryIndex, RocksMetadataStore};
-#[cfg(feature = "rocksdb")]
-use rucksfs_storage::RawDiskDataStore;
+use rucksfs_storage::{open_rocks_db, RawDiskDataStore, RocksDeltaStore, RocksDirectoryIndex, RocksMetadataStore, RocksStorageBundle};
 
-/// RucksFS Demo — a single-binary demonstration of the full file-system stack.
+/// RucksFS — a standalone single-process POSIX file system backed by RocksDB.
 #[derive(Parser, Debug)]
-#[command(name = "rucksfs-demo", version, about)]
+#[command(name = "rucksfs", version, about)]
 struct Cli {
     /// Enter interactive REPL mode instead of running the automatic demo.
     #[arg(long)]
@@ -31,39 +29,29 @@ struct Cli {
     #[arg(long, value_name = "MOUNTPOINT")]
     mount: Option<String>,
 
-    /// Use persistent storage (RocksDB + RawDisk) rooted at the given directory.
-    /// Requires the `rocksdb` feature.
+    /// Data directory for RocksDB metadata and file data (default: ~/.rucksfs).
     #[arg(long, value_name = "DIR")]
-    persist: Option<String>,
+    data_dir: Option<PathBuf>,
 }
 
-/// Build the All-in-One EmbeddedClient using in-memory backends.
-fn build_memory_client() -> EmbeddedClient {
-    let metadata = Arc::new(MemoryMetadataStore::new());
-    let index = Arc::new(MemoryDirectoryIndex::new());
-    let delta_store = Arc::new(MemoryDeltaStore::new());
-    let data_store = MemoryDataStore::new();
-
-    let data_server: Arc<dyn DataOps> = Arc::new(DataServer::new(data_store));
-    let metadata_server: Arc<dyn MetadataOps> = Arc::new(MetadataServer::new(
-        metadata,
-        index,
-        delta_store,
-        Arc::clone(&data_server),
-        DataLocation {
-            address: "embedded".to_string(),
-        },
-    ));
-
-    EmbeddedClient::new(metadata_server, data_server)
+/// Resolve the data directory: use `--data-dir` if provided, otherwise `~/.rucksfs`.
+fn resolve_data_dir(cli: &Cli) -> PathBuf {
+    if let Some(ref dir) = cli.data_dir {
+        dir.clone()
+    } else {
+        let home = std::env::var("HOME").unwrap_or_else(|_| {
+            eprintln!("Error: HOME environment variable is not set. Use --data-dir to specify the data directory.");
+            std::process::exit(1);
+        });
+        PathBuf::from(home).join(".rucksfs")
+    }
 }
 
-/// Build the All-in-One EmbeddedClient using persistent RocksDB + RawDisk backends.
-#[cfg(feature = "rocksdb")]
-fn build_persist_client(dir: &str) -> EmbeddedClient {
-    let db_path = std::path::Path::new(dir).join("metadata.db");
-    let data_path = std::path::Path::new(dir).join("data.raw");
-    std::fs::create_dir_all(dir).expect("failed to create persist directory");
+/// Build the All-in-One EmbeddedClient using RocksDB + RawDisk backends.
+fn build_client(data_dir: &Path) -> EmbeddedClient {
+    let db_path = data_dir.join("metadata.db");
+    let data_path = data_dir.join("data.raw");
+    std::fs::create_dir_all(data_dir).expect("failed to create data directory");
 
     let db = open_rocks_db(&db_path).expect("failed to open RocksDB");
     let metadata = Arc::new(RocksMetadataStore::new(Arc::clone(&db)));
@@ -73,6 +61,7 @@ fn build_persist_client(dir: &str) -> EmbeddedClient {
         .expect("failed to open RawDisk data store");
 
     let data_server: Arc<dyn DataOps> = Arc::new(DataServer::new(data_store));
+    let storage_bundle = Arc::new(RocksStorageBundle::new(Arc::clone(&db)));
     let metadata_server: Arc<dyn MetadataOps> = Arc::new(MetadataServer::new(
         metadata,
         index,
@@ -81,6 +70,7 @@ fn build_persist_client(dir: &str) -> EmbeddedClient {
         DataLocation {
             address: "embedded".to_string(),
         },
+        storage_bundle,
     ));
 
     EmbeddedClient::new(metadata_server, data_server)
@@ -111,25 +101,10 @@ async fn run_auto_demo_mode(cli: &Cli) {
     println!("╚══════════════════════════════════════════════════════╝");
     println!();
 
-    if let Some(ref dir) = cli.persist {
-        #[cfg(feature = "rocksdb")]
-        {
-            println!("▶ Using persistent storage at: {}", dir);
-            let client = build_persist_client(dir);
-            run_auto_demo(&client).await;
-        }
-        #[cfg(not(feature = "rocksdb"))]
-        {
-            let _ = dir;
-            eprintln!("Error: --persist requires the `rocksdb` feature.");
-            eprintln!("Rebuild with: cargo run -p rucksfs-demo --features rocksdb -- --persist <dir>");
-            std::process::exit(1);
-        }
-    } else {
-        println!("▶ Using in-memory storage (data will not survive restart)");
-        let client = build_memory_client();
-        run_auto_demo(&client).await;
-    }
+    let data_dir = resolve_data_dir(cli);
+    println!("▶ Using persistent storage at: {}", data_dir.display());
+    let client = build_client(&data_dir);
+    run_auto_demo(&client).await;
 
     println!();
     println!("✔ Demo completed successfully!");
@@ -252,24 +227,10 @@ async fn run_interactive_mode(cli: &Cli) {
     println!("╚══════════════════════════════════════════════════════╝");
     println!();
 
-    if let Some(ref dir) = cli.persist {
-        #[cfg(feature = "rocksdb")]
-        {
-            println!("▶ Using persistent storage at: {}", dir);
-            let client = build_persist_client(dir);
-            run_repl(&client).await;
-        }
-        #[cfg(not(feature = "rocksdb"))]
-        {
-            let _ = dir;
-            eprintln!("Error: --persist requires the `rocksdb` feature.");
-            std::process::exit(1);
-        }
-    } else {
-        println!("▶ Using in-memory storage (data will not survive restart)");
-        let client = build_memory_client();
-        run_repl(&client).await;
-    }
+    let data_dir = resolve_data_dir(cli);
+    println!("▶ Using persistent storage at: {}", data_dir.display());
+    let client = build_client(&data_dir);
+    run_repl(&client).await;
 }
 
 const ROOT_INODE: u64 = 1;
@@ -598,31 +559,13 @@ async fn run_mount_mode(cli: &Cli) {
             std::process::exit(1);
         }
 
-        if let Some(ref dir) = cli.persist {
-            #[cfg(feature = "rocksdb")]
-            {
-                println!("▶ Using persistent storage at: {}", dir);
-                let client = Arc::new(build_persist_client(dir));
-                println!("▶ Press Ctrl+C or run `fusermount -u {}` to unmount.", mountpoint);
-                if let Err(e) = rucksfs_client::mount_fuse(mountpoint, client) {
-                    eprintln!("FUSE mount error: {}", e);
-                    std::process::exit(1);
-                }
-            }
-            #[cfg(not(feature = "rocksdb"))]
-            {
-                let _ = dir;
-                eprintln!("Error: --persist requires the `rocksdb` feature.");
-                std::process::exit(1);
-            }
-        } else {
-            println!("▶ Using in-memory storage");
-            let client = Arc::new(build_memory_client());
-            println!("▶ Press Ctrl+C or run `fusermount -u {}` to unmount.", mountpoint);
-            if let Err(e) = rucksfs_client::mount_fuse(mountpoint, client) {
-                eprintln!("FUSE mount error: {}", e);
-                std::process::exit(1);
-            }
+        let data_dir = resolve_data_dir(cli);
+        println!("▶ Using persistent storage at: {}", data_dir.display());
+        let client = Arc::new(build_client(&data_dir));
+        println!("▶ Press Ctrl+C or run `fusermount -u {}` to unmount.", mountpoint);
+        if let Err(e) = rucksfs_client::mount_fuse(mountpoint, client) {
+            eprintln!("FUSE mount error: {}", e);
+            std::process::exit(1);
         }
     }
 

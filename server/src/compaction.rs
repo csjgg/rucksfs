@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex};
 
 use rucksfs_core::{FsResult, Inode};
 use rucksfs_storage::encoding::{encode_inode_key, InodeValue};
-use rucksfs_storage::{DeltaStore, MetadataStore};
+use rucksfs_storage::{
+    BatchOp, DeltaStore, MetadataStore, StorageBundle,
+};
 
 use crate::cache::InodeFoldedCache;
 use crate::delta::{self, DeltaOp};
@@ -49,6 +51,7 @@ where
     M: MetadataStore,
     DS: DeltaStore,
 {
+    #[allow(dead_code)]
     metadata: Arc<M>,
     delta_store: Arc<DS>,
     cache: Arc<InodeFoldedCache>,
@@ -57,6 +60,8 @@ where
     dirty: Mutex<HashSet<Inode>>,
     /// Flag to stop the background loop.
     running: AtomicBool,
+    /// Storage bundle for atomic writes (put merged inode + clear deltas).
+    storage_bundle: Arc<dyn StorageBundle>,
 }
 
 impl<M, DS> DeltaCompactionWorker<M, DS>
@@ -70,6 +75,7 @@ where
         delta_store: Arc<DS>,
         cache: Arc<InodeFoldedCache>,
         config: CompactionConfig,
+        storage_bundle: Arc<dyn StorageBundle>,
     ) -> Self {
         Self {
             metadata,
@@ -78,6 +84,7 @@ where
             config,
             dirty: Mutex::new(HashSet::new()),
             running: AtomicBool::new(false),
+            storage_bundle,
         }
     }
 
@@ -125,15 +132,17 @@ where
 
     /// Compact a single inode regardless of threshold.
     pub fn force_compact_inode(&self, inode: Inode) -> FsResult<bool> {
-        // 1. Scan deltas.
+        // 1. Scan deltas (outside transaction — delta keys are append-only
+        //    and won't conflict with other transactions).
         let raw_deltas = self.delta_store.scan_deltas(inode)?;
         if raw_deltas.is_empty() {
             return Ok(false);
         }
 
-        // 2. Read base.
+        // 2. Begin transaction and lock the base inode.
+        let mut batch = self.storage_bundle.begin_write();
         let key = encode_inode_key(inode);
-        let mut base = match self.metadata.get(&key)? {
+        let mut base = match batch.get_for_update_inode(&key)? {
             Some(bytes) => InodeValue::deserialize(&bytes)?,
             None => return Ok(false), // inode was deleted
         };
@@ -145,13 +154,33 @@ where
             .collect();
         delta::fold_deltas(&mut base, &ops);
 
-        // 4. Write back the new base.
-        self.metadata.put(&key, &base.serialize())?;
+        // 4. Write merged inode + delete delta keys within the transaction.
+        batch.push(BatchOp::PutInode {
+            key: key.clone(),
+            value: base.serialize(),
+        });
+        let delta_keys = self.delta_store.scan_delta_keys(inode)?;
+        for dk in &delta_keys {
+            batch.push(BatchOp::DeleteDelta { key: dk.clone() });
+        }
 
-        // 5. Clear compacted deltas.
-        self.delta_store.clear_deltas(inode)?;
+        // 5. Commit — if the inode was concurrently deleted/modified,
+        //    PCC will detect the conflict and we safely skip.
+        match batch.commit() {
+            Ok(()) => {}
+            Err(rucksfs_core::FsError::TransactionConflict) => {
+                // Another transaction modified this inode (e.g. unlink).
+                // Safe to skip — the inode will be re-compacted later or
+                // was already deleted.
+                return Ok(false);
+            }
+            Err(e) => return Err(e),
+        }
 
-        // 6. Invalidate cache so the next read picks up the fresh base.
+        // 6. Update in-memory state after successful commit.
+        let _ = self.delta_store.clear_deltas(inode);
+
+        // 7. Invalidate cache so the next read picks up the fresh base.
         self.cache.invalidate(inode);
 
         Ok(true)
@@ -234,33 +263,39 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rucksfs_storage::{MemoryDeltaStore, MemoryMetadataStore};
+    use rucksfs_storage::encoding::encode_inode_key;
+    use rucksfs_storage::{open_rocks_db, RocksDeltaStore, RocksMetadataStore, RocksStorageBundle};
 
     fn make_worker(
         threshold: usize,
     ) -> (
-        Arc<MemoryMetadataStore>,
-        Arc<MemoryDeltaStore>,
+        tempfile::TempDir,
+        Arc<RocksMetadataStore>,
+        Arc<RocksDeltaStore>,
         Arc<InodeFoldedCache>,
-        DeltaCompactionWorker<MemoryMetadataStore, MemoryDeltaStore>,
+        DeltaCompactionWorker<RocksMetadataStore, RocksDeltaStore>,
     ) {
-        let meta = Arc::new(MemoryMetadataStore::new());
-        let ds = Arc::new(MemoryDeltaStore::new());
+        let tmp = tempfile::tempdir().unwrap();
+        let db = open_rocks_db(tmp.path().join("meta.db")).unwrap();
+        let meta = Arc::new(RocksMetadataStore::new(Arc::clone(&db)));
+        let ds = Arc::new(RocksDeltaStore::new(Arc::clone(&db)));
         let cache = Arc::new(InodeFoldedCache::new(100));
         let config = CompactionConfig {
             delta_threshold: threshold,
             interval_ms: 50,
         };
+        let bundle: Arc<dyn StorageBundle> = Arc::new(RocksStorageBundle::new(Arc::clone(&db)));
         let worker = DeltaCompactionWorker::new(
             Arc::clone(&meta),
             Arc::clone(&ds),
             Arc::clone(&cache),
             config,
+            bundle,
         );
-        (meta, ds, cache, worker)
+        (tmp, meta, ds, cache, worker)
     }
 
-    fn write_base(meta: &MemoryMetadataStore, inode: Inode, nlink: u32) {
+    fn write_base(meta: &RocksMetadataStore, inode: Inode, nlink: u32) {
         let iv = InodeValue {
             version: 1,
             inode,
@@ -276,55 +311,49 @@ mod tests {
         meta.put(&encode_inode_key(inode), &iv.serialize()).unwrap();
     }
 
-    fn append_nlink_delta(ds: &MemoryDeltaStore, inode: Inode, amount: i32) {
+    fn append_nlink_delta(ds: &RocksDeltaStore, inode: Inode, amount: i32) {
         let op = DeltaOp::IncrementNlink(amount);
         ds.append_deltas(inode, &[op.serialize()]).unwrap();
     }
 
-    fn read_base(meta: &MemoryMetadataStore, inode: Inode) -> InodeValue {
+    fn read_base(meta: &RocksMetadataStore, inode: Inode) -> InodeValue {
         let bytes = meta.get(&encode_inode_key(inode)).unwrap().unwrap();
         InodeValue::deserialize(&bytes).unwrap()
     }
 
     #[test]
     fn compact_inode_below_threshold_skips() {
-        let (meta, ds, _cache, worker) = make_worker(5);
+        let (_tmp, meta, ds, _cache, worker) = make_worker(5);
         write_base(&meta, 42, 2);
-        // Append 3 deltas (below threshold of 5)
         for _ in 0..3 {
             append_nlink_delta(&ds, 42, 1);
         }
         let result = worker.compact_inode(42).unwrap();
-        assert!(!result); // Not compacted
-        // Deltas should still be there
+        assert!(!result);
         assert_eq!(ds.scan_deltas(42).unwrap().len(), 3);
     }
 
     #[test]
     fn compact_inode_at_threshold_compacts() {
-        let (meta, ds, _cache, worker) = make_worker(5);
+        let (_tmp, meta, ds, _cache, worker) = make_worker(5);
         write_base(&meta, 42, 2);
-        // Append exactly 5 deltas
         for _ in 0..5 {
             append_nlink_delta(&ds, 42, 1);
         }
         let result = worker.compact_inode(42).unwrap();
         assert!(result);
 
-        // Base should be updated
         let iv = read_base(&meta, 42);
         assert_eq!(iv.nlink, 7); // 2 + 5
 
-        // Deltas should be cleared
         assert!(ds.scan_deltas(42).unwrap().is_empty());
     }
 
     #[test]
     fn force_compact_ignores_threshold() {
-        let (meta, ds, _cache, worker) = make_worker(100);
+        let (_tmp, meta, ds, _cache, worker) = make_worker(100);
         write_base(&meta, 42, 2);
         append_nlink_delta(&ds, 42, 1);
-        // Only 1 delta, threshold is 100
         let result = worker.force_compact_inode(42).unwrap();
         assert!(result);
         assert_eq!(read_base(&meta, 42).nlink, 3);
@@ -333,14 +362,14 @@ mod tests {
 
     #[test]
     fn compact_nonexistent_inode_returns_false() {
-        let (_meta, _ds, _cache, worker) = make_worker(1);
+        let (_tmp, _meta, _ds, _cache, worker) = make_worker(1);
         let result = worker.force_compact_inode(999).unwrap();
         assert!(!result);
     }
 
     #[test]
     fn compact_no_deltas_returns_false() {
-        let (meta, _ds, _cache, worker) = make_worker(1);
+        let (_tmp, meta, _ds, _cache, worker) = make_worker(1);
         write_base(&meta, 42, 2);
         let result = worker.force_compact_inode(42).unwrap();
         assert!(!result);
@@ -348,8 +377,7 @@ mod tests {
 
     #[test]
     fn compact_dirty_batch() {
-        let (meta, ds, _cache, worker) = make_worker(2);
-        // Setup: 3 inodes, each with 2+ deltas
+        let (_tmp, meta, ds, _cache, worker) = make_worker(2);
         for inode in [10, 20, 30] {
             write_base(&meta, inode, 1);
             for _ in 0..3 {
@@ -361,7 +389,6 @@ mod tests {
         let compacted = worker.compact_dirty().unwrap();
         assert_eq!(compacted, 3);
 
-        // All bases should be updated
         for inode in [10, 20, 30] {
             assert_eq!(read_base(&meta, inode).nlink, 4); // 1 + 3
             assert!(ds.scan_deltas(inode).unwrap().is_empty());
@@ -370,22 +397,21 @@ mod tests {
 
     #[test]
     fn compact_dirty_re_marks_below_threshold() {
-        let (meta, ds, _cache, worker) = make_worker(10);
+        let (_tmp, meta, ds, _cache, worker) = make_worker(10);
         write_base(&meta, 42, 2);
-        append_nlink_delta(&ds, 42, 1); // 1 delta, threshold 10
+        append_nlink_delta(&ds, 42, 1);
         worker.mark_dirty(42);
 
         let compacted = worker.compact_dirty().unwrap();
         assert_eq!(compacted, 0);
 
-        // Should be re-marked as dirty
         let dirty = worker.dirty.lock().unwrap();
         assert!(dirty.contains(&42));
     }
 
     #[test]
     fn flush_all_forces_all() {
-        let (meta, ds, _cache, worker) = make_worker(100);
+        let (_tmp, meta, ds, _cache, worker) = make_worker(100);
         write_base(&meta, 42, 2);
         append_nlink_delta(&ds, 42, 1);
         worker.mark_dirty(42);
@@ -397,16 +423,15 @@ mod tests {
 
     #[test]
     fn compaction_invalidates_cache() {
-        let (meta, ds, cache, worker) = make_worker(1);
+        let (_tmp, meta, ds, cache, worker) = make_worker(1);
         write_base(&meta, 42, 2);
 
-        // Put stale value in cache
         let stale = InodeValue {
             version: 1,
             inode: 42,
             size: 0,
             mode: 0o040755,
-            nlink: 999, // clearly stale
+            nlink: 999,
             uid: 0,
             gid: 0,
             atime: 1000,
@@ -416,17 +441,15 @@ mod tests {
         cache.put(42, stale);
         assert!(cache.get(42).is_some());
 
-        // Compact
         append_nlink_delta(&ds, 42, 1);
         worker.force_compact_inode(42).unwrap();
 
-        // Cache should be invalidated
         assert!(cache.get(42).is_none());
     }
 
     #[test]
     fn run_loop_can_be_stopped() {
-        let (_meta, _ds, _cache, worker) = make_worker(1);
+        let (_tmp, _meta, _ds, _cache, worker) = make_worker(1);
         let worker = Arc::new(worker);
         let w = Arc::clone(&worker);
 
@@ -434,7 +457,6 @@ mod tests {
             w.run_loop();
         });
 
-        // Give it a moment to start
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert!(worker.is_running());
 
@@ -445,10 +467,9 @@ mod tests {
 
     #[test]
     fn mixed_delta_types_compact_correctly() {
-        let (meta, ds, _cache, worker) = make_worker(1);
+        let (_tmp, meta, ds, _cache, worker) = make_worker(1);
         write_base(&meta, 42, 2);
 
-        // Append mixed deltas
         let ops = vec![
             DeltaOp::IncrementNlink(3),
             DeltaOp::SetMtime(5000),

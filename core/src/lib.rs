@@ -83,6 +83,8 @@ pub enum FsError {
     InvalidInput(String),
     #[error("permission denied")]
     PermissionDenied,
+    #[error("transaction conflict")]
+    TransactionConflict,
     #[error("other: {0}")]
     Other(String),
 }

@@ -3,18 +3,12 @@ use rucksfs_core::{DirEntry, FileAttr, FsResult, Inode};
 
 pub mod allocator;
 pub mod encoding;
-pub mod memory;
 pub mod rawdisk;
-
-#[cfg(feature = "rocksdb")]
 pub mod rocks;
 
 pub use allocator::InodeAllocator;
-pub use memory::{MemoryDataStore, MemoryDeltaStore, MemoryDirectoryIndex, MemoryMetadataStore};
 pub use rawdisk::RawDiskDataStore;
-
-#[cfg(feature = "rocksdb")]
-pub use rocks::{open_rocks_db, RocksDeltaStore, RocksDirectoryIndex, RocksMetadataStore};
+pub use rocks::{open_rocks_db, RocksDeltaStore, RocksDirectoryIndex, RocksMetadataStore, RocksStorageBundle};
 
 /// Append-only delta store for incremental inode attribute updates.
 ///
@@ -31,6 +25,10 @@ pub trait DeltaStore: Send + Sync {
     /// Scan all pending (un-compacted) deltas for `inode`, returning them
     /// in sequence-number order as raw bytes.
     fn scan_deltas(&self, inode: Inode) -> FsResult<Vec<Vec<u8>>>;
+
+    /// Scan all pending delta keys for `inode`, returning the raw key bytes.
+    /// Used by compaction to build atomic delete batches.
+    fn scan_delta_keys(&self, inode: Inode) -> FsResult<Vec<Vec<u8>>>;
 
     /// Delete all deltas for `inode` (called after compaction merges them
     /// into the base inode value).
@@ -59,4 +57,69 @@ pub trait DirectoryIndex: Send + Sync {
     fn list_dir(&self, inode: Inode) -> FsResult<Vec<DirEntry>>;
     fn insert_child(&self, parent: Inode, name: &str, inode: Inode, attr: FileAttr) -> FsResult<()>;
     fn remove_child(&self, parent: Inode, name: &str) -> FsResult<()>;
+}
+
+// ===========================================================================
+// Atomic write batch abstraction
+// ===========================================================================
+
+/// Operation types that can be collected into an atomic write batch.
+///
+/// Each variant corresponds to a write to a specific column family / store.
+#[derive(Debug, Clone)]
+pub enum BatchOp {
+    /// Put an inode value: CF:inodes
+    PutInode { key: Vec<u8>, value: Vec<u8> },
+    /// Delete an inode: CF:inodes
+    DeleteInode { key: Vec<u8> },
+    /// Put a directory entry: CF:dir_entries
+    PutDirEntry { key: Vec<u8>, value: Vec<u8> },
+    /// Delete a directory entry: CF:dir_entries
+    DeleteDirEntry { key: Vec<u8> },
+    /// Put a delta entry: CF:delta_entries
+    PutDelta { key: Vec<u8>, value: Vec<u8> },
+    /// Delete a delta entry: CF:delta_entries
+    DeleteDelta { key: Vec<u8> },
+    /// Put a system key: CF:system (via MetadataStore, e.g. next_inode)
+    PutSystem { key: Vec<u8>, value: Vec<u8> },
+}
+
+/// A batch of write operations that will be committed atomically.
+///
+/// Maps to a RocksDB `Transaction` spanning multiple column families.
+pub trait AtomicWriteBatch: Send {
+    /// Add an operation to the batch.
+    fn push(&mut self, op: BatchOp);
+
+    /// Commit all collected operations atomically.
+    ///
+    /// After a successful commit, all operations are visible. If the process
+    /// crashes before commit returns, none of the operations are visible.
+    fn commit(self: Box<Self>) -> FsResult<()>;
+
+    /// Read an inode value inside the transaction and acquire a pessimistic
+    /// row lock on the key (PCC: `GetForUpdate`).
+    ///
+    /// Calls `Transaction::get_for_update_cf` on the inodes column family.
+    fn get_for_update_inode(&self, _key: &[u8]) -> FsResult<Option<Vec<u8>>> {
+        unimplemented!("get_for_update_inode not supported by this backend")
+    }
+
+    /// Read a directory-entry value inside the transaction and acquire a
+    /// pessimistic row lock on the key (PCC: `GetForUpdate`).
+    ///
+    /// Calls `Transaction::get_for_update_cf` on the dir_entries column family.
+    fn get_for_update_dir_entry(&self, _key: &[u8]) -> FsResult<Option<Vec<u8>>> {
+        unimplemented!("get_for_update_dir_entry not supported by this backend")
+    }
+}
+
+/// Trait for storage backends that support atomic cross-store writes.
+///
+/// Implemented by a "bundle" that owns references to all underlying stores
+/// (metadata, directory index, delta store) and can create an
+/// [`AtomicWriteBatch`] that spans all of them.
+pub trait StorageBundle: Send + Sync {
+    /// Begin a new atomic write batch.
+    fn begin_write(&self) -> Box<dyn AtomicWriteBatch + '_>;
 }

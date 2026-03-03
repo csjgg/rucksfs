@@ -4,6 +4,6 @@
 //! For now it serves as a compilation placeholder.
 
 fn main() {
-    eprintln!("rucksfs-server: RPC layer not yet refactored. Use rucksfs-demo instead.");
+    eprintln!("rucksfs-server: RPC layer not yet refactored. Use the `rucksfs` binary instead.");
     std::process::exit(1);
 }

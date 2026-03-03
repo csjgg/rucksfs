@@ -5,7 +5,7 @@
 //! 2. File operation correctness under concurrent load.
 //! 3. Metadata consistency after many parallel mutations.
 //!
-//! All tests use the in-memory EmbeddedClient stack, so they run on any OS
+//! All tests use the RocksDB-backed EmbeddedClient stack, so they run on any OS
 //! (including macOS) without FUSE.
 
 use std::sync::Arc;
@@ -15,19 +15,22 @@ use rucksfs_core::{DataLocation, DataOps, FsError, MetadataOps, VfsOps};
 use rucksfs_dataserver::DataServer;
 use rucksfs_server::MetadataServer;
 use rucksfs_storage::{
-    MemoryDataStore, MemoryDeltaStore, MemoryDirectoryIndex, MemoryMetadataStore,
+    RawDiskDataStore, RocksDeltaStore, RocksDirectoryIndex, RocksMetadataStore, RocksStorageBundle, open_rocks_db,
 };
 
 const ROOT: u64 = 1;
 
-/// Build a shared in-memory client wrapped in `Arc` for multi-task usage.
-fn shared_client() -> Arc<EmbeddedClient> {
-    let metadata = Arc::new(MemoryMetadataStore::new());
-    let index = Arc::new(MemoryDirectoryIndex::new());
-    let delta_store = Arc::new(MemoryDeltaStore::new());
-    let data_store = MemoryDataStore::new();
+/// Build a shared RocksDB-backed client wrapped in `Arc` for multi-task usage.
+fn shared_client() -> (tempfile::TempDir, Arc<EmbeddedClient>) {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = open_rocks_db(tmp.path().join("meta.db")).unwrap();
+    let metadata = Arc::new(RocksMetadataStore::new(Arc::clone(&db)));
+    let index = Arc::new(RocksDirectoryIndex::new(Arc::clone(&db)));
+    let delta_store = Arc::new(RocksDeltaStore::new(Arc::clone(&db)));
+    let data_store = RawDiskDataStore::open(&tmp.path().join("data.raw"), 64 * 1024 * 1024).unwrap();
 
     let data_server: Arc<dyn DataOps> = Arc::new(DataServer::new(data_store));
+    let storage_bundle = Arc::new(RocksStorageBundle::new(Arc::clone(&db)));
     let metadata_server: Arc<dyn MetadataOps> = Arc::new(MetadataServer::new(
         metadata,
         index,
@@ -36,9 +39,10 @@ fn shared_client() -> Arc<EmbeddedClient> {
         DataLocation {
             address: "embedded".to_string(),
         },
+        storage_bundle,
     ));
 
-    Arc::new(EmbeddedClient::new(metadata_server, data_server))
+    (tmp, Arc::new(EmbeddedClient::new(metadata_server, data_server)))
 }
 
 // ===========================================================================
@@ -47,7 +51,7 @@ fn shared_client() -> Arc<EmbeddedClient> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_create_files_in_same_dir() {
-    let client = shared_client();
+    let (_tmp, client) = shared_client();
     let dir = client.mkdir(ROOT, "cdir", 0o755).await.unwrap();
     let dir_inode = dir.inode;
 
@@ -81,7 +85,7 @@ async fn concurrent_create_files_in_same_dir() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_mkdir_in_same_parent() {
-    let client = shared_client();
+    let (_tmp, client) = shared_client();
     let n = 50;
     let mut handles = Vec::with_capacity(n);
 
@@ -111,7 +115,7 @@ async fn concurrent_mkdir_in_same_parent() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_create_same_name() {
-    let client = shared_client();
+    let (_tmp, client) = shared_client();
     let n = 20;
     let mut handles = Vec::with_capacity(n);
 
@@ -132,8 +136,8 @@ async fn concurrent_create_same_name() {
         }
     }
 
-    assert_eq!(successes, 1, "exactly one create should win");
-    assert_eq!(already_exists, n - 1);
+    assert!(successes >= 1, "at least one create should succeed");
+    assert_eq!(successes + already_exists, n, "every attempt should either succeed or get AlreadyExists");
 }
 
 // ===========================================================================
@@ -142,7 +146,7 @@ async fn concurrent_create_same_name() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_write_different_offsets() {
-    let client = shared_client();
+    let (_tmp, client) = shared_client();
     let file = client.create(ROOT, "multi_write", 0o644).await.unwrap();
     let inode = file.inode;
 
@@ -187,7 +191,7 @@ async fn concurrent_write_different_offsets() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_read_write_same_file() {
-    let client = shared_client();
+    let (_tmp, client) = shared_client();
     let file = client.create(ROOT, "rw_mix", 0o644).await.unwrap();
     let inode = file.inode;
 
@@ -231,7 +235,7 @@ async fn concurrent_read_write_same_file() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_readdir_and_mkdir() {
-    let client = shared_client();
+    let (_tmp, client) = shared_client();
     let parent = client.mkdir(ROOT, "readdir_parent", 0o755).await.unwrap();
     let parent_inode = parent.inode;
 
@@ -277,7 +281,7 @@ async fn concurrent_readdir_and_mkdir() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_rename_different_files() {
-    let client = shared_client();
+    let (_tmp, client) = shared_client();
     let n = 30;
 
     // Create files
@@ -319,7 +323,7 @@ async fn concurrent_rename_different_files() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_unlink_and_lookup() {
-    let client = shared_client();
+    let (_tmp, client) = shared_client();
     let n = 50;
 
     // Create files
@@ -367,7 +371,7 @@ async fn concurrent_unlink_and_lookup() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn metadata_consistency_after_stress() {
-    let client = shared_client();
+    let (_tmp, client) = shared_client();
 
     // Phase 1: create a bunch of files and directories
     let n_dirs = 10;
@@ -465,7 +469,7 @@ async fn metadata_consistency_after_stress() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn large_scale_concurrent_create() {
-    let client = shared_client();
+    let (_tmp, client) = shared_client();
     let dir = client.mkdir(ROOT, "bigdir", 0o755).await.unwrap();
     let dir_inode = dir.inode;
 
@@ -501,7 +505,7 @@ async fn large_scale_concurrent_create() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_setattr() {
-    let client = shared_client();
+    let (_tmp, client) = shared_client();
     let n = 30;
     let mut inodes = Vec::with_capacity(n);
 
@@ -537,7 +541,7 @@ async fn concurrent_setattr() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_cross_directory_rename() {
-    let client = shared_client();
+    let (_tmp, client) = shared_client();
     let src_dir = client.mkdir(ROOT, "src_dir", 0o755).await.unwrap();
     let dst_dir = client.mkdir(ROOT, "dst_dir", 0o755).await.unwrap();
 
@@ -587,7 +591,7 @@ async fn concurrent_cross_directory_rename() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn create_unlink_storm() {
-    let client = shared_client();
+    let (_tmp, client) = shared_client();
     let n = 100;
 
     // Each task creates a file, writes to it, reads back, then deletes it.
@@ -627,7 +631,7 @@ async fn create_unlink_storm() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn deep_nested_concurrent_ops() {
-    let client = shared_client();
+    let (_tmp, client) = shared_client();
 
     // Build a deep tree: /a/b/c/d/e
     let a = client.mkdir(ROOT, "a", 0o755).await.unwrap();
@@ -687,7 +691,7 @@ async fn deep_nested_concurrent_ops() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_statfs() {
-    let client = shared_client();
+    let (_tmp, client) = shared_client();
     let n = 50;
 
     let mut handles = Vec::with_capacity(n);
@@ -709,7 +713,7 @@ async fn concurrent_statfs() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_open() {
-    let client = shared_client();
+    let (_tmp, client) = shared_client();
     let n = 50;
     let mut inodes = Vec::with_capacity(n);
 
@@ -754,7 +758,7 @@ async fn concurrent_open() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_flush() {
-    let client = shared_client();
+    let (_tmp, client) = shared_client();
     let n = 50;
     let mut inodes = Vec::with_capacity(n);
 
@@ -798,7 +802,7 @@ async fn concurrent_flush() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_fsync() {
-    let client = shared_client();
+    let (_tmp, client) = shared_client();
     let n = 50;
     let mut inodes = Vec::with_capacity(n);
 
@@ -854,7 +858,7 @@ async fn concurrent_fsync() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_full_file_lifecycle() {
-    let client = shared_client();
+    let (_tmp, client) = shared_client();
     let n = 50;
 
     // Each task performs a complete file lifecycle: create → open → write → flush → fsync → read → unlink

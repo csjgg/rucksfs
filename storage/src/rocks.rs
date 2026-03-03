@@ -7,7 +7,10 @@
 //! - **dir_entries**: directory entries (key = encoded dir entry key, value = child inode as u64 BE)
 //! - **system**: system-level KV pairs (e.g. next inode counter)
 
-use rocksdb::{ColumnFamilyDescriptor, Options, WriteBatch, DB};
+use rocksdb::{
+    ColumnFamilyDescriptor, Options, Transaction, TransactionDB, TransactionDBOptions,
+    TransactionOptions, WriteBatchWithTransaction, WriteOptions,
+};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,9 +20,11 @@ use rucksfs_core::{DirEntry, FileAttr, FsError, FsResult, Inode};
 
 use crate::encoding::{
     decode_delta_key, delta_prefix, dir_entry_prefix, encode_delta_key, encode_dir_entry_key,
-    encode_inode_key, extract_child_name, InodeValue,
+    extract_child_name,
 };
-use crate::{DeltaStore, DirectoryIndex, MetadataStore};
+use crate::{AtomicWriteBatch, BatchOp, DeltaStore, DirectoryIndex, MetadataStore, StorageBundle};
+
+// ... existing CF constants and code below ...
 
 /// Column family name for inode metadata.
 const CF_INODES: &str = "inodes";
@@ -37,17 +42,19 @@ const ALL_CFS: &[&str] = &[CF_INODES, CF_DIR_ENTRIES, CF_SYSTEM, CF_DELTA_ENTRIE
 ///
 /// This is a shared helper so that both `RocksMetadataStore` and
 /// `RocksDirectoryIndex` can be created from the same `Arc<DB>`.
-pub fn open_rocks_db(path: impl AsRef<Path>) -> FsResult<Arc<DB>> {
+pub fn open_rocks_db(path: impl AsRef<Path>) -> FsResult<Arc<TransactionDB>> {
     let mut db_opts = Options::default();
     db_opts.create_if_missing(true);
     db_opts.create_missing_column_families(true);
+
+    let txn_db_opts = TransactionDBOptions::default();
 
     let cf_descriptors: Vec<ColumnFamilyDescriptor> = ALL_CFS
         .iter()
         .map(|name| ColumnFamilyDescriptor::new(*name, Options::default()))
         .collect();
 
-    let db = DB::open_cf_descriptors(&db_opts, path.as_ref(), cf_descriptors)
+    let db = TransactionDB::open_cf_descriptors(&db_opts, &txn_db_opts, path.as_ref(), cf_descriptors)
         .map_err(|e| FsError::Io(format!("RocksDB open failed: {}", e)))?;
 
     Ok(Arc::new(db))
@@ -63,12 +70,12 @@ pub fn open_rocks_db(path: impl AsRef<Path>) -> FsResult<Arc<DB>> {
 /// The generic KV interface ([`MetadataStore`]) maps directly to RocksDB
 /// get/put/delete operations on the `inodes` CF.
 pub struct RocksMetadataStore {
-    db: Arc<DB>,
+    db: Arc<TransactionDB>,
 }
 
 impl RocksMetadataStore {
     /// Create a new store from a shared DB handle.
-    pub fn new(db: Arc<DB>) -> Self {
+    pub fn new(db: Arc<TransactionDB>) -> Self {
         Self { db }
     }
 
@@ -80,7 +87,7 @@ impl RocksMetadataStore {
 
     /// Get a reference to the underlying DB (useful for sharing with
     /// `RocksDirectoryIndex`).
-    pub fn db(&self) -> &Arc<DB> {
+    pub fn db(&self) -> &Arc<TransactionDB> {
         &self.db
     }
 }
@@ -145,7 +152,7 @@ impl MetadataStore for RocksMetadataStore {
 /// - key: `encode_dir_entry_key(parent, name)`
 /// - value: child inode as u64 big-endian + mode as u32 big-endian (12 bytes)
 pub struct RocksDirectoryIndex {
-    db: Arc<DB>,
+    db: Arc<TransactionDB>,
 }
 
 /// Serialized size of a directory entry value: inode(8) + mode(4) = 12 bytes.
@@ -153,7 +160,7 @@ const DIR_VALUE_SIZE: usize = 12;
 
 impl RocksDirectoryIndex {
     /// Create a new directory index from a shared DB handle.
-    pub fn new(db: Arc<DB>) -> Self {
+    pub fn new(db: Arc<TransactionDB>) -> Self {
         Self { db }
     }
 
@@ -273,7 +280,7 @@ impl DirectoryIndex for RocksDirectoryIndex {
 /// Per-inode sequence numbers are tracked in memory using `AtomicU64`
 /// counters and recovered from the CF on startup.
 pub struct RocksDeltaStore {
-    db: Arc<DB>,
+    db: Arc<TransactionDB>,
     /// Per-inode next sequence number.  Lazily populated on first access
     /// or recovered from disk on `recover_seq`.
     seqs: RwLock<HashMap<Inode, AtomicU64>>,
@@ -281,7 +288,7 @@ pub struct RocksDeltaStore {
 
 impl RocksDeltaStore {
     /// Create a new delta store from a shared DB handle.
-    pub fn new(db: Arc<DB>) -> Self {
+    pub fn new(db: Arc<TransactionDB>) -> Self {
         Self {
             db,
             seqs: RwLock::new(HashMap::new()),
@@ -350,7 +357,7 @@ impl DeltaStore for RocksDeltaStore {
             .cf_handle(CF_DELTA_ENTRIES)
             .ok_or_else(|| FsError::Io("CF 'delta_entries' not found".into()))?;
 
-        let mut batch = WriteBatch::default();
+        let mut batch = WriteBatchWithTransaction::<true>::default();
         let mut assigned = Vec::with_capacity(values.len());
 
         for v in values {
@@ -387,6 +394,26 @@ impl DeltaStore for RocksDeltaStore {
         Ok(result)
     }
 
+    fn scan_delta_keys(&self, inode: Inode) -> FsResult<Vec<Vec<u8>>> {
+        let cf = self
+            .db
+            .cf_handle(CF_DELTA_ENTRIES)
+            .ok_or_else(|| FsError::Io("CF 'delta_entries' not found".into()))?;
+
+        let prefix = delta_prefix(inode);
+        let iter = self.db.prefix_iterator_cf(&cf, &prefix);
+
+        let mut result = Vec::new();
+        for item in iter {
+            let (k, _) = item.map_err(|e| FsError::Io(format!("RocksDB iterator: {}", e)))?;
+            if !k.starts_with(&prefix) {
+                break;
+            }
+            result.push(k.to_vec());
+        }
+        Ok(result)
+    }
+
     fn clear_deltas(&self, inode: Inode) -> FsResult<()> {
         let cf = self
             .db
@@ -397,7 +424,7 @@ impl DeltaStore for RocksDeltaStore {
         let prefix = delta_prefix(inode);
         let iter = self.db.prefix_iterator_cf(&cf, &prefix);
 
-        let mut batch = WriteBatch::default();
+        let mut batch = WriteBatchWithTransaction::<true>::default();
         for item in iter {
             let (k, _) = item.map_err(|e| FsError::Io(format!("RocksDB iterator: {}", e)))?;
             if !k.starts_with(&prefix) {
@@ -422,6 +449,132 @@ impl DeltaStore for RocksDeltaStore {
 }
 
 // ===========================================================================
+// RocksStorageBundle — atomic cross-CF write batch
+// ===========================================================================
+
+/// A bundle of RocksDB-backed stores that supports atomic cross-CF writes.
+///
+/// All three stores (metadata, directory index, delta) share the same
+/// underlying `Arc<DB>`, so a single `WriteBatch` can span all column
+/// families atomically.
+pub struct RocksStorageBundle {
+    db: Arc<TransactionDB>,
+}
+
+impl RocksStorageBundle {
+    /// Create a new bundle from a shared DB handle.
+    pub fn new(db: Arc<TransactionDB>) -> Self {
+        Self { db }
+    }
+}
+
+/// Atomic write batch backed by a RocksDB PCC `Transaction`.
+///
+/// Each operation is applied to the transaction immediately via
+/// `txn.put_cf()` / `txn.delete_cf()`.  `commit()` calls
+/// `txn.commit()` which is atomic.  `get_for_update_*` methods
+/// acquire pessimistic row locks inside the transaction.
+struct RocksWriteBatch<'db> {
+    txn: Transaction<'db, TransactionDB>,
+    db: Arc<TransactionDB>,
+}
+
+/// Helper to map RocksDB errors from a transaction operation.
+///
+/// `Status::Busy` and `Status::TimedOut` (deadlock / lock-wait timeout)
+/// are mapped to `FsError::TransactionConflict`; everything else becomes
+/// `FsError::Io`.
+fn map_txn_err(e: rocksdb::Error) -> FsError {
+    let msg = e.to_string();
+    if msg.contains("Busy") || msg.contains("TimedOut") || msg.contains("deadlock") {
+        FsError::TransactionConflict
+    } else {
+        FsError::Io(format!("RocksDB transaction: {}", e))
+    }
+}
+
+impl<'db> AtomicWriteBatch for RocksWriteBatch<'db> {
+    fn push(&mut self, op: BatchOp) {
+        match op {
+            BatchOp::PutInode { key, value } => {
+                let cf = self.db.cf_handle(CF_INODES)
+                    .expect("CF 'inodes' must exist — database is corrupt or misconfigured");
+                self.txn.put_cf(&cf, &key, &value)
+                    .expect("transaction put_cf(inodes) failed unexpectedly");
+            }
+            BatchOp::DeleteInode { key } => {
+                let cf = self.db.cf_handle(CF_INODES)
+                    .expect("CF 'inodes' must exist — database is corrupt or misconfigured");
+                self.txn.delete_cf(&cf, &key)
+                    .expect("transaction delete_cf(inodes) failed unexpectedly");
+            }
+            BatchOp::PutDirEntry { key, value } => {
+                let cf = self.db.cf_handle(CF_DIR_ENTRIES)
+                    .expect("CF 'dir_entries' must exist — database is corrupt or misconfigured");
+                self.txn.put_cf(&cf, &key, &value)
+                    .expect("transaction put_cf(dir_entries) failed unexpectedly");
+            }
+            BatchOp::DeleteDirEntry { key } => {
+                let cf = self.db.cf_handle(CF_DIR_ENTRIES)
+                    .expect("CF 'dir_entries' must exist — database is corrupt or misconfigured");
+                self.txn.delete_cf(&cf, &key)
+                    .expect("transaction delete_cf(dir_entries) failed unexpectedly");
+            }
+            BatchOp::PutDelta { key, value } => {
+                let cf = self.db.cf_handle(CF_DELTA_ENTRIES)
+                    .expect("CF 'delta_entries' must exist — database is corrupt or misconfigured");
+                self.txn.put_cf(&cf, &key, &value)
+                    .expect("transaction put_cf(delta_entries) failed unexpectedly");
+            }
+            BatchOp::DeleteDelta { key } => {
+                let cf = self.db.cf_handle(CF_DELTA_ENTRIES)
+                    .expect("CF 'delta_entries' must exist — database is corrupt or misconfigured");
+                self.txn.delete_cf(&cf, &key)
+                    .expect("transaction delete_cf(delta_entries) failed unexpectedly");
+            }
+            BatchOp::PutSystem { key, value } => {
+                let cf = self.db.cf_handle(CF_SYSTEM)
+                    .expect("CF 'system' must exist — database is corrupt or misconfigured");
+                self.txn.put_cf(&cf, &key, &value)
+                    .expect("transaction put_cf(system) failed unexpectedly");
+            }
+        }
+    }
+
+    fn commit(self: Box<Self>) -> FsResult<()> {
+        self.txn.commit().map_err(map_txn_err)
+    }
+
+    fn get_for_update_inode(&self, key: &[u8]) -> FsResult<Option<Vec<u8>>> {
+        let cf = self.db.cf_handle(CF_INODES)
+            .ok_or_else(|| FsError::Io("CF 'inodes' not found".into()))?;
+        self.txn
+            .get_for_update_cf(&cf, key, true)
+            .map_err(map_txn_err)
+    }
+
+    fn get_for_update_dir_entry(&self, key: &[u8]) -> FsResult<Option<Vec<u8>>> {
+        let cf = self.db.cf_handle(CF_DIR_ENTRIES)
+            .ok_or_else(|| FsError::Io("CF 'dir_entries' not found".into()))?;
+        self.txn
+            .get_for_update_cf(&cf, key, true)
+            .map_err(map_txn_err)
+    }
+}
+
+impl StorageBundle for RocksStorageBundle {
+    fn begin_write(&self) -> Box<dyn AtomicWriteBatch + '_> {
+        let txn_opts = TransactionOptions::default();
+        let write_opts = WriteOptions::default();
+        let txn = self.db.transaction_opt(&write_opts, &txn_opts);
+        Box::new(RocksWriteBatch {
+            txn,
+            db: Arc::clone(&self.db),
+        })
+    }
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 #[cfg(test)]
@@ -429,7 +582,7 @@ mod tests {
     use super::*;
 
     /// Create a temporary RocksDB and return the shared DB handle.
-    fn temp_db() -> (tempfile::TempDir, Arc<DB>) {
+    fn temp_db() -> (tempfile::TempDir, Arc<TransactionDB>) {
         let tmp = tempfile::tempdir().expect("create temp dir");
         let db = open_rocks_db(tmp.path()).expect("open RocksDB");
         (tmp, db)
@@ -738,7 +891,7 @@ mod tests {
     // -----------------------------------------------------------------------
     mod integration {
         use super::*;
-        use crate::encoding::InodeValue;
+        use crate::encoding::{encode_inode_key, InodeValue};
 
         #[test]
         fn shared_db_metadata_and_dir_index() {
@@ -784,6 +937,7 @@ mod tests {
     // -----------------------------------------------------------------------
     mod delta_store {
         use super::*;
+        use crate::encoding::encode_inode_key;
 
         fn new_delta_store() -> (tempfile::TempDir, RocksDeltaStore) {
             let (tmp, db) = temp_db();

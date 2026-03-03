@@ -1,8 +1,8 @@
-//! End-to-end integration tests for the RucksFS demo stack.
+//! End-to-end integration tests for the RucksFS stack.
 //!
 //! These tests exercise the full MetadataServer + DataServer + EmbeddedClient
-//! pipeline using in-memory storage (and optionally RocksDB with the `rocksdb`
-//! feature).
+//! pipeline using RocksDB storage for isolated testing and persistence
+//! verification.
 
 use std::sync::Arc;
 
@@ -10,19 +10,22 @@ use rucksfs_client::EmbeddedClient;
 use rucksfs_core::{DataLocation, DataOps, MetadataOps, VfsOps};
 use rucksfs_dataserver::DataServer;
 use rucksfs_server::MetadataServer;
-use rucksfs_storage::{MemoryDataStore, MemoryDeltaStore, MemoryDirectoryIndex, MemoryMetadataStore};
+use rucksfs_storage::{RawDiskDataStore, RocksDeltaStore, RocksDirectoryIndex, RocksMetadataStore, RocksStorageBundle, open_rocks_db};
 
 /// Root inode constant.
 const ROOT: u64 = 1;
 
-/// Helper: build an in-memory server+client stack.
-fn mem_client() -> EmbeddedClient {
-    let metadata = Arc::new(MemoryMetadataStore::new());
-    let index = Arc::new(MemoryDirectoryIndex::new());
-    let delta_store = Arc::new(MemoryDeltaStore::new());
-    let data_store = MemoryDataStore::new();
+/// Helper: build a RocksDB-backed server+client stack.
+fn new_client() -> (tempfile::TempDir, EmbeddedClient) {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = open_rocks_db(tmp.path().join("meta.db")).unwrap();
+    let metadata = Arc::new(RocksMetadataStore::new(Arc::clone(&db)));
+    let index = Arc::new(RocksDirectoryIndex::new(Arc::clone(&db)));
+    let delta_store = Arc::new(RocksDeltaStore::new(Arc::clone(&db)));
+    let data_store = RawDiskDataStore::open(&tmp.path().join("data.raw"), 64 * 1024 * 1024).unwrap();
 
     let data_server: Arc<dyn DataOps> = Arc::new(DataServer::new(data_store));
+    let storage_bundle = Arc::new(RocksStorageBundle::new(Arc::clone(&db)));
     let metadata_server: Arc<dyn MetadataOps> = Arc::new(MetadataServer::new(
         metadata,
         index,
@@ -31,9 +34,10 @@ fn mem_client() -> EmbeddedClient {
         DataLocation {
             address: "embedded".to_string(),
         },
+        storage_bundle,
     ));
 
-    EmbeddedClient::new(metadata_server, data_server)
+    (tmp, EmbeddedClient::new(metadata_server, data_server))
 }
 
 // ===========================================================================
@@ -42,7 +46,7 @@ fn mem_client() -> EmbeddedClient {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn auto_demo_full_flow() {
-    let client = mem_client();
+    let (_tmp, client) = new_client();
 
     // 1. mkdir /mydir
     let dir_attr = client.mkdir(ROOT, "mydir", 0o755).await.unwrap();
@@ -98,7 +102,7 @@ async fn auto_demo_full_flow() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mkdir_creates_directory() {
-    let client = mem_client();
+    let (_tmp, client) = new_client();
     let attr = client.mkdir(ROOT, "testdir", 0o755).await.unwrap();
     assert_ne!(attr.inode, ROOT);
     assert_eq!(attr.mode & 0o040000, 0o040000);
@@ -106,7 +110,7 @@ async fn mkdir_creates_directory() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mkdir_duplicate_fails() {
-    let client = mem_client();
+    let (_tmp, client) = new_client();
     client.mkdir(ROOT, "dup", 0o755).await.unwrap();
     let result = client.mkdir(ROOT, "dup", 0o755).await;
     assert!(result.is_err());
@@ -114,7 +118,7 @@ async fn mkdir_duplicate_fails() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn create_file() {
-    let client = mem_client();
+    let (_tmp, client) = new_client();
     let attr = client.create(ROOT, "myfile.txt", 0o644).await.unwrap();
     assert_eq!(attr.mode & 0o100000, 0o100000);
     assert_eq!(attr.size, 0);
@@ -122,7 +126,7 @@ async fn create_file() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn create_duplicate_fails() {
-    let client = mem_client();
+    let (_tmp, client) = new_client();
     client.create(ROOT, "dup.txt", 0o644).await.unwrap();
     let result = client.create(ROOT, "dup.txt", 0o644).await;
     assert!(result.is_err());
@@ -130,7 +134,7 @@ async fn create_duplicate_fails() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn write_and_read() {
-    let client = mem_client();
+    let (_tmp, client) = new_client();
     let attr = client.create(ROOT, "data.bin", 0o644).await.unwrap();
     let inode = attr.inode;
 
@@ -144,7 +148,7 @@ async fn write_and_read() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn write_at_offset() {
-    let client = mem_client();
+    let (_tmp, client) = new_client();
     let attr = client.create(ROOT, "offset.bin", 0o644).await.unwrap();
     let inode = attr.inode;
 
@@ -157,7 +161,7 @@ async fn write_at_offset() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn read_empty_file() {
-    let client = mem_client();
+    let (_tmp, client) = new_client();
     let attr = client.create(ROOT, "empty", 0o644).await.unwrap();
     let data = client.read(attr.inode, 0, 100).await.unwrap();
     assert!(data.iter().all(|&b| b == 0));
@@ -165,7 +169,7 @@ async fn read_empty_file() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn lookup_existing() {
-    let client = mem_client();
+    let (_tmp, client) = new_client();
     let created = client.create(ROOT, "findme", 0o644).await.unwrap();
     let found = client.lookup(ROOT, "findme").await.unwrap();
     assert_eq!(found.inode, created.inode);
@@ -173,21 +177,21 @@ async fn lookup_existing() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn lookup_nonexistent() {
-    let client = mem_client();
+    let (_tmp, client) = new_client();
     let result = client.lookup(ROOT, "nope").await;
     assert!(result.is_err());
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn readdir_root_empty() {
-    let client = mem_client();
+    let (_tmp, client) = new_client();
     let entries = client.readdir(ROOT).await.unwrap();
     assert!(entries.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn readdir_multiple_entries() {
-    let client = mem_client();
+    let (_tmp, client) = new_client();
     client.mkdir(ROOT, "d1", 0o755).await.unwrap();
     client.mkdir(ROOT, "d2", 0o755).await.unwrap();
     client.create(ROOT, "f1", 0o644).await.unwrap();
@@ -202,7 +206,7 @@ async fn readdir_multiple_entries() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn unlink_file() {
-    let client = mem_client();
+    let (_tmp, client) = new_client();
     client.create(ROOT, "todelete", 0o644).await.unwrap();
     client.unlink(ROOT, "todelete").await.unwrap();
     assert!(client.lookup(ROOT, "todelete").await.is_err());
@@ -210,14 +214,14 @@ async fn unlink_file() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn unlink_nonexistent_fails() {
-    let client = mem_client();
+    let (_tmp, client) = new_client();
     let result = client.unlink(ROOT, "ghost").await;
     assert!(result.is_err());
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn rmdir_empty() {
-    let client = mem_client();
+    let (_tmp, client) = new_client();
     client.mkdir(ROOT, "emptydir", 0o755).await.unwrap();
     client.rmdir(ROOT, "emptydir").await.unwrap();
     assert!(client.lookup(ROOT, "emptydir").await.is_err());
@@ -225,7 +229,7 @@ async fn rmdir_empty() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn rmdir_nonempty_fails() {
-    let client = mem_client();
+    let (_tmp, client) = new_client();
     let dir = client.mkdir(ROOT, "full", 0o755).await.unwrap();
     client.create(dir.inode, "child", 0o644).await.unwrap();
     let result = client.rmdir(ROOT, "full").await;
@@ -234,7 +238,7 @@ async fn rmdir_nonempty_fails() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn rename_same_parent() {
-    let client = mem_client();
+    let (_tmp, client) = new_client();
     let attr = client.create(ROOT, "old", 0o644).await.unwrap();
     client.rename(ROOT, "old", ROOT, "new").await.unwrap();
 
@@ -245,7 +249,7 @@ async fn rename_same_parent() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn rename_cross_parent() {
-    let client = mem_client();
+    let (_tmp, client) = new_client();
     let d1 = client.mkdir(ROOT, "src", 0o755).await.unwrap();
     let d2 = client.mkdir(ROOT, "dst", 0o755).await.unwrap();
     let f = client.create(d1.inode, "moveme", 0o644).await.unwrap();
@@ -262,7 +266,7 @@ async fn rename_cross_parent() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn getattr_root() {
-    let client = mem_client();
+    let (_tmp, client) = new_client();
     let attr = client.getattr(ROOT).await.unwrap();
     assert_eq!(attr.inode, ROOT);
     assert_eq!(attr.mode & 0o040000, 0o040000);
@@ -270,7 +274,7 @@ async fn getattr_root() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn setattr_changes_mode() {
-    let client = mem_client();
+    let (_tmp, client) = new_client();
     let attr = client.create(ROOT, "chmod_me", 0o644).await.unwrap();
     let req = rucksfs_core::SetAttrRequest {
         mode: Some(0o755),
@@ -282,7 +286,7 @@ async fn setattr_changes_mode() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn statfs_returns_valid_data() {
-    let client = mem_client();
+    let (_tmp, client) = new_client();
     let st = client.statfs(ROOT).await.unwrap();
     assert!(st.blocks > 0);
     assert!(st.bsize > 0);
@@ -291,7 +295,7 @@ async fn statfs_returns_valid_data() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn deep_directory_tree() {
-    let client = mem_client();
+    let (_tmp, client) = new_client();
 
     let a = client.mkdir(ROOT, "a", 0o755).await.unwrap();
     let b = client.mkdir(a.inode, "b", 0o755).await.unwrap();
@@ -317,13 +321,12 @@ async fn deep_directory_tree() {
 }
 
 // ===========================================================================
-// RocksDB persistence tests (conditional on `rocksdb` feature)
+// RocksDB persistence tests
 // ===========================================================================
 
-#[cfg(feature = "rocksdb")]
 mod rocksdb_tests {
     use super::*;
-    use rucksfs_storage::{open_rocks_db, RawDiskDataStore, RocksDeltaStore, RocksDirectoryIndex, RocksMetadataStore};
+    use rucksfs_storage::{open_rocks_db, RawDiskDataStore, RocksDeltaStore, RocksDirectoryIndex, RocksMetadataStore, RocksStorageBundle};
 
     /// Build a persistent server+client stack at the given directory.
     fn persistent_client(dir: &std::path::Path) -> EmbeddedClient {
@@ -338,6 +341,7 @@ mod rocksdb_tests {
             .expect("open RawDisk");
 
         let data_server: Arc<dyn DataOps> = Arc::new(DataServer::new(data_store));
+        let storage_bundle = Arc::new(RocksStorageBundle::new(Arc::clone(&db)));
         let metadata_server: Arc<dyn MetadataOps> = Arc::new(MetadataServer::new(
             metadata,
             index,
@@ -346,6 +350,7 @@ mod rocksdb_tests {
             DataLocation {
                 address: "embedded".to_string(),
             },
+            storage_bundle,
         ));
 
         EmbeddedClient::new(metadata_server, data_server)

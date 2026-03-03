@@ -10,7 +10,7 @@ use rucksfs_client::EmbeddedClient;
 use rucksfs_core::{DataLocation, DataOps, FsError, MetadataOps, VfsOps};
 use rucksfs_dataserver::DataServer;
 use rucksfs_server::MetadataServer;
-use rucksfs_storage::{DeltaStore, MemoryDataStore, MemoryDeltaStore, MemoryDirectoryIndex, MemoryMetadataStore};
+use rucksfs_storage::{DeltaStore, RawDiskDataStore, RocksDeltaStore, RocksDirectoryIndex, RocksMetadataStore, RocksStorageBundle, open_rocks_db};
 
 /// Root inode constant.
 const ROOT: u64 = 1;
@@ -21,14 +21,19 @@ const FILE_MODE: u32 = 0o644;
 /// Permission mode for a directory.
 const DIR_MODE: u32 = 0o755;
 
-/// Build a fresh EmbeddedClient backed by in-memory stores for each test.
-fn new_client() -> EmbeddedClient {
-    let metadata = Arc::new(MemoryMetadataStore::new());
-    let index = Arc::new(MemoryDirectoryIndex::new());
-    let delta_store = Arc::new(MemoryDeltaStore::new());
-    let data_store = MemoryDataStore::new();
+/// Build a fresh EmbeddedClient backed by RocksDB stores for each test.
+/// Returns `(TempDir, EmbeddedClient)` — the TempDir must be kept alive for
+/// the duration of the test so the underlying database is not deleted.
+fn new_client() -> (tempfile::TempDir, EmbeddedClient) {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = open_rocks_db(tmp.path().join("meta.db")).unwrap();
+    let metadata = Arc::new(RocksMetadataStore::new(Arc::clone(&db)));
+    let index = Arc::new(RocksDirectoryIndex::new(Arc::clone(&db)));
+    let delta_store = Arc::new(RocksDeltaStore::new(Arc::clone(&db)));
+    let data_store = RawDiskDataStore::open(&tmp.path().join("data.raw"), 64 * 1024 * 1024).unwrap();
 
     let data_server: Arc<dyn DataOps> = Arc::new(DataServer::new(data_store));
+    let storage_bundle = Arc::new(RocksStorageBundle::new(Arc::clone(&db)));
     let metadata_server: Arc<dyn MetadataOps> = Arc::new(MetadataServer::new(
         metadata,
         index,
@@ -37,30 +42,28 @@ fn new_client() -> EmbeddedClient {
         DataLocation {
             address: "embedded".to_string(),
         },
+        storage_bundle,
     ));
 
-    EmbeddedClient::new(metadata_server, data_server)
+    (tmp, EmbeddedClient::new(metadata_server, data_server))
 }
 
 /// Build raw MetadataServer + DataServer for tests that need direct access to
 /// compaction workers or delta stores.
-fn new_server_and_data(
-) -> (
-    Arc<
-        MetadataServer<
-            MemoryMetadataStore,
-            MemoryDirectoryIndex,
-            MemoryDeltaStore,
-        >,
-    >,
+fn new_server_and_data() -> (
+    tempfile::TempDir,
+    Arc<MetadataServer<RocksMetadataStore, RocksDirectoryIndex, RocksDeltaStore>>,
     Arc<dyn DataOps>,
 ) {
-    let metadata = Arc::new(MemoryMetadataStore::new());
-    let index = Arc::new(MemoryDirectoryIndex::new());
-    let delta_store = Arc::new(MemoryDeltaStore::new());
-    let data_store = MemoryDataStore::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let db = open_rocks_db(tmp.path().join("meta.db")).unwrap();
+    let metadata = Arc::new(RocksMetadataStore::new(Arc::clone(&db)));
+    let index = Arc::new(RocksDirectoryIndex::new(Arc::clone(&db)));
+    let delta_store = Arc::new(RocksDeltaStore::new(Arc::clone(&db)));
+    let data_store = RawDiskDataStore::open(&tmp.path().join("data.raw"), 64 * 1024 * 1024).unwrap();
 
     let data_server: Arc<dyn DataOps> = Arc::new(DataServer::new(data_store));
+    let storage_bundle = Arc::new(RocksStorageBundle::new(Arc::clone(&db)));
     let server = Arc::new(MetadataServer::new(
         metadata,
         index,
@@ -69,9 +72,10 @@ fn new_server_and_data(
         DataLocation {
             address: "embedded".to_string(),
         },
+        storage_bundle,
     ));
 
-    (server, data_server)
+    (tmp, server, data_server)
 }
 
 fn rt() -> tokio::runtime::Runtime {
@@ -88,7 +92,7 @@ fn rt() -> tokio::runtime::Runtime {
 #[test]
 fn root_directory_exists_after_init() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
         let attr = client.getattr(ROOT).await.unwrap();
         assert_eq!(attr.inode, ROOT);
         assert_ne!(attr.mode & 0o040000, 0); // S_IFDIR
@@ -99,7 +103,7 @@ fn root_directory_exists_after_init() {
 #[test]
 fn root_readdir_empty() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
         let entries = client.readdir(ROOT).await.unwrap();
         assert!(entries.is_empty());
     });
@@ -112,7 +116,7 @@ fn root_readdir_empty() {
 #[test]
 fn file_lifecycle() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
 
         // Create
         let attr = client.create(ROOT, "hello.txt", FILE_MODE).await.unwrap();
@@ -155,7 +159,7 @@ fn file_lifecycle() {
 #[test]
 fn mkdir_and_readdir() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
 
         let dir_attr = client.mkdir(ROOT, "subdir", DIR_MODE).await.unwrap();
         assert_ne!(dir_attr.mode & 0o040000, 0);
@@ -173,7 +177,7 @@ fn mkdir_and_readdir() {
 #[test]
 fn rmdir_empty_directory() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
         client.mkdir(ROOT, "empty_dir", DIR_MODE).await.unwrap();
         client.rmdir(ROOT, "empty_dir").await.unwrap();
 
@@ -188,7 +192,7 @@ fn rmdir_empty_directory() {
 #[test]
 fn rmdir_non_empty_fails() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
         let dir_attr = client.mkdir(ROOT, "mydir", DIR_MODE).await.unwrap();
         client
             .create(dir_attr.inode, "file.txt", FILE_MODE)
@@ -203,7 +207,7 @@ fn rmdir_non_empty_fails() {
 #[test]
 fn rmdir_non_directory_fails() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
         client.create(ROOT, "file.txt", FILE_MODE).await.unwrap();
         let err = client.rmdir(ROOT, "file.txt").await.unwrap_err();
         assert!(matches!(err, FsError::NotADirectory));
@@ -217,7 +221,7 @@ fn rmdir_non_directory_fails() {
 #[test]
 fn create_duplicate_name_fails() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
         client.create(ROOT, "dup.txt", FILE_MODE).await.unwrap();
         let err = client.create(ROOT, "dup.txt", FILE_MODE).await.unwrap_err();
         assert!(matches!(err, FsError::AlreadyExists));
@@ -227,7 +231,7 @@ fn create_duplicate_name_fails() {
 #[test]
 fn mkdir_duplicate_name_fails() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
         client.mkdir(ROOT, "dup_dir", DIR_MODE).await.unwrap();
         let err = client.mkdir(ROOT, "dup_dir", DIR_MODE).await.unwrap_err();
         assert!(matches!(err, FsError::AlreadyExists));
@@ -241,7 +245,7 @@ fn mkdir_duplicate_name_fails() {
 #[test]
 fn unlink_directory_fails() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
         client.mkdir(ROOT, "dir", DIR_MODE).await.unwrap();
         let err = client.unlink(ROOT, "dir").await.unwrap_err();
         assert!(matches!(err, FsError::IsADirectory));
@@ -255,7 +259,7 @@ fn unlink_directory_fails() {
 #[test]
 fn lookup_nonexistent_returns_not_found() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
         let err = client.lookup(ROOT, "ghost").await.unwrap_err();
         assert!(matches!(err, FsError::NotFound));
     });
@@ -264,7 +268,7 @@ fn lookup_nonexistent_returns_not_found() {
 #[test]
 fn lookup_after_create() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
         let created = client.create(ROOT, "found.txt", FILE_MODE).await.unwrap();
         let looked_up = client.lookup(ROOT, "found.txt").await.unwrap();
         assert_eq!(created.inode, looked_up.inode);
@@ -278,7 +282,7 @@ fn lookup_after_create() {
 #[test]
 fn rename_same_directory() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
         let attr = client.create(ROOT, "old.txt", FILE_MODE).await.unwrap();
         let inode = attr.inode;
 
@@ -296,7 +300,7 @@ fn rename_same_directory() {
 #[test]
 fn rename_cross_directory() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
         let dir_a = client.mkdir(ROOT, "dir_a", DIR_MODE).await.unwrap();
         let dir_b = client.mkdir(ROOT, "dir_b", DIR_MODE).await.unwrap();
 
@@ -318,7 +322,7 @@ fn rename_cross_directory() {
 #[test]
 fn rename_overwrite_file() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
         client.create(ROOT, "src.txt", FILE_MODE).await.unwrap();
         let src = client.lookup(ROOT, "src.txt").await.unwrap();
 
@@ -340,7 +344,7 @@ fn rename_overwrite_file() {
 #[test]
 fn rename_dir_cross_directory() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
         let parent_a = client.mkdir(ROOT, "a", DIR_MODE).await.unwrap();
         let parent_b = client.mkdir(ROOT, "b", DIR_MODE).await.unwrap();
         let child = client
@@ -371,7 +375,7 @@ fn rename_dir_cross_directory() {
 #[test]
 fn statfs_returns_reasonable_values() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
         let st = client.statfs(ROOT).await.unwrap();
         assert!(st.blocks > 0);
         assert!(st.bsize > 0);
@@ -386,7 +390,7 @@ fn statfs_returns_reasonable_values() {
 #[test]
 fn write_read_large_block() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
         let attr = client.create(ROOT, "big.bin", FILE_MODE).await.unwrap();
         let inode = attr.inode;
 
@@ -402,7 +406,7 @@ fn write_read_large_block() {
 #[test]
 fn write_at_offset_preserves_earlier_data() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
         let attr = client.create(ROOT, "sparse.bin", FILE_MODE).await.unwrap();
         let inode = attr.inode;
 
@@ -423,7 +427,7 @@ fn write_at_offset_preserves_earlier_data() {
 #[test]
 fn flush_and_fsync() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
         let attr = client.create(ROOT, "sync.txt", FILE_MODE).await.unwrap();
         let inode = attr.inode;
 
@@ -441,7 +445,7 @@ fn flush_and_fsync() {
 #[test]
 fn open_directory_fails() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
         let dir = client.mkdir(ROOT, "dir", DIR_MODE).await.unwrap();
         let err = client.open(dir.inode, 0).await.unwrap_err();
         assert!(matches!(err, FsError::IsADirectory));
@@ -451,7 +455,7 @@ fn open_directory_fails() {
 #[test]
 fn open_nonexistent_fails() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
         let err = client.open(9999, 0).await.unwrap_err();
         assert!(matches!(err, FsError::NotFound));
     });
@@ -464,7 +468,7 @@ fn open_nonexistent_fails() {
 #[test]
 fn nested_directories_and_files() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
 
         let d1 = client.mkdir(ROOT, "level1", DIR_MODE).await.unwrap();
         let d2 = client.mkdir(d1.inode, "level2", DIR_MODE).await.unwrap();
@@ -493,7 +497,8 @@ fn nested_directories_and_files() {
 #[test]
 fn concurrent_create_unlink() {
     rt().block_on(async {
-        let client = Arc::new(new_client());
+        let (_tmp, client) = new_client();
+        let client = Arc::new(client);
         let n = 100usize;
         let mut handles = vec![];
 
@@ -531,7 +536,8 @@ fn concurrent_create_unlink() {
 #[test]
 fn concurrent_write_read_different_inodes() {
     rt().block_on(async {
-        let client = Arc::new(new_client());
+        let (_tmp, client) = new_client();
+        let client = Arc::new(client);
 
         let mut inodes = vec![];
         for i in 0..10 {
@@ -563,7 +569,8 @@ fn concurrent_write_read_different_inodes() {
 #[test]
 fn concurrent_mkdir_rmdir() {
     rt().block_on(async {
-        let client = Arc::new(new_client());
+        let (_tmp, client) = new_client();
+        let client = Arc::new(client);
         let n = 50usize;
 
         let mut handles = vec![];
@@ -608,7 +615,7 @@ fn concurrent_mkdir_rmdir() {
 #[test]
 fn delta_fold_many_creates() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
         let n = 100usize;
         for i in 0..n {
             let name = format!("f_{}", i);
@@ -625,7 +632,7 @@ fn delta_fold_many_creates() {
 #[test]
 fn delta_fold_many_mkdirs() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
         let n = 100usize;
         for i in 0..n {
             let name = format!("d_{}", i);
@@ -642,7 +649,7 @@ fn delta_fold_many_mkdirs() {
 #[test]
 fn delta_fold_mkdir_rmdir_nlink() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
 
         for i in 0..20 {
             client
@@ -667,7 +674,8 @@ fn delta_fold_mkdir_rmdir_nlink() {
 #[test]
 fn concurrent_create_storm() {
     rt().block_on(async {
-        let client = Arc::new(new_client());
+        let (_tmp, client) = new_client();
+        let client = Arc::new(client);
         let n = 200usize;
 
         let mut handles = vec![];
@@ -693,7 +701,8 @@ fn concurrent_create_storm() {
 #[test]
 fn concurrent_mkdir_storm_nlink() {
     rt().block_on(async {
-        let client = Arc::new(new_client());
+        let (_tmp, client) = new_client();
+        let client = Arc::new(client);
         let n = 100usize;
 
         let mut handles = vec![];
@@ -720,7 +729,7 @@ fn concurrent_mkdir_storm_nlink() {
 #[test]
 fn compaction_flush_merges_deltas() {
     rt().block_on(async {
-        let (server, data_server) = new_server_and_data();
+        let (_tmp, server, data_server) = new_server_and_data();
 
         for i in 0..50 {
             server
@@ -746,7 +755,7 @@ fn compaction_flush_merges_deltas() {
 #[test]
 fn compaction_interleaved_with_writes() {
     rt().block_on(async {
-        let (server, data_server) = new_server_and_data();
+        let (_tmp, server, data_server) = new_server_and_data();
 
         // Phase 1
         for i in 0..10 {
@@ -790,7 +799,7 @@ fn compaction_interleaved_with_writes() {
 #[test]
 fn unlink_nlink_zero_deletes_data() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
 
         let attr = client.create(ROOT, "will_delete.txt", FILE_MODE).await.unwrap();
         let inode = attr.inode;
@@ -817,7 +826,7 @@ fn unlink_nlink_zero_deletes_data() {
 #[test]
 fn setattr_truncate_delegates_to_data_server() {
     rt().block_on(async {
-        let client = new_client();
+        let (_tmp, client) = new_client();
 
         let attr = client.create(ROOT, "trunc.txt", FILE_MODE).await.unwrap();
         let inode = attr.inode;

@@ -7,8 +7,7 @@ pub mod cache;
 pub mod compaction;
 pub mod delta;
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use rucksfs_core::{
@@ -16,8 +15,10 @@ use rucksfs_core::{
     OpenResponse, SetAttrRequest, StatFs,
 };
 use rucksfs_storage::allocator::{InodeAllocator, ROOT_INODE};
-use rucksfs_storage::encoding::{encode_inode_key, InodeValue};
-use rucksfs_storage::{DeltaStore, DirectoryIndex, MetadataStore};
+use rucksfs_storage::encoding::{encode_dir_entry_key, encode_inode_key, InodeValue};
+use rucksfs_storage::{
+    AtomicWriteBatch, BatchOp, DeltaStore, DirectoryIndex, MetadataStore, StorageBundle,
+};
 
 use crate::cache::InodeFoldedCache;
 use crate::compaction::{CompactionConfig, DeltaCompactionWorker};
@@ -35,30 +36,8 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// RAII guard that owns an `Arc<Mutex<()>>` and its `MutexGuard`.
-///
-/// This avoids the lifetime issue of returning a `MutexGuard` that
-/// references a function-local `Arc`.
-pub struct DirLockGuard {
-    // Order matters: `_guard` must be dropped before `_mutex`.
-    _guard: MutexGuard<'static, ()>,
-    _mutex: Arc<Mutex<()>>,
-}
-
-impl DirLockGuard {
-    fn new(mutex: Arc<Mutex<()>>) -> Self {
-        // SAFETY: We extend the lifetime of the MutexGuard to 'static.
-        // This is safe because `_mutex` (the Arc) is stored in the same
-        // struct and will outlive `_guard`. Drop order in Rust is
-        // declaration order, so `_guard` is dropped first.
-        let guard = mutex.lock().expect("per-dir lock poisoned");
-        let guard: MutexGuard<'static, ()> = unsafe { std::mem::transmute(guard) };
-        Self {
-            _guard: guard,
-            _mutex: mutex,
-        }
-    }
-}
+/// Maximum number of retries for transient transaction conflicts.
+const TXN_MAX_RETRIES: usize = 3;
 
 /// Default capacity for the folded inode cache.
 const DEFAULT_CACHE_CAPACITY: usize = 10_000;
@@ -88,8 +67,8 @@ where
     /// Background compaction worker (shared with the MetadataServer).
     pub compaction: Arc<DeltaCompactionWorker<M, DS>>,
     allocator: InodeAllocator,
-    /// Per-directory lock to serialize mutations under the same parent.
-    dir_locks: Mutex<HashMap<Inode, Arc<Mutex<()>>>>,
+    /// Storage bundle for atomic cross-store writes.
+    storage_bundle: Arc<dyn StorageBundle>,
 }
 
 impl<M, I, DS> MetadataServer<M, I, DS>
@@ -106,6 +85,7 @@ where
         delta_store: Arc<DS>,
         data_client: Arc<dyn DataOps>,
         data_location: DataLocation,
+        storage_bundle: Arc<dyn StorageBundle>,
     ) -> Self {
         let allocator = InodeAllocator::load(metadata.as_ref())
             .unwrap_or_else(|_| InodeAllocator::new());
@@ -116,6 +96,7 @@ where
             Arc::clone(&delta_store),
             Arc::clone(&cache),
             CompactionConfig::default(),
+            Arc::clone(&storage_bundle),
         ));
 
         let server = Self {
@@ -127,7 +108,7 @@ where
             cache,
             compaction,
             allocator,
-            dir_locks: Mutex::new(HashMap::new()),
+            storage_bundle,
         };
 
         // Ensure root directory exists.
@@ -145,6 +126,7 @@ where
         data_location: DataLocation,
         cache_capacity: usize,
         compaction_config: CompactionConfig,
+        storage_bundle: Arc<dyn StorageBundle>,
     ) -> Self {
         let allocator = InodeAllocator::load(metadata.as_ref())
             .unwrap_or_else(|_| InodeAllocator::new());
@@ -155,6 +137,7 @@ where
             Arc::clone(&delta_store),
             Arc::clone(&cache),
             compaction_config,
+            Arc::clone(&storage_bundle),
         ));
 
         let server = Self {
@@ -166,7 +149,7 @@ where
             cache,
             compaction,
             allocator,
-            dir_locks: Mutex::new(HashMap::new()),
+            storage_bundle,
         };
 
         // Ensure root directory exists.
@@ -233,17 +216,8 @@ where
         Ok(iv)
     }
 
-    /// Serialize and save an inode to the metadata store, and update the
-    /// cache to reflect the new base value.
-    fn save_inode(&self, inode: Inode, val: &InodeValue) -> FsResult<()> {
-        let key = encode_inode_key(inode);
-        self.metadata.put(&key, &val.serialize())?;
-        // Update the cache so subsequent reads see the latest value.
-        self.cache.put(inode, val.clone());
-        Ok(())
-    }
-
-    /// Delete an inode from the metadata store.
+    /// Delete an inode from the metadata store (non-batch fallback).
+    #[allow(dead_code)]
     fn delete_inode(&self, inode: Inode) -> FsResult<()> {
         let key = encode_inode_key(inode);
         self.metadata.delete(&key)?;
@@ -251,6 +225,56 @@ where
         let _ = self.delta_store.clear_deltas(inode);
         self.cache.invalidate(inode);
         Ok(())
+    }
+
+    // -- helper: batch building ---------------------------------------------
+
+    /// Begin a new atomic write batch from the storage bundle.
+    fn begin_write(&self) -> Box<dyn AtomicWriteBatch + '_> {
+        self.storage_bundle.begin_write()
+    }
+
+    /// Add a "put inode" operation to the batch.
+    fn batch_put_inode(batch: &mut dyn AtomicWriteBatch, inode: Inode, val: &InodeValue) {
+        batch.push(BatchOp::PutInode {
+            key: encode_inode_key(inode),
+            value: val.serialize(),
+        });
+    }
+
+    /// Add a "delete inode" operation to the batch.
+    fn batch_delete_inode(batch: &mut dyn AtomicWriteBatch, inode: Inode) {
+        batch.push(BatchOp::DeleteInode {
+            key: encode_inode_key(inode),
+        });
+    }
+
+    /// Add a "put dir entry" operation to the batch.
+    ///
+    /// Value format: `[inode: u64 BE][mode: u32 BE]` (12 bytes).
+    fn batch_put_dir_entry(
+        batch: &mut dyn AtomicWriteBatch,
+        parent: Inode,
+        name: &str,
+        child_inode: Inode,
+        mode: u32,
+    ) {
+        let key = encode_dir_entry_key(parent, name);
+        let mut value = Vec::with_capacity(12);
+        value.extend_from_slice(&child_inode.to_be_bytes());
+        value.extend_from_slice(&mode.to_be_bytes());
+        batch.push(BatchOp::PutDirEntry { key, value });
+    }
+
+    /// Add a "delete dir entry" operation to the batch.
+    fn batch_delete_dir_entry(
+        batch: &mut dyn AtomicWriteBatch,
+        parent: Inode,
+        name: &str,
+    ) {
+        batch.push(BatchOp::DeleteDirEntry {
+            key: encode_dir_entry_key(parent, name),
+        });
     }
 
     // -- helper: delta append -----------------------------------------------
@@ -266,22 +290,38 @@ where
         Ok(())
     }
 
-    // -- helper: per-directory lock -----------------------------------------
-
-    /// Acquire the per-directory mutex for `parent`.
-    fn lock_dir(&self, parent: Inode) -> DirLockGuard {
-        let mutex = {
-            let mut map = self.dir_locks.lock().expect("dir_locks poisoned");
-            map.entry(parent)
-                .or_insert_with(|| Arc::new(Mutex::new(())))
-                .clone()
-        };
-        DirLockGuard::new(mutex)
-    }
-
     /// Helper: check whether a mode represents a directory.
     fn is_dir(mode: u32) -> bool {
         mode & S_IFDIR != 0
+    }
+
+    /// Decode a dir-entry value (`[inode: u64 BE][mode: u32 BE]`).
+    fn decode_dir_entry_value(data: &[u8]) -> FsResult<(Inode, u32)> {
+        if data.len() < 12 {
+            return Err(FsError::InvalidInput("dir entry value too short".into()));
+        }
+        let inode = u64::from_be_bytes(data[0..8].try_into().unwrap());
+        let mode = u32::from_be_bytes(data[8..12].try_into().unwrap());
+        Ok((inode, mode))
+    }
+
+    /// Execute a closure that creates and commits a transaction, retrying
+    /// up to `TXN_MAX_RETRIES` times on `FsError::TransactionConflict`.
+    fn execute_with_retry<F, T>(&self, mut f: F) -> FsResult<T>
+    where
+        F: FnMut() -> FsResult<T>,
+    {
+        for attempt in 0..TXN_MAX_RETRIES {
+            match f() {
+                Ok(v) => return Ok(v),
+                Err(FsError::TransactionConflict) if attempt + 1 < TXN_MAX_RETRIES => {
+                    // Retry on transient conflict.
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!()
     }
 }
 
@@ -311,37 +351,59 @@ where
     }
 
     async fn setattr(&self, inode: Inode, req: SetAttrRequest) -> FsResult<FileAttr> {
-        let mut iv = self.load_inode(inode)?;
-        let ts = now_secs();
+        // Handle size change outside transaction — delegate truncate to DataServer.
+        let truncate_size = req.size;
 
-        if let Some(mode) = req.mode {
-            // Preserve file-type bits, update permission bits only.
-            iv.mode = (iv.mode & 0o170000) | (mode & 0o7777);
-        }
-        if let Some(uid) = req.uid {
-            iv.uid = uid;
-        }
-        if let Some(gid) = req.gid {
-            iv.gid = gid;
-        }
-        if let Some(atime) = req.atime {
-            iv.atime = atime;
-        }
-        if let Some(mtime) = req.mtime {
-            iv.mtime = mtime;
-        }
+        let (attr, needs_truncate) = self.execute_with_retry(|| {
+            let mut batch = self.begin_write();
+            let key = encode_inode_key(inode);
+            let raw = batch
+                .get_for_update_inode(&key)?
+                .ok_or(FsError::NotFound)?;
+            let mut iv = InodeValue::deserialize(&raw)?;
+            let ts = now_secs();
 
-        // Handle size change → delegate truncate to DataServer.
-        if let Some(new_size) = req.size {
-            if new_size != iv.size {
-                self.data_client.truncate(iv.inode, new_size).await?;
-                iv.size = new_size;
+            if let Some(mode) = req.mode {
+                iv.mode = (iv.mode & 0o170000) | (mode & 0o7777);
+            }
+            if let Some(uid) = req.uid {
+                iv.uid = uid;
+            }
+            if let Some(gid) = req.gid {
+                iv.gid = gid;
+            }
+            if let Some(atime) = req.atime {
+                iv.atime = atime;
+            }
+            if let Some(mtime) = req.mtime {
+                iv.mtime = mtime;
+            }
+
+            // Track whether we need to truncate after commit.
+            let mut do_truncate = false;
+            if let Some(new_size) = truncate_size {
+                if new_size != iv.size {
+                    iv.size = new_size;
+                    do_truncate = true;
+                }
+            }
+
+            iv.ctime = ts;
+            Self::batch_put_inode(batch.as_mut(), inode, &iv);
+            batch.commit()?;
+
+            self.cache.put(inode, iv.clone());
+            Ok((iv.to_attr(), do_truncate))
+        })?;
+
+        // Perform the actual truncate after transaction commit.
+        if needs_truncate {
+            if let Some(new_size) = truncate_size {
+                self.data_client.truncate(inode, new_size).await?;
             }
         }
 
-        iv.ctime = ts;
-        self.save_inode(inode, &iv)?;
-        Ok(iv.to_attr())
+        Ok(attr)
     }
 
     async fn statfs(&self, _inode: Inode) -> FsResult<StatFs> {
@@ -365,151 +427,230 @@ where
     }
 
     async fn create(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr> {
-        let _guard = self.lock_dir(parent);
+        let name_owned = name.to_string();
 
-        if self.index.resolve_path(parent, name)?.is_some() {
-            return Err(FsError::AlreadyExists);
-        }
+        let (iv, new_inode) = self.execute_with_retry(|| {
+            let mut batch = self.begin_write();
 
-        let new_inode = self.allocator.alloc();
+            // Check if the name already exists (with row lock).
+            let dir_key = encode_dir_entry_key(parent, &name_owned);
+            if batch.get_for_update_dir_entry(&dir_key)?.is_some() {
+                return Err(FsError::AlreadyExists);
+            }
+
+            let new_inode = self.allocator.alloc();
+            let ts = now_secs();
+            let iv = InodeValue {
+                version: 1,
+                inode: new_inode,
+                size: 0,
+                mode: S_IFREG | (mode & 0o7777),
+                nlink: 1,
+                uid: 0,
+                gid: 0,
+                atime: ts,
+                mtime: ts,
+                ctime: ts,
+            };
+
+            Self::batch_put_inode(batch.as_mut(), new_inode, &iv);
+            Self::batch_put_dir_entry(batch.as_mut(), parent, &name_owned, new_inode, iv.mode);
+            batch.commit()?;
+
+            Ok((iv, new_inode))
+        })?;
+
+        // Persist allocator counter outside the transaction (hot-key avoidance).
+        self.allocator.persist(self.metadata.as_ref())?;
+
+        // Update in-memory state after successful commit.
+        self.cache.put(new_inode, iv.clone());
+        let _ = self
+            .index
+            .insert_child(parent, &name_owned, new_inode, iv.to_attr());
+
+        // Delta append outside transaction — losing it on crash only affects parent mtime/ctime.
         let ts = now_secs();
-        let iv = InodeValue {
-            version: 1,
-            inode: new_inode,
-            size: 0,
-            mode: S_IFREG | (mode & 0o7777),
-            nlink: 1,
-            uid: 0,
-            gid: 0,
-            atime: ts,
-            mtime: ts,
-            ctime: ts,
-        };
-
-        self.save_inode(new_inode, &iv)?;
-        self.index
-            .insert_child(parent, name, new_inode, iv.to_attr())?;
-
-        self.append_parent_deltas(
+        let _ = self.append_parent_deltas(
             parent,
             &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
-        )?;
+        );
 
         Ok(iv.to_attr())
     }
 
     async fn mkdir(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr> {
-        let _guard = self.lock_dir(parent);
+        let name_owned = name.to_string();
 
-        if self.index.resolve_path(parent, name)?.is_some() {
-            return Err(FsError::AlreadyExists);
-        }
+        let (iv, new_inode) = self.execute_with_retry(|| {
+            let mut batch = self.begin_write();
 
-        let new_inode = self.allocator.alloc();
+            // Check if the name already exists (with row lock).
+            let dir_key = encode_dir_entry_key(parent, &name_owned);
+            if batch.get_for_update_dir_entry(&dir_key)?.is_some() {
+                return Err(FsError::AlreadyExists);
+            }
+
+            let new_inode = self.allocator.alloc();
+            let ts = now_secs();
+            let iv = InodeValue {
+                version: 1,
+                inode: new_inode,
+                size: 0,
+                mode: S_IFDIR | (mode & 0o7777),
+                nlink: 2,
+                uid: 0,
+                gid: 0,
+                atime: ts,
+                mtime: ts,
+                ctime: ts,
+            };
+
+            Self::batch_put_inode(batch.as_mut(), new_inode, &iv);
+            Self::batch_put_dir_entry(batch.as_mut(), parent, &name_owned, new_inode, iv.mode);
+            batch.commit()?;
+
+            Ok((iv, new_inode))
+        })?;
+
+        // Persist allocator counter outside the transaction.
+        self.allocator.persist(self.metadata.as_ref())?;
+
+        // Update in-memory state.
+        self.cache.put(new_inode, iv.clone());
+        let _ = self
+            .index
+            .insert_child(parent, &name_owned, new_inode, iv.to_attr());
+
+        // Delta append outside transaction.
         let ts = now_secs();
-        let iv = InodeValue {
-            version: 1,
-            inode: new_inode,
-            size: 0,
-            mode: S_IFDIR | (mode & 0o7777),
-            nlink: 2,
-            uid: 0,
-            gid: 0,
-            atime: ts,
-            mtime: ts,
-            ctime: ts,
-        };
-
-        self.save_inode(new_inode, &iv)?;
-        self.index
-            .insert_child(parent, name, new_inode, iv.to_attr())?;
-
-        self.append_parent_deltas(
+        let _ = self.append_parent_deltas(
             parent,
             &[
                 DeltaOp::IncrementNlink(1),
                 DeltaOp::SetMtime(ts),
                 DeltaOp::SetCtime(ts),
             ],
-        )?;
+        );
 
         Ok(iv.to_attr())
     }
 
     async fn unlink(&self, parent: Inode, name: &str) -> FsResult<()> {
-        // Collect what needs to be done under the lock, then release it
-        // before any .await to keep the future Send.
-        let need_delete_data = {
-            let _guard = self.lock_dir(parent);
+        let name_owned = name.to_string();
 
-            let child_inode = self
-                .index
-                .resolve_path(parent, name)?
+        let need_delete_data = self.execute_with_retry(|| {
+            let mut batch = self.begin_write();
+
+            // Read and lock the dir entry.
+            let dir_key = encode_dir_entry_key(parent, &name_owned);
+            let dir_val = batch
+                .get_for_update_dir_entry(&dir_key)?
                 .ok_or(FsError::NotFound)?;
+            let (child_inode, child_mode) = Self::decode_dir_entry_value(&dir_val)?;
 
-            let mut child_iv = self.load_inode(child_inode)?;
-            if Self::is_dir(child_iv.mode) {
+            if Self::is_dir(child_mode) {
                 return Err(FsError::IsADirectory);
             }
 
-            self.index.remove_child(parent, name)?;
+            // Read and lock the child inode.
+            let inode_key = encode_inode_key(child_inode);
+            let inode_raw = batch
+                .get_for_update_inode(&inode_key)?
+                .ok_or(FsError::NotFound)?;
+            let mut child_iv = InodeValue::deserialize(&inode_raw)?;
+
             child_iv.nlink = child_iv.nlink.saturating_sub(1);
 
-            if child_iv.nlink == 0 {
-                self.delete_inode(child_inode)?;
+            Self::batch_delete_dir_entry(batch.as_mut(), parent, &name_owned);
+
+            let result = if child_iv.nlink == 0 {
+                Self::batch_delete_inode(batch.as_mut(), child_inode);
                 Some(child_inode)
             } else {
                 let ts = now_secs();
                 child_iv.ctime = ts;
-                self.save_inode(child_inode, &child_iv)?;
+                Self::batch_put_inode(batch.as_mut(), child_inode, &child_iv);
                 None
-            }
-        };
+            };
+            batch.commit()?;
 
-        // Ask DataServer to clean up file data (outside lock scope).
+            // Update in-memory state after commit.
+            let _ = self.index.remove_child(parent, &name_owned);
+            if result.is_some() {
+                let _ = self.delta_store.clear_deltas(child_inode);
+                self.cache.invalidate(child_inode);
+            } else {
+                self.cache.put(child_inode, child_iv);
+            }
+
+            Ok(result)
+        })?;
+
+        // Ask DataServer to clean up file data (outside transaction scope).
         if let Some(inode) = need_delete_data {
             self.data_client.delete_data(inode).await?;
         }
 
         let ts = now_secs();
-        self.append_parent_deltas(
+        let _ = self.append_parent_deltas(
             parent,
             &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
-        )?;
+        );
 
         Ok(())
     }
 
     async fn rmdir(&self, parent: Inode, name: &str) -> FsResult<()> {
-        let _guard = self.lock_dir(parent);
+        let name_owned = name.to_string();
 
-        let child_inode = self
-            .index
-            .resolve_path(parent, name)?
-            .ok_or(FsError::NotFound)?;
+        self.execute_with_retry(|| {
+            let mut batch = self.begin_write();
 
-        let child_iv = self.load_inode(child_inode)?;
-        if !Self::is_dir(child_iv.mode) {
-            return Err(FsError::NotADirectory);
-        }
+            // Read and lock the dir entry.
+            let dir_key = encode_dir_entry_key(parent, &name_owned);
+            let dir_val = batch
+                .get_for_update_dir_entry(&dir_key)?
+                .ok_or(FsError::NotFound)?;
+            let (child_inode, child_mode) = Self::decode_dir_entry_value(&dir_val)?;
 
-        let entries = self.index.list_dir(child_inode)?;
-        if !entries.is_empty() {
-            return Err(FsError::DirectoryNotEmpty);
-        }
+            if !Self::is_dir(child_mode) {
+                return Err(FsError::NotADirectory);
+            }
 
-        self.index.remove_child(parent, name)?;
-        self.delete_inode(child_inode)?;
+            // Read and lock the child inode.
+            let inode_key = encode_inode_key(child_inode);
+            let _inode_raw = batch
+                .get_for_update_inode(&inode_key)?
+                .ok_or(FsError::NotFound)?;
+
+            // Check if directory is empty.
+            let entries = self.index.list_dir(child_inode)?;
+            if !entries.is_empty() {
+                return Err(FsError::DirectoryNotEmpty);
+            }
+
+            Self::batch_delete_dir_entry(batch.as_mut(), parent, &name_owned);
+            Self::batch_delete_inode(batch.as_mut(), child_inode);
+            batch.commit()?;
+
+            // Update in-memory state after commit.
+            let _ = self.index.remove_child(parent, &name_owned);
+            let _ = self.delta_store.clear_deltas(child_inode);
+            self.cache.invalidate(child_inode);
+
+            Ok(())
+        })?;
 
         let ts = now_secs();
-        self.append_parent_deltas(
+        let _ = self.append_parent_deltas(
             parent,
             &[
                 DeltaOp::IncrementNlink(-1),
                 DeltaOp::SetMtime(ts),
                 DeltaOp::SetCtime(ts),
             ],
-        )?;
+        );
 
         Ok(())
     }
@@ -521,38 +662,63 @@ where
         new_parent: Inode,
         new_name: &str,
     ) -> FsResult<()> {
-        // Do all metadata mutations under the lock, collect any data
-        // deletion needed, then release the lock before .await.
-        let need_delete_data = {
-            // Acquire locks in inode order to prevent deadlock.
-            let (_guard1, _guard2) = if parent == new_parent {
-                let g = self.lock_dir(parent);
-                (g, None)
-            } else {
-                let (first, second) = if parent < new_parent {
-                    (parent, new_parent)
-                } else {
-                    (new_parent, parent)
-                };
-                let g1 = self.lock_dir(first);
-                let g2 = self.lock_dir(second);
-                (g1, Some(g2))
-            };
+        let name_owned = name.to_string();
+        let new_name_owned = new_name.to_string();
 
-            let src_inode = self
-                .index
-                .resolve_path(parent, name)?
+        let need_delete_data = self.execute_with_retry(|| {
+            let mut batch = self.begin_write();
+
+            // Read and lock the source dir entry.
+            let src_dir_key = encode_dir_entry_key(parent, &name_owned);
+            let src_dir_val = batch
+                .get_for_update_dir_entry(&src_dir_key)?
                 .ok_or(FsError::NotFound)?;
+            let (src_inode, _) = Self::decode_dir_entry_value(&src_dir_val)?;
 
-            let src_iv = self.load_inode(src_inode)?;
+            // Read and lock the destination dir entry (may not exist).
+            let dst_dir_key = encode_dir_entry_key(new_parent, &new_name_owned);
+            let existing_dst = batch.get_for_update_dir_entry(&dst_dir_key)?;
+
+            // Lock all involved inodes in inode-ID order to prevent deadlocks.
+            let mut inode_ids = vec![src_inode];
+            let mut dst_inode_opt: Option<(Inode, u32)> = None;
+            if let Some(ref dst_val) = existing_dst {
+                let (dst_ino, dst_mode) = Self::decode_dir_entry_value(dst_val)?;
+                inode_ids.push(dst_ino);
+                dst_inode_opt = Some((dst_ino, dst_mode));
+            }
+            // Also lock parent inodes if different from src/dst.
+            if !inode_ids.contains(&parent) {
+                inode_ids.push(parent);
+            }
+            if parent != new_parent && !inode_ids.contains(&new_parent) {
+                inode_ids.push(new_parent);
+            }
+            inode_ids.sort_unstable();
+            inode_ids.dedup();
+
+            // Acquire row locks in sorted order.
+            let mut inode_values: std::collections::HashMap<Inode, InodeValue> =
+                std::collections::HashMap::new();
+            for &ino in &inode_ids {
+                let ino_key = encode_inode_key(ino);
+                if let Some(raw) = batch.get_for_update_inode(&ino_key)? {
+                    inode_values.insert(ino, InodeValue::deserialize(&raw)?);
+                }
+            }
+
+            let src_iv = inode_values
+                .get(&src_inode)
+                .ok_or(FsError::NotFound)?
+                .clone();
             let src_is_dir = Self::is_dir(src_iv.mode);
             let ts = now_secs();
             let mut delete_inode: Option<Inode> = None;
+            let mut dst_was_dir = false;
 
             // Check if target already exists.
-            if let Some(dst_inode) = self.index.resolve_path(new_parent, new_name)? {
-                let dst_iv = self.load_inode(dst_inode)?;
-                let dst_is_dir = Self::is_dir(dst_iv.mode);
+            if let Some((dst_inode, dst_mode)) = dst_inode_opt {
+                let dst_is_dir = Self::is_dir(dst_mode);
 
                 if src_is_dir && !dst_is_dir {
                     return Err(FsError::NotADirectory);
@@ -566,68 +732,94 @@ where
                     if !entries.is_empty() {
                         return Err(FsError::DirectoryNotEmpty);
                     }
-                    self.delete_inode(dst_inode)?;
-                    self.append_parent_deltas(
-                        new_parent,
-                        &[
-                            DeltaOp::IncrementNlink(-1),
-                            DeltaOp::SetMtime(ts),
-                            DeltaOp::SetCtime(ts),
-                        ],
-                    )?;
+                    dst_was_dir = true;
                 } else {
-                    self.delete_inode(dst_inode)?;
                     delete_inode = Some(dst_inode);
                 }
-
-                self.index.remove_child(new_parent, new_name)?;
             }
 
-            // Move the entry.
-            self.index.remove_child(parent, name)?;
-            self.index
-                .insert_child(new_parent, new_name, src_inode, src_iv.to_attr())?;
+            // Build atomic batch.
+            if let Some((dst_inode, _)) = dst_inode_opt {
+                Self::batch_delete_dir_entry(batch.as_mut(), new_parent, &new_name_owned);
+                Self::batch_delete_inode(batch.as_mut(), dst_inode);
+            }
 
-            // Update nlink for cross-directory dir rename.
+            Self::batch_delete_dir_entry(batch.as_mut(), parent, &name_owned);
+            Self::batch_put_dir_entry(
+                batch.as_mut(),
+                new_parent,
+                &new_name_owned,
+                src_inode,
+                src_iv.mode,
+            );
+
+            let mut updated_src = src_iv.clone();
+            updated_src.ctime = ts;
+            Self::batch_put_inode(batch.as_mut(), src_inode, &updated_src);
+
+            batch.commit()?;
+
+            // Update in-memory state after commit.
+            if let Some((dst_inode, _)) = dst_inode_opt {
+                let _ = self.delta_store.clear_deltas(dst_inode);
+                self.cache.invalidate(dst_inode);
+            }
+            let _ = self.index.remove_child(new_parent, &new_name_owned);
+            let _ = self.index.remove_child(parent, &name_owned);
+            let _ = self.index.insert_child(
+                new_parent,
+                &new_name_owned,
+                src_inode,
+                updated_src.to_attr(),
+            );
+            self.cache.put(src_inode, updated_src);
+
+            // Delta appends outside batch.
+            if dst_was_dir {
+                let _ = self.append_parent_deltas(
+                    new_parent,
+                    &[
+                        DeltaOp::IncrementNlink(-1),
+                        DeltaOp::SetMtime(ts),
+                        DeltaOp::SetCtime(ts),
+                    ],
+                );
+            }
+
             if src_is_dir && parent != new_parent {
-                self.append_parent_deltas(
+                let _ = self.append_parent_deltas(
                     parent,
                     &[
                         DeltaOp::IncrementNlink(-1),
                         DeltaOp::SetMtime(ts),
                         DeltaOp::SetCtime(ts),
                     ],
-                )?;
-                self.append_parent_deltas(
+                );
+                let _ = self.append_parent_deltas(
                     new_parent,
                     &[
                         DeltaOp::IncrementNlink(1),
                         DeltaOp::SetMtime(ts),
                         DeltaOp::SetCtime(ts),
                     ],
-                )?;
+                );
             } else {
-                self.append_parent_deltas(
+                let _ = self.append_parent_deltas(
                     parent,
                     &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
-                )?;
+                );
                 if parent != new_parent {
-                    self.append_parent_deltas(
+                    let _ = self.append_parent_deltas(
                         new_parent,
                         &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
-                    )?;
+                    );
                 }
             }
 
-            // Update source ctime.
-            let mut src_iv = self.load_inode(src_inode)?;
-            src_iv.ctime = ts;
-            self.save_inode(src_inode, &src_iv)?;
+            Ok(delete_inode)
+        })?;
 
-            delete_inode
-        };
-
-        // Ask DataServer to clean up data (outside lock scope).
+        // Ask DataServer to clean up data (outside transaction scope).
         if let Some(inode) = need_delete_data {
             self.data_client.delete_data(inode).await?;
         }
@@ -652,13 +844,25 @@ where
         new_size: u64,
         mtime: u64,
     ) -> FsResult<()> {
-        let mut iv = self.load_inode(inode)?;
-        if new_size > iv.size {
-            iv.size = new_size;
-        }
-        iv.mtime = mtime;
-        iv.ctime = mtime;
-        self.save_inode(inode, &iv)?;
-        Ok(())
+        self.execute_with_retry(|| {
+            let mut batch = self.begin_write();
+            let key = encode_inode_key(inode);
+            let raw = batch
+                .get_for_update_inode(&key)?
+                .ok_or(FsError::NotFound)?;
+            let mut iv = InodeValue::deserialize(&raw)?;
+
+            if new_size > iv.size {
+                iv.size = new_size;
+            }
+            iv.mtime = mtime;
+            iv.ctime = mtime;
+
+            Self::batch_put_inode(batch.as_mut(), inode, &iv);
+            batch.commit()?;
+
+            self.cache.put(inode, iv);
+            Ok(())
+        })
     }
 }

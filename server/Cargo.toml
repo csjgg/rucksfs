@@ -18,3 +18,4 @@ tracing-subscriber = { workspace = true }
 rucksfs-client = { path = "../client" }
 rucksfs-dataserver = { path = "../dataserver" }
 tokio = { workspace = true, features = ["rt", "macros"] }
+tempfile = { workspace = true }

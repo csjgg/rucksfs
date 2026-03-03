@@ -83,7 +83,8 @@ impl Default for InodeAllocator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::MemoryMetadataStore;
+    use crate::rocks::{open_rocks_db, RocksMetadataStore};
+    use std::sync::Arc;
 
     #[test]
     fn initial_value() {
@@ -102,7 +103,6 @@ mod tests {
     #[test]
     fn concurrent_alloc_unique() {
         use std::collections::HashSet;
-        use std::sync::Arc;
         use std::thread;
 
         let alloc = Arc::new(InodeAllocator::new());
@@ -120,7 +120,10 @@ mod tests {
 
     #[test]
     fn persist_and_load() {
-        let store = MemoryMetadataStore::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let db = open_rocks_db(tmp.path().join("meta.db")).unwrap();
+        let store = RocksMetadataStore::new(Arc::clone(&db));
+
         let alloc = InodeAllocator::new();
         alloc.alloc(); // 2
         alloc.alloc(); // 3
@@ -134,14 +137,20 @@ mod tests {
 
     #[test]
     fn load_without_persisted_value() {
-        let store = MemoryMetadataStore::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let db = open_rocks_db(tmp.path().join("meta.db")).unwrap();
+        let store = RocksMetadataStore::new(db);
+
         let restored = InodeAllocator::load(&store).unwrap();
         assert_eq!(restored.current(), FIRST_ALLOC_INODE);
     }
 
     #[test]
     fn load_corrupted_value() {
-        let store = MemoryMetadataStore::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let db = open_rocks_db(tmp.path().join("meta.db")).unwrap();
+        let store = RocksMetadataStore::new(db);
+
         store.put(NEXT_INODE_KEY, &[1, 2, 3]).unwrap(); // wrong length
         let result = InodeAllocator::load(&store);
         assert!(result.is_err());

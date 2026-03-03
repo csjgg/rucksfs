@@ -4,7 +4,7 @@ use fuser::{
     ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request,
 };
 #[cfg(target_os = "linux")]
-use libc::{EACCES, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, EEXIST, EOPNOTSUPP};
+use libc::{EACCES, EAGAIN, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, EEXIST, EOPNOTSUPP};
 #[cfg(target_os = "linux")]
 use rucksfs_core::{FileAttr, FsError, FsResult, SetAttrRequest, VfsOps};
 #[cfg(target_os = "linux")]
@@ -354,7 +354,10 @@ fn to_fuse_attr(attr: FileAttr) -> FuseAttr {
 #[cfg(target_os = "linux")]
 pub fn mount_fuse<C: VfsOps + 'static>(mountpoint: &str, client: Arc<C>) -> FsResult<()> {
     let fs = FuseClient::new(client);
-    let options = vec![MountOption::RO, MountOption::FSName("rucksfs".to_string())];
+    let options = vec![
+        MountOption::FSName("rucksfs".to_string()),
+        MountOption::AutoUnmount,
+    ];
     fuser::mount2(fs, mountpoint, &options).map_err(|e| FsError::Io(e.to_string()))
 }
 
@@ -377,5 +380,6 @@ pub fn fs_error_to_errno(e: FsError) -> i32 {
         InvalidInput(_) => EINVAL,
         Io(_) => EIO,
         Other(_) => EIO,
+        TransactionConflict => EAGAIN,
     }
 }

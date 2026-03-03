@@ -1,13 +1,10 @@
 [package]
-name = "rucksfs-demo"
+name = "rucksfs"
 version = "0.1.0"
 edition = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
 authors = { workspace = true }
-
-[features]
-rocksdb = ["rucksfs-storage/rocksdb"]
 
 [dependencies]
 rucksfs-core = { path = "../core" }
