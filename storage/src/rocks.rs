@@ -265,6 +265,10 @@ impl DirectoryIndex for RocksDirectoryIndex {
             .delete_cf(&cf, &key)
             .map_err(|e| FsError::Io(format!("RocksDB delete: {}", e)))
     }
+
+    fn shares_batch_storage(&self) -> bool {
+        true
+    }
 }
 
 // ===========================================================================

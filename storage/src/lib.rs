@@ -57,6 +57,14 @@ pub trait DirectoryIndex: Send + Sync {
     fn list_dir(&self, inode: Inode) -> FsResult<Vec<DirEntry>>;
     fn insert_child(&self, parent: Inode, name: &str, inode: Inode, attr: FileAttr) -> FsResult<()>;
     fn remove_child(&self, parent: Inode, name: &str) -> FsResult<()>;
+
+    /// Whether this directory index shares the same storage backend as the
+    /// [`AtomicWriteBatch`].  When `true`, dir-entry mutations committed via
+    /// the batch are already visible through this index, making post-commit
+    /// `insert_child` / `remove_child` calls redundant.
+    fn shares_batch_storage(&self) -> bool {
+        false
+    }
 }
 
 // ===========================================================================

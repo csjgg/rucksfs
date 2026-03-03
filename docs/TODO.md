@@ -20,7 +20,7 @@ Memory backends are for **tests only**; production uses RocksDB + RawDisk (`--pe
 
 | ID | Status | Task | Details | Affected Files |
 |----|--------|------|---------|----------------|
-| T-02 | ⬜ | RocksDB path: batch + insert_child double-write | create/mkdir batch already writes dir_entry, then `insert_child()` writes again. Idempotent but wastes I/O. Use `index.is_persistent()` guard. | `server/src/lib.rs` |
+| T-02 | ✅ | RocksDB path: batch + insert_child double-write | Added `DirectoryIndex::shares_batch_storage()` trait method. When `true` (RocksDB backend), post-commit `insert_child`/`remove_child` calls are skipped since the batch already wrote to the same CF. Guards added in create/mkdir/unlink/rmdir/rename. | `storage/src/lib.rs`, `storage/src/rocks.rs`, `server/src/lib.rs` |
 
 ### P2 — Performance
 

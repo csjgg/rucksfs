@@ -465,9 +465,11 @@ where
 
         // Update in-memory state after successful commit.
         self.cache.put(new_inode, iv.clone());
-        let _ = self
-            .index
-            .insert_child(parent, &name_owned, new_inode, iv.to_attr());
+        if !self.index.shares_batch_storage() {
+            let _ = self
+                .index
+                .insert_child(parent, &name_owned, new_inode, iv.to_attr());
+        }
 
         // Delta append outside transaction — losing it on crash only affects parent mtime/ctime.
         let ts = now_secs();
@@ -518,9 +520,11 @@ where
 
         // Update in-memory state.
         self.cache.put(new_inode, iv.clone());
-        let _ = self
-            .index
-            .insert_child(parent, &name_owned, new_inode, iv.to_attr());
+        if !self.index.shares_batch_storage() {
+            let _ = self
+                .index
+                .insert_child(parent, &name_owned, new_inode, iv.to_attr());
+        }
 
         // Delta append outside transaction.
         let ts = now_secs();
@@ -576,7 +580,9 @@ where
             batch.commit()?;
 
             // Update in-memory state after commit.
-            let _ = self.index.remove_child(parent, &name_owned);
+            if !self.index.shares_batch_storage() {
+                let _ = self.index.remove_child(parent, &name_owned);
+            }
             if result.is_some() {
                 let _ = self.delta_store.clear_deltas(child_inode);
                 self.cache.invalidate(child_inode);
@@ -634,7 +640,9 @@ where
             batch.commit()?;
 
             // Update in-memory state after commit.
-            let _ = self.index.remove_child(parent, &name_owned);
+            if !self.index.shares_batch_storage() {
+                let _ = self.index.remove_child(parent, &name_owned);
+            }
             let _ = self.delta_store.clear_deltas(child_inode);
             self.cache.invalidate(child_inode);
 
@@ -762,14 +770,16 @@ where
                 let _ = self.delta_store.clear_deltas(dst_inode);
                 self.cache.invalidate(dst_inode);
             }
-            let _ = self.index.remove_child(new_parent, &new_name_owned);
-            let _ = self.index.remove_child(parent, &name_owned);
-            let _ = self.index.insert_child(
-                new_parent,
-                &new_name_owned,
-                src_inode,
-                updated_src.to_attr(),
-            );
+            if !self.index.shares_batch_storage() {
+                let _ = self.index.remove_child(new_parent, &new_name_owned);
+                let _ = self.index.remove_child(parent, &name_owned);
+                let _ = self.index.insert_child(
+                    new_parent,
+                    &new_name_owned,
+                    src_inode,
+                    updated_src.to_attr(),
+                );
+            }
             self.cache.put(src_inode, updated_src);
 
             // Delta appends outside batch.
