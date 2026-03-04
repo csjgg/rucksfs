@@ -4,4 +4,10 @@
 *.swp
 .codebuddy/plan/
 /tasks/
+/test-results/
+scripts/remote-test/test-config.toml
+
+# Claude Code local config (not shared)
+.claude/settings.local.json
 .claude/ralph-loop.local.md
+CLAUDE.local.md

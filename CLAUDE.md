@@ -1,260 +1,110 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+RucksFS is a modular, trait-based FUSE filesystem in Rust, backed by RocksDB.
+This is a graduation project. The demo binary is the final deliverable.
 
-## Project Overview
-
-RucksFS is a modular, trait-based user-space file system in Rust, inspired by JuiceFS. It separates metadata and data paths: MetadataServer manages the namespace, DataServer stores file contents, and clients route operations through a VFS layer.
-
-## Build & Test Commands
+## Quick Reference
 
 ```bash
-# Build entire workspace
-cargo build --workspace
-
-# Run all tests (~192 tests, excludes rpc due to protoc version requirement)
-cargo test --workspace
-
-# Run tests for a specific crate
-cargo test -p rucksfs-server
-cargo test -p rucksfs
-cargo test -p rucksfs-dataserver
-cargo test -p rucksfs-storage
-
-# Run a single test by name
-cargo test -p rucksfs-server -- test_name
-
-# Run the standalone filesystem (auto-demo, default data dir: ~/.rucksfs)
-cargo run -p rucksfs
-
-# Run with a custom data directory
-cargo run -p rucksfs -- --data-dir /tmp/rucksfs-data
-
-# Interactive REPL mode
-cargo run -p rucksfs -- --interactive
-
-# FUSE mount (Linux only)
-cargo run -p rucksfs -- --mount /mnt/rucksfs
-
-# E2E FUSE tests (Linux, requires FUSE support)
-./scripts/e2e_fuse_test.sh
+cargo build --workspace                    # Build all
+cargo test --workspace                     # Run ~192 tests
+cargo build --release -p rucksfs --features rocksdb  # Release binary
+task --list                                # Show all task targets
+task remote-test                           # Remote E2E pipeline
+./scripts/e2e_fuse_test.sh                 # Local FUSE E2E test
 ```
 
-## Architecture
-
-### Crate Dependency Graph
+## Architecture (5-crate workspace)
 
 ```
-core  (trait definitions + shared types, no dependencies)
-  ↑
-storage  (MetadataStore, DataStore, DirectoryIndex, DeltaStore traits + RocksDB/RawDisk impls)
-  ↑
-server  (MetadataServer — namespace engine)
-dataserver  (DataServer<D: DataStore> — data I/O engine)
-  ↑
-client  (VfsCore router, EmbeddedClient, FuseClient)
-rpc  (gRPC layer with tonic, protobuf in rpc/proto/)
-  ↑
-demo  (standalone single-binary `rucksfs`, RocksDB-only)
+core       -> trait definitions (MetadataOps, DataOps, VfsOps)
+storage    -> RocksDB + RawDisk backends
+server     -> MetadataServer (namespace engine, delta compaction, PCC transactions)
+dataserver -> DataServer (file I/O)
+client     -> VfsCore router, EmbeddedClient, FuseClient
+demo       -> standalone single-binary (rucksfs)
+rpc        -> gRPC layer (tonic, unfinished)
 ```
 
-### Key Traits (defined in `core/src/lib.rs`)
+## Key Design Decisions
 
-- **`MetadataOps`** — Namespace operations (lookup, create, mkdir, unlink, rename, setattr, open, report_write). Implemented by `MetadataServer`.
-- **`DataOps`** — File I/O (read_data, write_data, truncate, flush, delete_data). Implemented by `DataServer`.
-- **`VfsOps`** — Full POSIX VFS interface combining metadata + data ops. Implemented by `EmbeddedClient` (in-process) and future `RucksClient` (network).
+- **Atomic mutations**: create/mkdir/unlink/rmdir/rename use AtomicWriteBatch with PCC, retry up to 3x on TransactionConflict
+- **Delta-based updates**: parent dir timestamp/nlink changes are appended as DeltaOp, folded on read, compacted in background when > 32 deltas
+- **FUSE permissions**: default_permissions + AllowOther mount options let kernel VFS handle POSIX permission checks
+- **Root inode**: inode 1 (ROOT_INODE), auto-initialized on MetadataServer construction
+- **Binary encoding**: big-endian keys for byte-order == numeric-order (see storage/src/encoding.rs)
+- **Platform**: FUSE support is cfg(target_os = linux) only
 
-### Storage Traits (defined in `storage/src/lib.rs`)
+## Key Files for Common Tasks
 
-- **`MetadataStore`** — KV store for inode metadata (get/put/delete/scan_prefix)
-- **`DirectoryIndex`** — Directory entry resolution (resolve_path, list_dir, insert_child, remove_child)
-- **`DeltaStore`** — Append-only delta store for incremental inode attribute updates
-- **`DataStore`** — Async file data I/O (read_at, write_at, truncate, flush, delete)
-- **`StorageBundle`** — Creates `AtomicWriteBatch` for cross-store atomic writes
-- **`AtomicWriteBatch`** — Collects `BatchOp` variants and commits atomically; supports `get_for_update_*` for pessimistic concurrency control (PCC)
+| Task | Files |
+|------|-------|
+| Add new metadata operation | core/src/lib.rs (traits) -> server/src/lib.rs (impl) -> client/src/embedded.rs + vfs_core.rs (passthrough) -> client/src/fuse.rs (FUSE bridge) |
+| Modify storage format | storage/src/encoding.rs (key format) + storage/src/rocks.rs (RocksDB backend) |
+| Change mount behavior | client/src/fuse.rs (mount options) + demo/src/main.rs (CLI args) |
+| Add tests | demo/tests/integration_test.rs (full-stack) or server/tests/ (metadata-only) |
+| Remote E2E testing | Taskfile.yml (workflow) + scripts/remote-test/ (scripts) |
 
-Backends: `Rocks*` (metadata/directory/delta stores) + `RawDiskDataStore` (file data). RocksDB is an unconditional dependency of the `storage` crate — no feature flag needed.
+## Documentation
 
-### Data Flow
+- docs/design.md: Full system design (120KB, consult sections as needed, do NOT read entirely)
+- docs/guide.md: Deployment and usage guide
+- docs/TODO.md: Structured task list with priorities
+- docs/standalone-analysis.md: Architecture comparison with JuiceFS
+- docs/metadata-kv-research.md: Research paper survey on metadata KV storage
 
-1. **Write path**: Client → `DataServer::write_data` → then `MetadataServer::report_write` (updates size/mtime)
-2. **Read path**: Client → `DataServer::read_data` (bypasses MetadataServer)
-3. **Metadata mutations** (create/mkdir/unlink/rmdir/rename): Use `AtomicWriteBatch` with PCC transactions, retry up to 3 times on `TransactionConflict`
+## Agent Behavior Rules
 
-### Delta-Based Metadata Updates
+**IMPORTANT**: Follow these rules for all interactions with this codebase.
 
-Instead of read-modify-write on the base inode for every operation, parent directory timestamp/nlink changes are appended as `DeltaOp` entries (defined in `server/src/delta.rs`). On read, deltas are folded into the base value. Background `DeltaCompactionWorker` (`server/src/compaction.rs`) periodically merges deltas when they exceed a threshold (default 32).
+### 1. Think Before Acting
 
-### Binary Encoding (storage/src/encoding.rs)
+- **Do NOT rush into long execution tasks.** When information is incomplete, ask the user short clarifying questions first.
+- Before starting a multi-step implementation, present a brief plan and confirm with the user.
+- If stuck on configuration issues, remote access problems, or ambiguous requirements, ask the user rather than guessing.
 
-All KV keys use big-endian encoding for byte-order == numeric-order:
-- Inode key: `[b'I'][inode: u64 BE]` (9 bytes)
-- Dir entry key: `[b'D'][parent: u64 BE][name: UTF-8]`
-- Delta key: `[b'X'][inode: u64 BE][seq: u64 BE]` (17 bytes)
-- InodeValue: 57-byte version-tagged binary blob
+### 2. Information Gathering Strategy
 
-### Wiring It Together
-
-See `demo/src/main.rs` for how components are assembled. Pattern:
-1. Create RocksDB + RawDisk storage backends
-2. Wrap data store in `DataServer` → `Arc<dyn DataOps>`
-3. Create `RocksStorageBundle` for atomic writes
-4. Create `MetadataServer` with all stores + data client + bundle
-5. Create `EmbeddedClient` with metadata + data references
-
-### Storage Backends
-
-The `storage` crate provides a single set of production backends:
-- `RocksMetadataStore`, `RocksDirectoryIndex`, `RocksDeltaStore`, `RocksStorageBundle` — backed by RocksDB `TransactionDB`
-- `RawDiskDataStore` — flat-file block storage for file data
-- All tests use RocksDB + `tempfile::tempdir()` for isolation
-
-### Platform-Specific Code
-
-- FUSE support (`client/src/fuse.rs`) is gated on `#[cfg(target_os = "linux")]` and uses the `fuser` crate
-- The `rpc` crate uses `tonic` for gRPC with TLS support
-
-### Root Inode
-
-Root directory is inode 1 (`storage/src/allocator.rs::ROOT_INODE`). MetadataServer auto-initializes it on construction if absent.
-
-## Git Commit Standards
-
-When executing a long-term plan or a long-term cyclical output, make regular Git commits after achieving certain project results.
-
-### 1. Commit Message Convention
-
-All commits **must follow the Conventional Commits specification**.
-
-#### Required Format
-
-```
-<type>(<scope>): <short description>
-```
-
-Example:
-
-```
-feat(server): binary skeleton for rpc serve
-```
-
-#### Allowed Commit Types
-
-| Type | Meaning |
-|------|--------|
-| feat | A new feature |
-| fix | A bug fix |
-| refactor | Code change that neither fixes a bug nor adds a feature |
-| perf | Performance improvement |
-| docs | Documentation only changes |
-| test | Adding or updating tests |
-| chore | Maintenance work (build scripts, tooling, dependencies) |
-| ci | CI/CD related changes |
-| style | Formatting changes (no logic changes) |
-
-#### Scope Rules
-
-- Scope should describe the affected module or subsystem
-- Use lowercase and short identifiers
-- Prefer explicit module names
-- Avoid empty scope unless absolutely necessary
-
-Examples:
-
-```
-feat(server): add rpc handler
-fix(storage): prevent race condition
-refactor(fuse): simplify mount logic
-feat(core): introduce shared config layer
-```
-
-#### Description Rules
-
-The short description must:
-
-- Be concise (≤ 72 characters)
-- Use imperative mood
-- Start with lowercase
-- Not end with a period
-
-Good:
-
-```
-feat(server): add streaming rpc support
-```
-
-Bad:
-
-```
-feat(server): Added streaming RPC support.
-```
-
-### 2. Commit Behavior Rules
-
-#### Atomic Commits
-
-Each commit must represent **a single logical change**.
-
-Avoid:
-
-- Mixing refactors and features
-- Bundling unrelated changes
-
-#### Prefer Small Commits
-
-- Break large changes into incremental commits
-- Each commit should compile and pass tests
-
-#### No Broken States
-
-The agent must:
-
-- Ensure the project builds successfully
-- Not commit failing tests
-- Avoid temporary debugging artifacts
+- Read docs/TODO.md to understand current priorities before starting work.
+- Consult docs/design.md section-by-section (it is 120KB, never read the whole thing at once).
+- Check docs/guide.md for deployment procedures before modifying FUSE/mount/CLI behavior.
+- When modifying a trait, trace all implementations: core -> server -> client/embedded -> client/vfs_core -> client/fuse -> demo.
 
 ### 3. Code Modification Rules
 
-#### Minimal Changes
+- **Minimal changes**: only modify files necessary for the task.
+- **Preserve style**: match existing indentation, naming, and patterns.
+- **No breaking changes** unless explicitly requested.
+- Comments in English; conversation in Chinese.
+- After non-trivial changes, run cargo test --workspace to verify.
 
-- Modify only files necessary for the task
-- Avoid unrelated formatting or style-only edits
+### 4. Git Commits
 
-#### Preserve Style
+Follow Conventional Commits. See .claude/rules/git-commits.md for full specification.
 
-- Follow existing project conventions
-- Match indentation and formatting
-
-#### Backward Compatibility
-
-Unless explicitly instructed:
-
-- Do not introduce breaking API changes
-- Preserve existing behavior
-
-### 4. Safety Constraints
-
-The agent must not:
-
-- Delete critical files without explicit instruction
-- Rewrite project history
-- Change licensing information
-- Reveal secrets or credentials
-
-### 5. Documentation Expectations
-
-For non-trivial changes, the agent should:
-
-- Update relevant documentation
-- Add inline comments where logic is complex
-- Provide clear commit messages explaining intent
-
-### 6. Example Good Commits
-
+Quick reference:
 ```
-feat(server): add basic rpc server bootstrap
+feat(server): add streaming rpc support
 fix(storage): handle empty metadata snapshot
-refactor(fuse): extract mount helper utilities
-test(server): add rpc integration tests
-docs(readme): describe server startup flow
+refactor(fuse): simplify mount logic
+test(demo): add concurrent rename test
 ```
+
+Commit after each logical unit of work. Each commit must compile and pass tests.
+
+### 5. Testing Workflow
+
+```
+1. Unit tests     -> cargo test --workspace
+2. Local E2E      -> ./scripts/e2e_fuse_test.sh
+3. Remote E2E     -> task remote-test
+4. Bench only     -> task remote-test:bench-only
+5. Quick verify   -> task remote-test:quick
+```
+
+### 6. Known Pitfalls
+
+- rpc crate requires protoc v3.15+. Skip with cargo test --workspace (it is excluded from default members)
+- RocksDB builds slowly; use cargo test -p rucksfs-server for fast iteration
+- FUSE tests need Linux + /dev/fuse + user_allow_other in /etc/fuse.conf
+- design.md is 120KB. Use section search, never load entirely

@@ -1,0 +1,33 @@
+# Build artifacts
+target/
+
+# Large generated / binary files
+Cargo.lock
+*.so
+*.dylib
+
+# Test results (generated)
+test-results/
+
+# IDE & editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Large research docs (120KB+, search by section instead)
+docs/design.md
+docs/metadata-kv-research.md
+
+# Presentation HTML (generated, large)
+docs/presentation/*.html
+
+# Git internals
+.git/
+
+# Plan files (internal tooling)
+.codebuddy/plan/
+
+# SSH config with credentials
+scripts/remote-test/test-config.toml
