@@ -1,0 +1,544 @@
+# =============================================================================
+# RucksFS Automated Remote Testing
+# =============================================================================
+# Prerequisites:
+#   - Install task: https://taskfile.dev/installation/
+#   - Rust toolchain (for cargo build)
+#   - Copy env.example.yml to env.yml and fill in your values
+#
+# Quick start:
+#   cp env.example.yml env.yml && vim env.yml && task test
+#
+# Agent workflow (async):
+#   task build && task deploy && task check && task service:start
+#   task bench:start       # returns immediately
+#   task bench:status      # poll until exit 0
+#   task bench:stop && task collect
+# =============================================================================
+
+version: "3"
+
+dotenv: []
+
+vars:
+  # ---------------------------------------------------------------------------
+  # Load env.yml values (yq with grep/awk fallback)
+  # ---------------------------------------------------------------------------
+  REMOTE_HOST:
+    sh: "yq -r '.remote.host' env.yml 2>/dev/null || grep '^  host:' env.yml | head -1 | awk '{print $2}' | tr -d '\"'"
+  REMOTE_USER:
+    sh: "yq -r '.remote.user' env.yml 2>/dev/null || grep '^  user:' env.yml | head -1 | awk '{print $2}' | tr -d '\"'"
+  REMOTE_SSH_KEY:
+    sh: "yq -r '.remote.ssh_key' env.yml 2>/dev/null || grep '^  ssh_key:' env.yml | head -1 | awk '{print $2}' | tr -d '\"'"
+  REMOTE_PORT:
+    sh: "yq -r '.remote.port // 22' env.yml 2>/dev/null || echo '22'"
+
+  # RucksFS-specific variables
+  REMOTE_MOUNTPOINT:
+    sh: "yq -r '.rucksfs.mountpoint // \"/mnt/rucksfs\"' env.yml 2>/dev/null || echo '/mnt/rucksfs'"
+  REMOTE_DATA_DIR:
+    sh: "yq -r '.rucksfs.data_dir // \"/var/lib/rucksfs\"' env.yml 2>/dev/null || echo '/var/lib/rucksfs'"
+
+  # Benchmark variables
+  BENCH_MODE:
+    sh: "yq -r '.benchmark.mode // \"all\"' env.yml 2>/dev/null || echo 'all'"
+  BENCH_NUM_FILES:
+    sh: "yq -r '.benchmark.num_files // 1000' env.yml 2>/dev/null || echo '1000'"
+  BENCH_NUM_DIRS:
+    sh: "yq -r '.benchmark.num_dirs // 50' env.yml 2>/dev/null || echo '50'"
+  BENCH_MAX_THREADS:
+    sh: "yq -r '.benchmark.max_threads // 4' env.yml 2>/dev/null || echo '4'"
+  BENCH_LARGE_SIZE_MB:
+    sh: "yq -r '.benchmark.large_size_mb // 16' env.yml 2>/dev/null || echo '16'"
+  BENCH_SMALL_COUNT:
+    sh: "yq -r '.benchmark.small_count // 1000' env.yml 2>/dev/null || echo '1000'"
+  BENCH_SKIP_PJDFSTEST:
+    sh: "yq -r '.benchmark.skip_pjdfstest // true' env.yml 2>/dev/null || echo 'true'"
+
+  # Derived variables
+  SSH_OPTS: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+  RESULTS_DIR: "{{.ROOT_DIR}}/results"
+  SCRIPTS_DIR: "{{.ROOT_DIR}}/scripts"
+  PROJECT_ROOT: "{{.ROOT_DIR}}/.."
+  REMOTE_WORK_DIR: "/opt/rucksfs-test"
+  REMOTE_BENCH_DIR: "/opt/rucksfs-test/benchmark"
+  REMOTE_METRICS_DIR: "/tmp/rucksfs-metrics"
+  REMOTE_LOGS_DIR: "/tmp/rucksfs-logs"
+  TIMESTAMP:
+    sh: "date +%Y%m%d_%H%M%S"
+
+env:
+  SSH_CMD: 'ssh {{.SSH_OPTS}} -i {{.REMOTE_SSH_KEY}} -p {{.REMOTE_PORT}} {{.REMOTE_USER}}@{{.REMOTE_HOST}}'
+  SCP_CMD: 'scp {{.SSH_OPTS}} -i {{.REMOTE_SSH_KEY}} -P {{.REMOTE_PORT}}'
+
+# =============================================================================
+# Tasks
+# =============================================================================
+tasks:
+
+  # --- Validation ---
+  validate:
+    desc: "Validate env.yml exists and has required fields"
+    silent: true
+    cmds:
+      - |
+        if [ ! -f env.yml ]; then
+          echo "ERROR: env.yml not found. Copy env.example.yml to env.yml and configure."
+          exit 1
+        fi
+      - |
+        if [ -z "{{.REMOTE_HOST}}" ] || [ "{{.REMOTE_HOST}}" = "null" ]; then
+          echo "ERROR: remote.host not set in env.yml"
+          exit 1
+        fi
+      - |
+        echo "Configuration:"
+        echo "  Remote:       {{.REMOTE_USER}}@{{.REMOTE_HOST}}:{{.REMOTE_PORT}}"
+        echo "  SSH Key:      {{.REMOTE_SSH_KEY}}"
+        echo "  Mountpoint:   {{.REMOTE_MOUNTPOINT}}"
+        echo "  Data Dir:     {{.REMOTE_DATA_DIR}}"
+        echo "  Bench Mode:   {{.BENCH_MODE}}"
+        echo "  Num Files:    {{.BENCH_NUM_FILES}}"
+        echo "  Max Threads:  {{.BENCH_MAX_THREADS}}"
+
+  # --- Build ---
+  build:
+    desc: "Build rucksfs release binary locally"
+    dir: "{{.PROJECT_ROOT}}"
+    cmds:
+      - |
+        echo "==> Building rucksfs (release)..."
+        cargo build --release -p rucksfs
+      - |
+        if [ ! -f "{{.PROJECT_ROOT}}/target/release/rucksfs" ]; then
+          echo "ERROR: Binary not found at target/release/rucksfs"
+          exit 1
+        fi
+        echo "==> Build complete: target/release/rucksfs"
+        ls -lh "{{.PROJECT_ROOT}}/target/release/rucksfs"
+
+  # --- Deploy ---
+  deploy:upload:
+    desc: "Upload binary, benchmark scripts, and helper scripts to remote"
+    deps: [validate]
+    cmds:
+      - |
+        echo "==> Creating remote directories..."
+        $SSH_CMD "mkdir -p {{.REMOTE_WORK_DIR}} {{.REMOTE_BENCH_DIR}}/correctness {{.REMOTE_BENCH_DIR}}/performance {{.REMOTE_BENCH_DIR}}/results"
+      - |
+        echo "==> Uploading rucksfs binary..."
+        $SCP_CMD "{{.PROJECT_ROOT}}/target/release/rucksfs" {{.REMOTE_USER}}@{{.REMOTE_HOST}}:{{.REMOTE_WORK_DIR}}/rucksfs
+        $SSH_CMD "chmod +x {{.REMOTE_WORK_DIR}}/rucksfs"
+      - |
+        echo "==> Uploading benchmark scripts..."
+        $SCP_CMD "{{.PROJECT_ROOT}}/benchmark/run_all.sh" {{.REMOTE_USER}}@{{.REMOTE_HOST}}:{{.REMOTE_BENCH_DIR}}/run_all.sh
+        $SCP_CMD "{{.PROJECT_ROOT}}/benchmark/correctness/posix_conformance.sh" {{.REMOTE_USER}}@{{.REMOTE_HOST}}:{{.REMOTE_BENCH_DIR}}/correctness/posix_conformance.sh
+        $SCP_CMD "{{.PROJECT_ROOT}}/benchmark/correctness/run_pjdfstest.sh" {{.REMOTE_USER}}@{{.REMOTE_HOST}}:{{.REMOTE_BENCH_DIR}}/correctness/run_pjdfstest.sh
+        $SCP_CMD "{{.PROJECT_ROOT}}/benchmark/performance/metadata_ops.sh" {{.REMOTE_USER}}@{{.REMOTE_HOST}}:{{.REMOTE_BENCH_DIR}}/performance/metadata_ops.sh
+        $SCP_CMD "{{.PROJECT_ROOT}}/benchmark/performance/io_throughput.sh" {{.REMOTE_USER}}@{{.REMOTE_HOST}}:{{.REMOTE_BENCH_DIR}}/performance/io_throughput.sh
+        $SCP_CMD "{{.PROJECT_ROOT}}/benchmark/performance/concurrent_stress.sh" {{.REMOTE_USER}}@{{.REMOTE_HOST}}:{{.REMOTE_BENCH_DIR}}/performance/concurrent_stress.sh
+        $SSH_CMD "chmod +x {{.REMOTE_BENCH_DIR}}/*.sh {{.REMOTE_BENCH_DIR}}/correctness/*.sh {{.REMOTE_BENCH_DIR}}/performance/*.sh"
+      - |
+        echo "==> Uploading helper scripts..."
+        $SCP_CMD "{{.SCRIPTS_DIR}}/remote-setup.sh" {{.REMOTE_USER}}@{{.REMOTE_HOST}}:/tmp/rucksfs-setup.sh
+        $SCP_CMD "{{.SCRIPTS_DIR}}/collect-metrics.sh" {{.REMOTE_USER}}@{{.REMOTE_HOST}}:/tmp/rucksfs-collect-metrics.sh
+        $SCP_CMD "{{.SCRIPTS_DIR}}/collect-logs.sh" {{.REMOTE_USER}}@{{.REMOTE_HOST}}:/tmp/rucksfs-collect-logs.sh
+        $SSH_CMD "chmod +x /tmp/rucksfs-setup.sh /tmp/rucksfs-collect-metrics.sh /tmp/rucksfs-collect-logs.sh"
+      - echo "==> Upload complete"
+
+  deploy:install:
+    desc: "Install rucksfs binary and check environment on remote"
+    deps: [validate]
+    cmds:
+      - |
+        echo "==> Installing rucksfs on remote..."
+        $SSH_CMD "bash /tmp/rucksfs-setup.sh install {{.REMOTE_WORK_DIR}}"
+
+  deploy:configure:
+    desc: "Configure FUSE and create mountpoint/data directories on remote"
+    deps: [validate]
+    cmds:
+      - |
+        echo "==> Configuring remote environment..."
+        $SSH_CMD "bash /tmp/rucksfs-setup.sh configure {{.REMOTE_MOUNTPOINT}} {{.REMOTE_DATA_DIR}}"
+      - echo "==> Configuration complete"
+
+  deploy:
+    desc: "Full deploy: upload + install + configure"
+    cmds:
+      - task: deploy:upload
+      - task: deploy:install
+      - task: deploy:configure
+
+  # --- Check ---
+  check:
+    desc: "Run environment checks on remote host"
+    deps: [validate]
+    cmds:
+      - |
+        echo "==> Running environment checks..."
+        $SSH_CMD "bash /tmp/rucksfs-setup.sh check {{.REMOTE_MOUNTPOINT}} {{.REMOTE_DATA_DIR}}"
+
+  # --- Service Management (RucksFS FUSE mount) ---
+  service:start:
+    desc: "Mount RucksFS on remote host"
+    deps: [validate]
+    cmds:
+      - |
+        echo "==> Starting RucksFS FUSE mount..."
+        $SSH_CMD "
+          # Check if already mounted
+          if mountpoint -q {{.REMOTE_MOUNTPOINT}} 2>/dev/null; then
+            echo 'Already mounted at {{.REMOTE_MOUNTPOINT}}'
+            exit 0
+          fi
+          # Start rucksfs in background
+          nohup {{.REMOTE_WORK_DIR}}/rucksfs --mount {{.REMOTE_MOUNTPOINT}} --data-dir {{.REMOTE_DATA_DIR}} \
+            > {{.REMOTE_WORK_DIR}}/rucksfs.log 2>&1 &
+          echo \$! > {{.REMOTE_WORK_DIR}}/rucksfs.pid
+          sleep 3
+          PID=\$(cat {{.REMOTE_WORK_DIR}}/rucksfs.pid)
+          if ps -p \${PID} > /dev/null 2>&1; then
+            echo \"rucksfs_started pid=\${PID}\"
+            echo \"mountpoint={{.REMOTE_MOUNTPOINT}}\"
+          else
+            echo 'ERROR: rucksfs failed to start'
+            tail -20 {{.REMOTE_WORK_DIR}}/rucksfs.log 2>/dev/null
+            exit 1
+          fi
+        "
+
+  service:stop:
+    desc: "Unmount RucksFS on remote host"
+    deps: [validate]
+    cmds:
+      - |
+        echo "==> Stopping RucksFS..."
+        $SSH_CMD "
+          fusermount -u {{.REMOTE_MOUNTPOINT}} 2>/dev/null || fusermount3 -u {{.REMOTE_MOUNTPOINT}} 2>/dev/null || true
+          sleep 1
+          if [ -f {{.REMOTE_WORK_DIR}}/rucksfs.pid ]; then
+            PID=\$(cat {{.REMOTE_WORK_DIR}}/rucksfs.pid)
+            kill \${PID} 2>/dev/null || true
+            rm -f {{.REMOTE_WORK_DIR}}/rucksfs.pid
+          fi
+          echo 'Stopped'
+        "
+
+  service:restart:
+    desc: "Restart RucksFS (stop + start)"
+    cmds:
+      - task: service:stop
+      - task: service:start
+
+  service:status:
+    desc: "Show RucksFS mount status"
+    deps: [validate]
+    cmds:
+      - |
+        $SSH_CMD "
+          echo '--- Mount status ---'
+          mountpoint -q {{.REMOTE_MOUNTPOINT}} 2>/dev/null && echo 'Mounted: yes' || echo 'Mounted: no'
+          echo '--- Process ---'
+          if [ -f {{.REMOTE_WORK_DIR}}/rucksfs.pid ]; then
+            PID=\$(cat {{.REMOTE_WORK_DIR}}/rucksfs.pid)
+            ps -p \${PID} -o pid,etime,rss,cmd 2>/dev/null || echo 'Process not running'
+          else
+            echo 'No PID file'
+          fi
+          echo '--- Disk usage ---'
+          df -h {{.REMOTE_MOUNTPOINT}} 2>/dev/null || echo 'Mountpoint not available'
+          echo '--- Data dir ---'
+          du -sh {{.REMOTE_DATA_DIR}} 2>/dev/null || echo 'Data dir not available'
+        "
+
+  # --- Benchmark (Async - Agent friendly) ---
+  bench:start:
+    desc: "[Agent] Start benchmark in background (returns immediately with PID)"
+    deps: [validate]
+    cmds:
+      - |
+        echo "==> Starting metrics collection..."
+        $SSH_CMD "bash /tmp/rucksfs-collect-metrics.sh start {{.REMOTE_METRICS_DIR}} 1"
+      - |
+        BENCH_ARGS="--mountpoint {{.REMOTE_MOUNTPOINT}}"
+        BENCH_ARGS="${BENCH_ARGS} --num-files {{.BENCH_NUM_FILES}}"
+        BENCH_ARGS="${BENCH_ARGS} --num-dirs {{.BENCH_NUM_DIRS}}"
+        BENCH_ARGS="${BENCH_ARGS} --max-threads {{.BENCH_MAX_THREADS}}"
+
+        BENCH_CMD="bash {{.REMOTE_BENCH_DIR}}/run_all.sh ${BENCH_ARGS}"
+
+        # Apply mode filter
+        case "{{.BENCH_MODE}}" in
+          correctness) BENCH_CMD="${BENCH_CMD} --correctness-only" ;;
+          performance) BENCH_CMD="${BENCH_CMD} --performance-only" ;;
+          all) ;;  # run everything
+        esac
+
+        if [ "{{.BENCH_SKIP_PJDFSTEST}}" = "true" ]; then
+          BENCH_CMD="${BENCH_CMD} --skip-pjdfstest"
+        fi
+
+        echo "==> Launching benchmark in background..."
+        echo "    Command: ${BENCH_CMD}"
+        $SSH_CMD "cd {{.REMOTE_BENCH_DIR}} && \
+          nohup bash -c '${BENCH_CMD}' > {{.REMOTE_WORK_DIR}}/bench.log 2>&1 & \
+          echo \$! > {{.REMOTE_WORK_DIR}}/bench.pid && \
+          sleep 1 && \
+          PID=\$(cat {{.REMOTE_WORK_DIR}}/bench.pid) && \
+          if ps -p \${PID} > /dev/null 2>&1; then \
+            echo \"benchmark_started pid=\${PID}\"; \
+          else \
+            echo \"ERROR: benchmark failed to start\"; \
+            tail -20 {{.REMOTE_WORK_DIR}}/bench.log 2>/dev/null; \
+            exit 1; \
+          fi"
+      - echo "==> Use 'task bench:status' to check progress."
+
+  bench:status:
+    desc: "[Agent] Check benchmark status (exit 0 = finished, exit 1 = running)"
+    deps: [validate]
+    cmds:
+      - |
+        $SSH_CMD 'PIDFILE={{.REMOTE_WORK_DIR}}/bench.pid;
+          if [ ! -f "${PIDFILE}" ]; then
+            echo "status=no_benchmark";
+            exit 0;
+          fi;
+          PID=$(cat "${PIDFILE}");
+          if ps -p ${PID} > /dev/null 2>&1; then
+            ELAPSED=$(ps -p ${PID} -o etime= 2>/dev/null | tr -d " ");
+            echo "status=running";
+            echo "pid=${PID}";
+            echo "elapsed=${ELAPSED}";
+            exit 1;
+          else
+            echo "status=finished";
+            echo "pid=${PID}";
+            echo "--- benchmark output (last 20 lines) ---";
+            tail -20 {{.REMOTE_WORK_DIR}}/bench.log 2>/dev/null || true;
+            echo "--- result files ---";
+            ls -lh {{.REMOTE_BENCH_DIR}}/results/*.csv 2>/dev/null || echo "No CSV result files";
+            ls -lh {{.REMOTE_BENCH_DIR}}/results/*.log 2>/dev/null || echo "No log files";
+            rm -f "${PIDFILE}";
+            exit 0;
+          fi'
+
+  bench:stop:
+    desc: "[Agent] Stop metrics and collect logs (call after bench finishes)"
+    deps: [validate]
+    cmds:
+      - $SSH_CMD "bash /tmp/rucksfs-collect-metrics.sh stop" || true
+      - |
+        echo "==> Collecting logs..."
+        $SSH_CMD "bash /tmp/rucksfs-collect-logs.sh {{.REMOTE_LOGS_DIR}} {{.REMOTE_WORK_DIR}}/rucksfs.log" || true
+      - echo "==> Post-benchmark collection complete"
+
+  bench:run:
+    desc: "[Sync] Run benchmark blocking until complete"
+    deps: [validate]
+    cmds:
+      - $SSH_CMD "bash /tmp/rucksfs-collect-metrics.sh start {{.REMOTE_METRICS_DIR}} 1"
+      - |
+        BENCH_ARGS="--mountpoint {{.REMOTE_MOUNTPOINT}}"
+        BENCH_ARGS="${BENCH_ARGS} --num-files {{.BENCH_NUM_FILES}}"
+        BENCH_ARGS="${BENCH_ARGS} --num-dirs {{.BENCH_NUM_DIRS}}"
+        BENCH_ARGS="${BENCH_ARGS} --max-threads {{.BENCH_MAX_THREADS}}"
+
+        BENCH_CMD="bash {{.REMOTE_BENCH_DIR}}/run_all.sh ${BENCH_ARGS}"
+
+        case "{{.BENCH_MODE}}" in
+          correctness) BENCH_CMD="${BENCH_CMD} --correctness-only" ;;
+          performance) BENCH_CMD="${BENCH_CMD} --performance-only" ;;
+        esac
+
+        if [ "{{.BENCH_SKIP_PJDFSTEST}}" = "true" ]; then
+          BENCH_CMD="${BENCH_CMD} --skip-pjdfstest"
+        fi
+
+        echo "==> Running benchmark (blocking)..."
+        echo "    Command: ${BENCH_CMD}"
+        $SSH_CMD "cd {{.REMOTE_BENCH_DIR}} && ${BENCH_CMD}" 2>&1 | tee {{.RESULTS_DIR}}/bench_live_{{.TIMESTAMP}}.log || true
+      - $SSH_CMD "bash /tmp/rucksfs-collect-metrics.sh stop" || true
+      - $SSH_CMD "bash /tmp/rucksfs-collect-logs.sh {{.REMOTE_LOGS_DIR}} {{.REMOTE_WORK_DIR}}/rucksfs.log" || true
+
+  bench:
+    desc: "Alias for bench:run"
+    cmds: [{ task: bench:run }]
+
+  # --- Collect ---
+  collect:
+    desc: "Pull results, metrics, and logs from remote host"
+    deps: [validate]
+    cmds:
+      - |
+        LOCAL_DIR="{{.RESULTS_DIR}}/run_{{.TIMESTAMP}}"
+        mkdir -p "${LOCAL_DIR}/benchmark" "${LOCAL_DIR}/metrics" "${LOCAL_DIR}/logs"
+        echo "==> Collecting results to ${LOCAL_DIR}..."
+
+        # Benchmark CSV/log results
+        $SCP_CMD "{{.REMOTE_USER}}@{{.REMOTE_HOST}}:{{.REMOTE_BENCH_DIR}}/results/*.csv" "${LOCAL_DIR}/benchmark/" 2>/dev/null || echo "No CSV files"
+        $SCP_CMD "{{.REMOTE_USER}}@{{.REMOTE_HOST}}:{{.REMOTE_BENCH_DIR}}/results/*.log" "${LOCAL_DIR}/benchmark/" 2>/dev/null || echo "No log files"
+
+        # Benchmark full log
+        $SCP_CMD "{{.REMOTE_USER}}@{{.REMOTE_HOST}}:{{.REMOTE_WORK_DIR}}/bench.log" "${LOCAL_DIR}/benchmark/bench_full.log" 2>/dev/null || echo "No bench log"
+
+        # System metrics
+        $SCP_CMD -r "{{.REMOTE_USER}}@{{.REMOTE_HOST}}:{{.REMOTE_METRICS_DIR}}/*" "${LOCAL_DIR}/metrics/" 2>/dev/null || echo "No metrics"
+
+        # Logs
+        $SCP_CMD -r "{{.REMOTE_USER}}@{{.REMOTE_HOST}}:{{.REMOTE_LOGS_DIR}}/*" "${LOCAL_DIR}/logs/" 2>/dev/null || echo "No logs"
+
+        echo "==> Results collected to: ${LOCAL_DIR}"
+        echo ""
+        echo "--- Result files ---"
+        find "${LOCAL_DIR}" -type f -exec ls -lh {} \; 2>/dev/null || true
+
+  # --- Cleanup ---
+  clean:data:
+    desc: "Remove RucksFS data directory on remote"
+    deps: [validate]
+    cmds:
+      - |
+        echo "==> Cleaning RucksFS data..."
+        $SSH_CMD "rm -rf {{.REMOTE_DATA_DIR}}"
+
+  clean:mounts:
+    desc: "Unmount RucksFS FUSE mount"
+    deps: [validate]
+    cmds:
+      - |
+        echo "==> Unmounting..."
+        $SSH_CMD "fusermount -u {{.REMOTE_MOUNTPOINT}} 2>/dev/null || fusermount3 -u {{.REMOTE_MOUNTPOINT}} 2>/dev/null || true"
+
+  clean:remote-data:
+    desc: "Remove remote temp files and benchmark results"
+    deps: [validate]
+    cmds:
+      - |
+        echo "==> Cleaning remote data..."
+        $SSH_CMD "rm -rf {{.REMOTE_BENCH_DIR}}/results/*.csv {{.REMOTE_BENCH_DIR}}/results/*.log \
+          {{.REMOTE_WORK_DIR}}/bench.log {{.REMOTE_WORK_DIR}}/bench.pid \
+          {{.REMOTE_METRICS_DIR}} {{.REMOTE_LOGS_DIR}} \
+          /tmp/rucksfs-setup.sh /tmp/rucksfs-collect-metrics.sh /tmp/rucksfs-collect-logs.sh"
+
+  clean:rotate-dirs:
+    desc: "Rotate data directories for pristine state"
+    deps: [validate]
+    cmds:
+      - |
+        echo "==> Rotating data directories..."
+        TS=$(date +%Y%m%d_%H%M%S)
+        $SSH_CMD "
+          if [ -d {{.REMOTE_DATA_DIR}} ]; then
+            mv {{.REMOTE_DATA_DIR}} {{.REMOTE_DATA_DIR}}.bak.\${TS}
+            echo 'Rotated {{.REMOTE_DATA_DIR}} -> {{.REMOTE_DATA_DIR}}.bak.\${TS}'
+          fi
+          mkdir -p {{.REMOTE_DATA_DIR}}
+        "
+
+  clean:reboot:
+    desc: "Reboot remote host and wait for recovery"
+    deps: [validate]
+    cmds:
+      - |
+        echo "==> Rebooting {{.REMOTE_HOST}}..."
+        $SSH_CMD "reboot" 2>/dev/null || true
+        sleep 15
+        RETRIES=0; MAX=20
+        while [ ${RETRIES} -lt ${MAX} ]; do
+          if $SSH_CMD "echo 'host_up'" 2>/dev/null | grep -q 'host_up'; then
+            echo "==> Host back online!"
+            sleep 5
+            exit 0
+          fi
+          RETRIES=$((RETRIES + 1))
+          echo "    Waiting... (${RETRIES}/${MAX})"
+          sleep 10
+        done
+        echo "ERROR: Host did not recover"
+        exit 1
+
+  clean:
+    desc: "Standard cleanup: stop service + remove data + clean temp"
+    cmds:
+      - task: service:stop
+      - task: clean:mounts
+      - task: clean:data
+      - task: clean:remote-data
+
+  clean:full-rotate:
+    desc: "Deep cleanup: standard + rotate dirs + reboot"
+    cmds:
+      - task: clean
+      - task: clean:rotate-dirs
+      - task: clean:reboot
+
+  # --- Composite Workflows ---
+  test:
+    desc: "[Sync] Full test flow (blocks until done)"
+    cmds:
+      - task: validate
+      - task: build
+      - task: deploy
+      - task: check
+      - task: service:restart
+      - task: bench:run
+      - task: collect
+
+  test:agent:
+    desc: "[Agent] Full test flow (async, returns after bench:start)"
+    cmds:
+      - task: validate
+      - task: build
+      - task: deploy
+      - task: check
+      - task: service:restart
+      - task: bench:start
+      - |
+        echo "========================================="
+        echo " Benchmark launched. Next steps:"
+        echo "   1. task bench:status  (poll until exit 0)"
+        echo "   2. task bench:stop"
+        echo "   3. task collect"
+        echo "========================================="
+
+  quick-bench:
+    desc: "[Sync] Re-benchmark (skip build/deploy)"
+    cmds:
+      - task: validate
+      - task: clean:remote-data
+      - task: service:restart
+      - task: bench:run
+      - task: collect
+
+  quick-bench:agent:
+    desc: "[Agent] Re-benchmark (skip build/deploy, async)"
+    cmds:
+      - task: validate
+      - task: clean:remote-data
+      - task: service:restart
+      - task: bench:start
+
+  clean-bench:agent:
+    desc: "[Agent] Deep-clean + benchmark (pristine state, async)"
+    cmds:
+      - task: validate
+      - task: clean:full-rotate
+      - task: deploy:configure
+      - task: service:restart
+      - task: bench:start
+
+  # --- Utility ---
+  ssh:
+    desc: "Open interactive SSH session to remote host"
+    deps: [validate]
+    cmds:
+      - ssh {{.SSH_OPTS}} -i {{.REMOTE_SSH_KEY}} -p {{.REMOTE_PORT}} {{.REMOTE_USER}}@{{.REMOTE_HOST}}
+    interactive: true
+
+  logs:
+    desc: "Show recent RucksFS logs from remote"
+    deps: [validate]
+    cmds:
+      - $SSH_CMD "tail -50 {{.REMOTE_WORK_DIR}}/rucksfs.log 2>/dev/null || echo 'No logs'"
