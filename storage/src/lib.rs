@@ -37,6 +37,11 @@ pub trait DeltaStore: Send + Sync {
     /// Allocate the next sequence number for `inode`. Used by the server
     /// layer to write delta entries inside a transaction.
     fn next_seq(&self, inode: Inode) -> u64;
+
+    /// Scan all pending deltas for `inode`, returning `(key, value)` pairs
+    /// from a single consistent iterator pass. Used by compaction to ensure
+    /// the set of keys deleted matches exactly the set of values folded.
+    fn scan_deltas_with_keys(&self, inode: Inode) -> FsResult<Vec<(Vec<u8>, Vec<u8>)>>;
 }
 
 pub trait MetadataStore: Send + Sync {

@@ -492,6 +492,26 @@ impl DeltaStore for RocksDeltaStore {
     fn next_seq(&self, inode: Inode) -> u64 {
         self.next_seq_inner(inode)
     }
+
+    fn scan_deltas_with_keys(&self, inode: Inode) -> FsResult<Vec<(Vec<u8>, Vec<u8>)>> {
+        let cf = self
+            .db
+            .cf_handle(CF_DELTA_ENTRIES)
+            .ok_or_else(|| FsError::Io("CF 'delta_entries' not found".into()))?;
+
+        let prefix = delta_prefix(inode);
+        let iter = self.db.prefix_iterator_cf(&cf, &prefix);
+
+        let mut result = Vec::new();
+        for item in iter {
+            let (k, v) = item.map_err(|e| FsError::Io(format!("RocksDB iterator: {}", e)))?;
+            if !k.starts_with(&prefix) {
+                break;
+            }
+            result.push((k.to_vec(), v.to_vec()));
+        }
+        Ok(result)
+    }
 }
 
 /// A bundle of RocksDB-backed stores that supports atomic cross-CF writes.

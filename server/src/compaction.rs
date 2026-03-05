@@ -132,10 +132,9 @@ where
 
     /// Compact a single inode regardless of threshold.
     pub fn force_compact_inode(&self, inode: Inode) -> FsResult<bool> {
-        // 1. Scan deltas (outside transaction — delta keys are append-only
-        //    and won't conflict with other transactions).
-        let raw_deltas = self.delta_store.scan_deltas(inode)?;
-        if raw_deltas.is_empty() {
+        // 1. Single-pass scan: get (key, value) pairs from one iterator.
+        let kv_pairs = self.delta_store.scan_deltas_with_keys(inode)?;
+        if kv_pairs.is_empty() {
             return Ok(false);
         }
 
@@ -144,43 +143,35 @@ where
         let key = encode_inode_key(inode);
         let mut base = match batch.get_for_update_inode(&key)? {
             Some(bytes) => InodeValue::deserialize(&bytes)?,
-            None => return Ok(false), // inode was deleted
+            None => return Ok(false),
         };
 
-        // 3. Fold.
-        let ops: Vec<DeltaOp> = raw_deltas
+        // 3. Fold values from the same scan.
+        let ops: Vec<DeltaOp> = kv_pairs
             .iter()
-            .filter_map(|bytes| DeltaOp::deserialize(bytes).ok())
+            .filter_map(|(_, v)| DeltaOp::deserialize(v).ok())
             .collect();
         delta::fold_deltas(&mut base, &ops);
 
-        // 4. Write merged inode + delete delta keys within the transaction.
+        // 4. Write merged inode + delete exactly the keys we folded.
         batch.push(BatchOp::PutInode {
             key: key.clone(),
             value: base.serialize(),
         });
-        let delta_keys = self.delta_store.scan_delta_keys(inode)?;
-        for dk in &delta_keys {
+        for (dk, _) in &kv_pairs {
             batch.push(BatchOp::DeleteDelta { key: dk.clone() });
         }
 
-        // 5. Commit — if the inode was concurrently deleted/modified,
-        //    PCC will detect the conflict and we safely skip.
+        // 5. Commit.
         match batch.commit() {
             Ok(()) => {}
             Err(rucksfs_core::FsError::TransactionConflict) => {
-                // Another transaction modified this inode (e.g. unlink).
-                // Safe to skip — the inode will be re-compacted later or
-                // was already deleted.
                 return Ok(false);
             }
             Err(e) => return Err(e),
         }
 
-        // 6. Update in-memory state after successful commit.
-        let _ = self.delta_store.clear_deltas(inode);
-
-        // 7. Invalidate cache so the next read picks up the fresh base.
+        // 6. Invalidate cache so the next read picks up the fresh base.
         self.cache.invalidate(inode);
 
         Ok(true)
