@@ -541,10 +541,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
 
   <!-- Core insight banner -->
   <div style="background: var(--bg-alt); border: 1px solid var(--border); border-left: 3px solid var(--primary); border-radius: var(--radius); padding: 18px 24px; margin-bottom: 20px;">
-    <div style="font-size: 1.05rem; font-weight: 700; margin-bottom: 6px; color: var(--primary-dark);">关键洞察：元数据操作以写为主（create/mkdir/unlink 占比 &gt;60%），而传统文件系统的写路径代价极高</div>
-    <div style="font-size: 0.84rem; color: var(--text-secondary); line-height: 1.55;">
-读操作（lookup/stat）方面，ext4 的 HTree 和 RocksDB 的 LSM-tree 都是随机点查，性能差距不大。<strong style="color: var(--primary);">真正的性能鸿沟在写路径上</strong>——这恰好是元数据最频繁的操作。
-    </div>
+    <div style="font-size: 1.05rem; font-weight: 700; color: var(--primary-dark);">元数据操作以写为主（create/mkdir/unlink 占比 &gt;60%），而传统文件系统的写路径代价极高</div>
   </div>
 
   <!-- Visual comparison: ext4 create vs LSM-tree create -->
