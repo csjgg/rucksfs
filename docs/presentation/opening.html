@@ -403,7 +403,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
 <!-- ====================================================================
      SLIDE 1 — Title
      ==================================================================== -->
-<section class="slide title-slide" data-slide="1 / 16">
+<section class="slide title-slide" data-slide="1 / 18">
   <div style="margin-bottom: 40px;">
     <div style="font-size: 0.9rem; letter-spacing: 0.15em; opacity: 0.55; margin-bottom: 18px;">毕业设计（论文）开题报告</div>
     <h1 style="font-size: 2.5rem; margin-bottom: 14px; line-height: 1.35;">采用元数据键值对存储的<br>文件操作设计与实现</h1>
@@ -422,7 +422,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
 <!-- ====================================================================
      SLIDE 2 — Outline
      ==================================================================== -->
-<section class="slide" data-slide="2 / 16" style="align-items: center;">
+<section class="slide" data-slide="2 / 18" style="align-items: center;">
   <h2 style="text-align: center; margin-bottom: 36px;">报告提纲</h2>
   <div style="display: flex; flex-direction: column; gap: 20px; max-width: 560px; width: 100%;">
     <div style="display: flex; align-items: center; gap: 16px;">
@@ -452,7 +452,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
 <!-- ====================================================================
      PART 1 — SECTION
      ==================================================================== -->
-<section class="slide section-slide" data-slide="3 / 16">
+<section class="slide section-slide" data-slide="3 / 18">
   <div>
     <div style="font-size: 0.95rem; letter-spacing: 0.12em; opacity: 0.55; margin-bottom: 10px;">PART 1</div>
     <h2>研究背景与动机</h2>
@@ -463,7 +463,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
 <!-- ====================================================================
      SLIDE 4 — What is Metadata
      ==================================================================== -->
-<section class="slide" data-slide="4 / 16">
+<section class="slide" data-slide="4 / 18">
   <div class="slide-header">
     <span class="tag">背景</span>
     <h2 style="margin: 0;">什么是文件元数据？为什么它如此重要？</h2>
@@ -525,7 +525,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
 <!-- ====================================================================
      SLIDE 5 — Traditional FS Problems
      ==================================================================== -->
-<section class="slide" data-slide="5 / 16">
+<section class="slide" data-slide="5 / 18">
   <div class="slide-header">
     <span class="tag">问题</span>
     <h2 style="margin: 0;">传统文件系统为什么管不好海量元数据？</h2>
@@ -589,7 +589,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
 <!-- ====================================================================
      SLIDE 6 — Why KV Storage
      ==================================================================== -->
-<section class="slide" data-slide="6 / 16">
+<section class="slide" data-slide="6 / 18">
   <div class="slide-header">
     <span class="tag">方案</span>
     <h2 style="margin: 0;">解决思路：用 LSM-tree KV 存储替代传统元数据管理</h2>
@@ -656,7 +656,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
 <!-- ====================================================================
      SLIDE 6 — Research Timeline
      ==================================================================== -->
-<section class="slide" data-slide="7 / 16">
+<section class="slide" data-slide="7 / 18">
   <div class="slide-header">
     <span class="tag">调研</span>
     <h2 style="margin: 0;">技术演进：从学术探索到工业实践</h2>
@@ -725,7 +725,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
 <!-- ====================================================================
      SLIDE 7 — Key Papers Insights
      ==================================================================== -->
-<section class="slide" data-slide="8 / 16">
+<section class="slide" data-slide="8 / 18">
   <div class="slide-header">
     <span class="tag">论文</span>
     <h2 style="margin: 0;">关键论文与设计启示</h2>
@@ -780,7 +780,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
 <!-- ====================================================================
      PART 2 — SECTION
      ==================================================================== -->
-<section class="slide section-slide" data-slide="9 / 16">
+<section class="slide section-slide" data-slide="9 / 18">
   <div>
     <div style="font-size: 0.95rem; letter-spacing: 0.12em; opacity: 0.55; margin-bottom: 10px;">PART 2</div>
     <h2>系统设计与验证</h2>
@@ -789,9 +789,9 @@ tr:nth-child(even) { background: var(--bg-alt); }
 </section>
 
 <!-- ====================================================================
-     SLIDE 9 — System Architecture
+     SLIDE 10 — System Architecture
      ==================================================================== -->
-<section class="slide" data-slide="10 / 16">
+<section class="slide" data-slide="10 / 18">
   <div class="slide-header">
     <span class="tag">架构</span>
     <h2 style="margin: 0;">系统整体架构</h2>
@@ -842,7 +842,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
         <h3>Trait-Based 分层解耦</h3>
         <p style="font-size: 0.88rem; margin: 0;">
           参考 JuiceFS 的 Meta Engine 可替换设计。
-          通过 MetadataOps / DataOps / VfsOps 三层 trait 定义接口，存储后端可独立替换（内存 / RocksDB）。
+          通过 MetadataOps / DataOps / VfsOps 三层 trait 定义接口，存储后端可独立替换。
         </p>
       </div>
       <div class="card" style="margin-bottom: 10px;">
@@ -854,7 +854,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
       <div class="card">
         <h3>FUSE 权限委托</h3>
         <p style="font-size: 0.88rem; margin: 0;">
-          使用 default_permissions + allow_other 挂载选项，由内核 VFS 层处理 POSIX 权限检查，减少用户态开销。
+          使用 default_permissions + allow_other 挂载选项，由内核 VFS 层处理 POSIX 权限检查。
         </p>
       </div>
     </div>
@@ -862,9 +862,9 @@ tr:nth-child(even) { background: var(--bg-alt); }
 </section>
 
 <!-- ====================================================================
-     SLIDE 10 — Namespace to KV Mapping (Part 1)
+     SLIDE 11 — Namespace to KV Mapping with Example
      ==================================================================== -->
-<section class="slide" data-slide="11 / 16">
+<section class="slide" data-slide="11 / 18">
   <div class="slide-header">
     <span class="tag">核心设计</span>
     <h2 style="margin: 0;">文件命名空间到 KV 存储的映射</h2>
@@ -872,153 +872,232 @@ tr:nth-child(even) { background: var(--bg-alt); }
 
   <div class="columns">
     <div class="col">
-      <h3>核心问题：树形结构 → 扁平 KV？</h3>
-      <p style="font-size: 0.92rem; margin-bottom: 16px;">
-        文件系统是一棵<strong>树</strong>（目录包含子目录和文件），而 KV 存储是一张<strong>扁平的有序表</strong>。
-        需要设计映射规则，使得文件系统的每种操作都能高效地转化为 KV 操作。
-      </p>
+      <h3>举例：一个目录树如何存入 KV？</h3>
+      <p class="muted" style="margin-bottom: 10px;">考虑以下目录结构：</p>
 
-      <div class="card card-accent" style="margin-bottom: 12px;">
-        <h3>映射策略：三种 KV 对</h3>
-        <p style="font-size: 0.88rem;">将文件系统中的三类核心信息分别存储为独立的 KV 对：</p>
-        <ul style="font-size: 0.88rem;">
-          <li><strong>Inode 属性</strong> — 每个文件/目录的元信息（大小、权限、时间戳等）</li>
-          <li><strong>目录项</strong> — 父子关系（"哪个目录包含哪些文件"）</li>
-          <li><strong>增量记录</strong> — 高频变更的属性（mtime/nlink）的追加式更新</li>
-        </ul>
+      <!-- Directory tree diagram -->
+      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 20px; font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.8; margin-bottom: 14px;">
+        <div><strong style="color: var(--primary);">/</strong> &nbsp;(inode 1, 目录)</div>
+        <div>&nbsp;├── <strong style="color: var(--primary);">home/</strong> &nbsp;(inode 2, 目录)</div>
+        <div>&nbsp;│&nbsp;&nbsp; └── <strong style="color: var(--primary);">alice/</strong> &nbsp;(inode 3, 目录)</div>
+        <div>&nbsp;│&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ├── notes.txt &nbsp;(inode 10, 文件, 1024B)</div>
+        <div>&nbsp;│&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; └── photo.jpg &nbsp;(inode 11, 文件, 2MB)</div>
+        <div>&nbsp;└── <strong style="color: var(--primary);">etc/</strong> &nbsp;(inode 4, 目录)</div>
       </div>
 
-      <div class="card card-highlight">
-        <h3>参考 RocksDB Column Family 隔离</h3>
-        <p style="font-size: 0.88rem; margin: 0;">
-          三种 KV 对分别存储在独立的 Column Family 中，各自拥有独立的 Bloom Filter、压缩策略和缓存配置。
-          借鉴 IndexFS 的优化思路——<strong>最大化底层 KV 引擎的利用效率</strong>。
-        </p>
+      <h3>映射为 KV 后的存储内容</h3>
+      <p class="small" style="margin-bottom: 6px;"><strong>CF: inodes</strong> — 每个文件/目录一条记录</p>
+      <div style="font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.6; background: #f8fafc; padding: 8px 12px; border-radius: 4px; border: 1px solid var(--border);">
+        <div><span style="color: #1e40af;">Key: [1]</span> → <span style="color: #166534;">{ mode: dir, nlink: 4, mtime: ... }</span></div>
+        <div><span style="color: #1e40af;">Key: [2]</span> → <span style="color: #166534;">{ mode: dir, nlink: 3, mtime: ... }</span></div>
+        <div><span style="color: #1e40af;">Key: [3]</span> → <span style="color: #166534;">{ mode: dir, nlink: 4, mtime: ... }</span></div>
+        <div><span style="color: #1e40af;">Key: [10]</span> → <span style="color: #166534;">{ mode: file, size: 1024, uid: alice }</span></div>
+        <div><span style="color: #1e40af;">Key: [11]</span> → <span style="color: #166534;">{ mode: file, size: 2MB, uid: alice }</span></div>
       </div>
     </div>
 
     <div class="col">
-      <h3>具体映射关系</h3>
-      <p class="muted" style="margin-bottom: 12px;">文件系统概念 → Key → Value</p>
-
-      <div style="margin-bottom: 14px;">
-        <h3 style="color: var(--primary); font-size: 0.92rem;">① Inode 属性（文件/目录的"身份证"）</h3>
-        <div class="kv-row">
-          <div class="kv-concept">文件的 inode</div>
-          <div class="kv-arrow">→</div>
-          <div class="kv-key-box">inode 编号</div>
-          <div class="kv-val-box">size, mode, nlink, uid, gid, timestamps</div>
-        </div>
-        <p class="small">借鉴 LocoFS：定长 57 字节结构体，零序列化开销</p>
+      <p class="small" style="margin-bottom: 6px;"><strong>CF: dir_entries</strong> — 每个"父→子"关系一条记录</p>
+      <div style="font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.6; background: #f8fafc; padding: 8px 12px; border-radius: 4px; border: 1px solid var(--border); margin-bottom: 14px;">
+        <div><span style="color: #1e40af;">Key: [1|"home"]</span> → <span style="color: #166534;">{ child: 2, type: dir }</span></div>
+        <div><span style="color: #1e40af;">Key: [1|"etc"]</span> → <span style="color: #166534;">{ child: 4, type: dir }</span></div>
+        <div><span style="color: #1e40af;">Key: [2|"alice"]</span> → <span style="color: #166534;">{ child: 3, type: dir }</span></div>
+        <div><span style="color: #1e40af;">Key: [3|"notes.txt"]</span> → <span style="color: #166534;">{ child: 10, type: file }</span></div>
+        <div><span style="color: #1e40af;">Key: [3|"photo.jpg"]</span> → <span style="color: #166534;">{ child: 11, type: file }</span></div>
       </div>
 
-      <div style="margin-bottom: 14px;">
-        <h3 style="color: var(--primary); font-size: 0.92rem;">② 目录项（文件树的"枝干"）</h3>
-        <div class="kv-row">
-          <div class="kv-concept">目录中的文件</div>
-          <div class="kv-arrow">→</div>
-          <div class="kv-key-box">父inode + 文件名</div>
-          <div class="kv-val-box">子 inode + 类型</div>
-        </div>
-        <p class="small">同一父目录下的条目共享 Key 前缀 → readdir = 前缀扫描</p>
+      <h3>这种映射为什么高效？</h3>
+      <div class="card card-accent" style="margin-bottom: 10px;">
+        <h3>lookup /home/alice/notes.txt</h3>
+        <p style="font-size: 0.84rem; margin: 0;">
+          逐级查询：<code>[1|"home"]→2</code> → <code>[2|"alice"]→3</code> → <code>[3|"notes.txt"]→10</code> → 读 inode [10]。
+          <strong>每一级只需一次精确 KV get，无需遍历。</strong>
+        </p>
       </div>
-
-      <div>
-        <h3 style="color: var(--primary); font-size: 0.92rem;">③ 增量记录（属性的"补丁"）</h3>
-        <div class="kv-row">
-          <div class="kv-concept">属性变更</div>
-          <div class="kv-arrow">→</div>
-          <div class="kv-key-box">inode + 序列号</div>
-          <div class="kv-val-box">DeltaOp (mtime/ctime/nlink)</div>
-        </div>
-        <p class="small">受 Mantle Delta Record 启发：追加而非覆盖，避免写热点</p>
+      <div class="card card-accent" style="margin-bottom: 10px;">
+        <h3>readdir /home/alice/</h3>
+        <p style="font-size: 0.84rem; margin: 0;">
+          前缀扫描 <code>[3|*]</code>，返回所有以 inode 3 为前缀的 Key。
+          <strong>RocksDB SST 文件有序，前缀扫描 = 顺序读取，极其高效。</strong>
+        </p>
+      </div>
+      <div class="card card-accent">
+        <h3>create /home/alice/new.txt</h3>
+        <p style="font-size: 0.84rem; margin: 0;">
+          原子写入：① put inode [12] ② put dir_entry [3|"new.txt"]→12。
+          <strong>WriteBatch 一次提交，保证原子性。</strong>
+        </p>
       </div>
     </div>
   </div>
 </section>
 
 <!-- ====================================================================
-     SLIDE 11 — Namespace Mapping: Operations
+     SLIDE 12 — Delta Updates & Operations
      ==================================================================== -->
-<section class="slide" data-slide="12 / 16">
+<section class="slide" data-slide="12 / 18">
   <div class="slide-header">
     <span class="tag">核心设计</span>
-    <h2 style="margin: 0;">文件操作到 KV 操作的映射</h2>
+    <h2 style="margin: 0;">Delta 增量更新与操作映射</h2>
   </div>
 
   <div class="columns">
     <div class="col">
-      <h3>POSIX 操作 → KV 操作序列</h3>
-      <p style="font-size: 0.9rem; margin-bottom: 14px;">
-        每个 POSIX 文件操作被翻译为一组 KV 读写操作。以下是几个典型操作的映射方式：
-      </p>
-      <table style="font-size: 0.85rem;">
-        <tr><th>文件操作</th><th>KV 操作序列</th></tr>
-        <tr>
-          <td><strong>create</strong><br><span class="small">创建文件</span></td>
-          <td>① 查询目录项 CF（检查重名）<br>② 写入 inode CF（新文件属性）<br>③ 写入目录项 CF（父目录→子文件）<br>④ 追加 delta（父目录 mtime）</td>
-        </tr>
-        <tr>
-          <td><strong>lookup</strong><br><span class="small">路径解析</span></td>
-          <td>① 查询目录项 CF（父inode+名字→子inode）<br>② 读取 inode CF（获取属性）</td>
-        </tr>
-        <tr>
-          <td><strong>readdir</strong><br><span class="small">列目录</span></td>
-          <td>① 前缀扫描目录项 CF（父inode 为前缀）</td>
-        </tr>
-        <tr>
-          <td><strong>unlink</strong><br><span class="small">删除文件</span></td>
-          <td>① 删除目录项 CF 条目<br>② 更新 inode CF（nlink-1）<br>③ nlink=0 时删除 inode</td>
-        </tr>
-        <tr>
-          <td><strong>rename</strong><br><span class="small">重命名</span></td>
-          <td>① 删除源目录项 + 写入目标目录项<br>② 追加 delta（源&目标父目录 mtime）</td>
-        </tr>
-      </table>
+      <h3>问题：高频属性修改的写放大</h3>
+      <div class="card card-warn" style="margin-bottom: 12px;">
+        <p style="font-size: 0.86rem; margin: 0;">
+          在 <code>/home/alice/</code> 下连续创建 1000 个文件，每次都需要更新父目录 (inode 3) 的 mtime 和 nlink。
+          传统做法：每次 <strong>读取 57B → 修改 → 写回 57B</strong>，1000 次 = 1000 次读-改-写。
+        </p>
+      </div>
+
+      <h3>方案：Delta Record 追加更新</h3>
+      <p class="small" style="margin-bottom: 8px;">受 Mantle (SOSP'25) 的 Delta Record 机制启发</p>
+
+      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; font-size: 0.82rem; line-height: 1.7; margin-bottom: 12px;">
+        <div><code style="color: var(--primary);">create("f1")</code> → append <span style="color: var(--accent);">Δ(mtime=T1, nlink+1)</span></div>
+        <div><code style="color: var(--primary);">create("f2")</code> → append <span style="color: var(--accent);">Δ(mtime=T2, nlink+1)</span></div>
+        <div><code style="color: var(--primary);">create("f3")</code> → append <span style="color: var(--accent);">Δ(mtime=T3, nlink+1)</span></div>
+        <div style="margin-top: 6px; border-top: 1px dashed var(--border); padding-top: 6px;">
+          <code style="color: #166534;">getattr(parent)</code> → fold: base + Δ₁ + Δ₂ + Δ₃ → <strong>最终属性</strong>
+        </div>
+      </div>
+
+      <div class="card card-highlight">
+        <h3>三层架构</h3>
+        <ul style="font-size: 0.84rem;">
+          <li><strong>InodeFoldedCache (LRU)</strong> — O(1) 命中返回折叠后属性</li>
+          <li><strong>Fold-on-Read</strong> — 缓存未命中时读 base + delta 折叠</li>
+          <li><strong>后台 Compaction</strong> — delta 超过 32 条时异步合并为新 base</li>
+        </ul>
+      </div>
     </div>
 
     <div class="col">
-      <h3>Delta 增量更新机制</h3>
-      <p style="font-size: 0.9rem; margin-bottom: 12px;">
-        受 Mantle (SOSP'25) 启发，对高频属性变更采用追加式增量更新，避免每次都读-改-写完整的 inode 记录：
-      </p>
-      <div class="card card-accent" style="margin-bottom: 12px;">
-        <h3>写入路径：追加 DeltaOp</h3>
-        <p style="font-size: 0.86rem; margin: 0;">
-          create/unlink/mkdir 等操作修改父目录 mtime/ctime/nlink 时，不更新 inode 记录本身，
-          而是追加一条轻量的 DeltaOp 到 delta CF。<strong>写入开销从 57B 降到 ~10B。</strong>
-        </p>
-      </div>
-      <div class="card card-accent" style="margin-bottom: 12px;">
-        <h3>读取路径：折叠 (Fold-on-Read)</h3>
-        <p style="font-size: 0.86rem; margin: 0;">
-          getattr 时将 base inode + 所有 pending delta 折叠为最终属性值。
-          <strong>InodeFoldedCache (LRU)</strong> 缓存折叠结果，后续命中则无需重复计算。
-        </p>
-      </div>
-      <div class="card card-accent">
-        <h3>后台压缩 (Compaction)</h3>
-        <p style="font-size: 0.86rem; margin: 0;">
-          当某 inode 的 delta 积累超过阈值（默认 32 条），后台线程自动合并为新的 base 值并清除旧 delta。
-          <strong>不阻塞前台操作。</strong>
-        </p>
-      </div>
+      <h3>POSIX 操作 → KV 操作映射</h3>
+      <table style="font-size: 0.82rem;">
+        <tr><th>文件操作</th><th>KV 操作序列</th></tr>
+        <tr>
+          <td><strong>create</strong></td>
+          <td>① get_for_update 检查重名 ② put inode ③ put dir_entry ④ commit ⑤ append delta(mtime)</td>
+        </tr>
+        <tr>
+          <td><strong>lookup</strong></td>
+          <td>① get dir_entry(parent+name) ② get inode(child)</td>
+        </tr>
+        <tr>
+          <td><strong>readdir</strong></td>
+          <td>① prefix_scan dir_entries(parent)</td>
+        </tr>
+        <tr>
+          <td><strong>unlink</strong></td>
+          <td>① delete dir_entry ② update inode(nlink-1) ③ nlink=0 则 delete inode</td>
+        </tr>
+        <tr>
+          <td><strong>rename</strong></td>
+          <td>① delete src_entry + put dst_entry ② append delta(both parents)</td>
+        </tr>
+        <tr>
+          <td><strong>mkdir</strong></td>
+          <td>① put inode(dir) ② put dir_entry ③ append delta(parent nlink+1)</td>
+        </tr>
+        <tr>
+          <td><strong>rmdir</strong></td>
+          <td>① check dir empty (prefix_scan) ② delete entry + inode ③ delta(nlink-1)</td>
+        </tr>
+      </table>
 
-      <div class="card card-highlight" style="margin-top: 12px;">
-        <h3>并发控制与性能优化方向</h3>
-        <p style="font-size: 0.86rem; margin: 0;">
-          所有元数据变更通过 RocksDB <strong>PCC 悲观事务 + AtomicWriteBatch</strong> 保证跨 CF 原子性。
-          后续优化方向：WAL Group Commit（减少 fsync 次数）、批量操作聚合、缓存预热策略。
-        </p>
+      <div class="card card-accent" style="margin-top: 12px;">
+        <h3>关键设计原则</h3>
+        <ul style="font-size: 0.84rem;">
+          <li><strong>关键路径最小化</strong>：delta 追加在事务外，丢失仅影响 mtime</li>
+          <li><strong>双写消除</strong>：shares_batch_storage 检测避免 CF 重复写入</li>
+          <li><strong>定长编码</strong>：InodeValue 57B 定长，借鉴 LocoFS 零序列化</li>
+        </ul>
       </div>
     </div>
   </div>
 </section>
 
 <!-- ====================================================================
-     SLIDE 13 — Verification (part of Part 2)
+     SLIDE 13 — Concurrency Control
      ==================================================================== -->
-<section class="slide" data-slide="13 / 16">
+<section class="slide" data-slide="13 / 18">
+  <div class="slide-header">
+    <span class="tag">并发控制</span>
+    <h2 style="margin: 0;">事务化元数据管理与并发安全</h2>
+  </div>
+
+  <div class="columns">
+    <div class="col">
+      <h3>为什么需要事务？</h3>
+      <div class="card card-warn" style="margin-bottom: 12px;">
+        <h3>举例：并发 rename 的竞态</h3>
+        <p style="font-size: 0.84rem; margin: 0;">
+          线程 A：<code>rename("a", "c")</code> — 删除源目录项 + 写入目标目录项<br>
+          线程 B：<code>rename("b", "c")</code> — 删除源目录项 + 写入目标目录项<br>
+          如果不加事务保护，两个线程可能同时写入目标 "c"，导致一个文件丢失。
+        </p>
+      </div>
+
+      <h3>PCC 悲观并发控制</h3>
+      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 18px; font-family: var(--font-mono); font-size: 0.78rem; line-height: 1.8; margin-bottom: 12px;">
+        <div style="color: var(--text-secondary);">// create("new.txt") 事务流程</div>
+        <div>1. <span style="color: var(--primary);">begin_transaction()</span></div>
+        <div>2. <span style="color: var(--accent);">get_for_update</span>(dir_entry[3|"new.txt"])</div>
+        <div>&nbsp;&nbsp;&nbsp;→ 加行锁，若已存在返回 EEXIST</div>
+        <div>3. batch_put(inode[12], value)</div>
+        <div>4. batch_put(dir_entry[3|"new.txt"], 12)</div>
+        <div>5. <span style="color: #166534;">commit()</span> → 原子写入 WAL</div>
+        <div>6. append_delta(parent_mtime) <span style="color: var(--text-secondary);">// 事务外</span></div>
+      </div>
+
+      <div class="card card-accent">
+        <h3>TOCTOU 防护</h3>
+        <p style="font-size: 0.84rem; margin: 0;">
+          <strong>rmdir</strong> 在事务内执行 prefix_scan 检查目录是否为空。
+          get_for_update 对目录项加行锁，防止检查后被其他线程插入新文件。
+        </p>
+      </div>
+    </div>
+
+    <div class="col">
+      <h3>冲突重试机制</h3>
+      <div class="card" style="margin-bottom: 12px;">
+        <h3>execute_with_retry</h3>
+        <p style="font-size: 0.84rem; margin: 0;">
+          当两个事务同时锁定同一行时，后提交者收到 <code>TransactionConflict</code>。
+          系统自动重试（最多 3 次），对上层返回 EAGAIN。
+          参考 RocksDB TransactionDB 的悲观锁语义。
+        </p>
+      </div>
+
+      <h3>AtomicWriteBatch 跨 CF 原子性</h3>
+      <div class="card" style="margin-bottom: 12px;">
+        <p style="font-size: 0.84rem; margin: 0;">
+          一次 create 需要同时写入 <strong>inodes CF</strong>（新 inode）和 <strong>dir_entries CF</strong>（目录项）。
+          AtomicWriteBatch 保证跨 CF 写入的原子性——要么全部成功写入 WAL，要么全部回滚。
+        </p>
+      </div>
+
+      <h3>事务化操作一览</h3>
+      <table style="font-size: 0.82rem;">
+        <tr><th>操作</th><th>锁定的 Key</th><th>原子写入内容</th></tr>
+        <tr><td>create</td><td>目标 dir_entry</td><td>inode + dir_entry</td></tr>
+        <tr><td>mkdir</td><td>目标 dir_entry</td><td>inode + dir_entry</td></tr>
+        <tr><td>unlink</td><td>目标 dir_entry + inode</td><td>delete entry, update inode</td></tr>
+        <tr><td>rmdir</td><td>目标 dir_entry + 子项扫描</td><td>delete entry + inode</td></tr>
+        <tr><td>rename</td><td>源 + 目标 dir_entry</td><td>delete src + put dst</td></tr>
+        <tr><td>link</td><td>目标 dir_entry + inode</td><td>put entry, update nlink</td></tr>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ====================================================================
+     SLIDE 14 — Verification (part of Part 2)
+     ==================================================================== -->
+<section class="slide" data-slide="14 / 18">
   <div class="slide-header">
     <span class="tag">验证</span>
     <h2 style="margin: 0;">测试与评测方案</h2>
@@ -1035,14 +1114,14 @@ tr:nth-child(even) { background: var(--bg-alt); }
           symlink、truncate、unlink 等操作的边界情况。
         </p>
         <p style="font-size: 0.88rem; margin: 0;">
-          将 RucksFS 挂载为 FUSE 文件系统后，在挂载点上运行完整测试套件，验证 POSIX 语义正确性。
+          将 RucksFS 挂载为 FUSE 文件系统后，在挂载点上运行完整测试套件。
         </p>
       </div>
       <div class="card">
         <h3>Rust 单元/集成测试</h3>
         <p style="font-size: 0.88rem; margin: 0;">
-          基于真实 RocksDB 后端（非 mock），覆盖每个文件操作的正常和异常路径。
-          补充 pjdfstest 未覆盖的场景：write+read 数据一致性、deferred unlink、fsck 一致性检查。
+          基于真实 RocksDB 后端（非 mock），覆盖正常和异常路径。
+          补充 pjdfstest 未覆盖的场景：write+read 一致性、deferred unlink、fsck 一致性检查。
           当前已有 <em>228 个</em>自动化测试。
         </p>
       </div>
@@ -1052,23 +1131,22 @@ tr:nth-child(even) { background: var(--bg-alt); }
       <div class="card card-green" style="margin-bottom: 14px;">
         <h3>mdtest — HPC 业界标准元数据压测工具</h3>
         <p style="font-size: 0.88rem;">
-          mdtest 是 IO500 (HPC 存储排行榜) 官方指定的元数据性能测试工具，也是 TableFS、IndexFS、LocoFS 等论文使用的评测基准。
-          通过 C 原生 syscall 直接操作 FUSE 挂载点，无 shell fork/exec 开销。
+          IO500 (HPC 存储排行榜) 官方指定的元数据性能测试工具。TableFS、IndexFS、LocoFS 等论文均使用 mdtest 作为评测基准。
+          C 原生 syscall 直接操作挂载点，无 shell 开销。
         </p>
         <ul style="font-size: 0.86rem;">
-          <li><strong>mdtest-easy</strong>：每线程独立目录，测试分散创建</li>
-          <li><strong>mdtest-hard</strong>：所有线程共享单目录，测试竞争下的创建</li>
+          <li><strong>mdtest-easy</strong>：每进程独立目录，测试分散创建</li>
+          <li><strong>mdtest-hard</strong>：所有进程共享单目录，测试锁竞争</li>
           <li>支持 create / stat / read / remove 全流程</li>
-          <li>可配置并发进程数、文件总量、目录深度</li>
         </ul>
       </div>
       <div class="card">
         <h3>评测对比设计</h3>
         <ul style="font-size: 0.86rem;">
-          <li><strong>对照组</strong>：相同硬件上的 ext4，使用同一 mdtest 参数</li>
+          <li><strong>对照组</strong>：相同硬件上的 ext4，同一 mdtest 参数</li>
           <li><strong>规模</strong>：10K / 100K / 1M 文件梯度测试</li>
           <li><strong>并发</strong>：1 / 2 / 4 / 8 进程扩展性测试</li>
-          <li><strong>指标</strong>：ops/sec（与 TableFS 论文数据直接对比）</li>
+          <li><strong>指标</strong>：ops/sec（与 TableFS 论文数据直接可比）</li>
         </ul>
       </div>
     </div>
@@ -1076,28 +1154,27 @@ tr:nth-child(even) { background: var(--bg-alt); }
 </section>
 
 <!-- ====================================================================
-     PART 4 — SECTION
+     PART 3 — SECTION
      ==================================================================== -->
-<section class="slide section-slide" data-slide="14 / 16">
+<section class="slide section-slide" data-slide="15 / 18">
   <div>
     <div style="font-size: 0.95rem; letter-spacing: 0.12em; opacity: 0.55; margin-bottom: 10px;">PART 3</div>
     <h2>总结与计划</h2>
-    <div class="section-sub">当前进展 · 后续规划 · 时间安排</div>
+    <div class="section-sub">当前进展 · 已知不足 · 后续规划</div>
   </div>
 </section>
 
 <!-- ====================================================================
-     SLIDE 15 — Progress & Plan
+     SLIDE 16 — Current Progress
      ==================================================================== -->
-<section class="slide" data-slide="15 / 16">
+<section class="slide" data-slide="16 / 18">
   <div class="slide-header">
-    <span class="tag">计划</span>
-    <h2 style="margin: 0;">当前进展与后续计划</h2>
+    <span class="tag">进展</span>
+    <h2 style="margin: 0;">当前实现进展</h2>
   </div>
 
   <div class="columns">
     <div class="col">
-      <h3>当前已完成</h3>
       <div class="stat-grid" style="grid-template-columns: 1fr 1fr;">
         <div class="stat-item">
           <div class="stat-val">10,000+</div>
@@ -1109,26 +1186,68 @@ tr:nth-child(even) { background: var(--bg-alt); }
         </div>
         <div class="stat-item">
           <div class="stat-val">22</div>
-          <div class="stat-lbl">FUSE 操作实现</div>
+          <div class="stat-lbl">FUSE 操作</div>
         </div>
         <div class="stat-item">
-          <div class="stat-val">92%</div>
-          <div class="stat-lbl">POSIX 符合率</div>
+          <div class="stat-val">5</div>
+          <div class="stat-lbl">Crate 模块</div>
         </div>
       </div>
 
-      <h3 style="margin-top: 16px;">主要完成内容</h3>
-      <ul style="font-size: 0.88rem;">
-        <li>文献调研与技术方案确定</li>
-        <li>5 个 Crate 的模块化架构搭建</li>
-        <li>RocksDB 3-CF 元数据存储引擎</li>
-        <li>PCC 事务 + Delta 增量更新机制</li>
-        <li>22 种 FUSE 文件操作完整实现</li>
-        <li>LRU 缓存 + 后台 Delta 压缩</li>
-        <li>fsck 一致性检查工具</li>
-        <li>POSIX 正确性测试通过 92%</li>
-      </ul>
+      <h3 style="margin-top: 14px;">已实现的 POSIX 文件操作</h3>
+      <table style="font-size: 0.82rem;">
+        <tr><th>类别</th><th>操作</th></tr>
+        <tr><td><strong>文件管理</strong></td><td>create, open, read, write, flush, fsync, release, mknod, fallocate</td></tr>
+        <tr><td><strong>属性操作</strong></td><td>getattr, setattr (chmod/chown/truncate/utimens), access, statfs</td></tr>
+        <tr><td><strong>目录操作</strong></td><td>mkdir, rmdir, readdir</td></tr>
+        <tr><td><strong>命名空间</strong></td><td>lookup, link, symlink, readlink, unlink, rename</td></tr>
+      </table>
     </div>
+    <div class="col">
+      <h3>已知不足与优化方向</h3>
+      <div class="card card-warn" style="margin-bottom: 10px;">
+        <h3>并发安全问题</h3>
+        <p style="font-size: 0.84rem; margin: 0;">
+          部分操作（如 deferred unlink 的 open handle 计数）使用 Mutex 保护，
+          在高并发下存在锁竞争。多线程同目录写入时 PCC 事务冲突率较高，需要优化锁粒度。
+        </p>
+      </div>
+      <div class="card card-warn" style="margin-bottom: 10px;">
+        <h3>并发性能待优化</h3>
+        <p style="font-size: 0.84rem; margin: 0;">
+          每次事务 commit 触发 WAL fsync，严重限制写入吞吐。
+          优化方向：<strong>WAL Group Commit</strong>（聚合多次 fsync 为一次）、
+          WriteBatch 批量聚合、LRU 缓存预热。
+        </p>
+      </div>
+      <div class="card card-warn" style="margin-bottom: 10px;">
+        <h3>FUSE 固有开销</h3>
+        <p style="font-size: 0.84rem; margin: 0;">
+          每次文件操作经历 用户态→内核→用户态 上下文切换（~3-5μs）。
+          这是 FUSE 架构的固有开销，可通过 FUSE 多线程 / splice 等方式部分缓解。
+        </p>
+      </div>
+      <div class="card card-warn">
+        <h3>数据存储简陋</h3>
+        <p style="font-size: 0.84rem; margin: 0;">
+          RawDiskDataStore 使用 <code>inode × max_file_size + offset</code> 稀疏寻址，
+          无空间回收、无 extent 管理。后续可引入 Chunk/Slice 模型优化。
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================================================================
+     SLIDE 17 — Timeline & Plan
+     ==================================================================== -->
+<section class="slide" data-slide="17 / 18">
+  <div class="slide-header">
+    <span class="tag">计划</span>
+    <h2 style="margin: 0;">后续计划与时间安排</h2>
+  </div>
+
+  <div class="columns">
     <div class="col">
       <h3>时间规划</h3>
       <div class="gantt">
@@ -1179,23 +1298,34 @@ tr:nth-child(even) { background: var(--bg-alt); }
         <span style="display: flex; align-items: center; gap: 4px;"><span style="width:12px;height:12px;background:#fff3ee;border:1px solid #fdb99b;border-radius:2px;display:inline-block;"></span> 进行中</span>
         <span style="display: flex; align-items: center; gap: 4px;"><span style="width:12px;height:12px;background:#e8effc;border:1px solid #c5d5f0;border-radius:2px;display:inline-block;"></span> 计划中</span>
       </div>
-
-      <h3 style="margin-top: 18px;">后续重点工作</h3>
-      <ul style="font-size: 0.88rem;">
-        <li><strong>3 月</strong>：完善 POSIX 测试覆盖，实现 Rust 性能压测工具</li>
-        <li><strong>4 月上旬</strong>：RocksDB WAL 调优、并发性能优化</li>
-        <li><strong>4 月中旬</strong>：完成整体 demo + 完整性能评测</li>
+    </div>
+    <div class="col">
+      <h3>后续重点工作</h3>
+      <ul style="font-size: 0.9rem;">
+        <li><strong>3 月</strong>：部署 mdtest + pjdfstest 完整评测流程，收集基线性能数据</li>
+        <li><strong>4 月上旬</strong>：并发安全修复、WAL Group Commit 优化、锁粒度细化</li>
+        <li><strong>4 月中旬</strong>：完成整体 demo + 优化后性能评测（对比 ext4）</li>
         <li><strong>4 月下旬 ~ 5 月</strong>：论文撰写（含与 TableFS/ext4 性能对比分析）</li>
         <li><strong>5 月中旬</strong>：论文答辩</li>
       </ul>
+
+      <h3 style="margin-top: 20px;">论文核心贡献（预期）</h3>
+      <div class="card card-highlight">
+        <ol style="font-size: 0.88rem; padding-left: 1.2em;">
+          <li>设计并实现了文件命名空间到 KV 存储的完整映射方案</li>
+          <li>借鉴 Mantle Delta Record 思想实现增量元数据更新机制</li>
+          <li>基于 RocksDB PCC 事务实现原子性元数据变更</li>
+          <li>使用 mdtest 标准工具评测并与 ext4、TableFS 对比</li>
+        </ol>
+      </div>
     </div>
   </div>
 </section>
 
 <!-- ====================================================================
-     SLIDE 16 — End / Q&A
+     SLIDE 18 — End / Q&A
      ==================================================================== -->
-<section class="slide end-slide" data-slide="16 / 16">
+<section class="slide end-slide" data-slide="18 / 18">
   <div>
     <h1 style="font-size: 2.6rem; margin-bottom: 20px;">谢谢！</h1>
     <p style="font-size: 1.1rem; opacity: 0.75; margin-bottom: 44px;">欢迎提问与讨论</p>
