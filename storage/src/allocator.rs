@@ -59,7 +59,7 @@ impl InodeAllocator {
     /// of synchronous writes on the hot allocation path.
     pub fn maybe_persist(&self, store: &dyn MetadataStore) -> FsResult<()> {
         let val = self.next.load(Ordering::Relaxed);
-        if val % PERSIST_INTERVAL == 0 {
+        if val.is_multiple_of(PERSIST_INTERVAL) {
             store.put(NEXT_INODE_KEY, &val.to_be_bytes())?;
         }
         Ok(())

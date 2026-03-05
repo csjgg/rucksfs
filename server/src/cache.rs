@@ -76,7 +76,7 @@ impl InodeFoldedCache {
         let idx = Self::shard_index(inode);
         let mut shard = self.shards[idx].lock();
         if let Some(val) = shard.get_mut(&inode) {
-            crate::delta::fold_deltas(val, &[delta.clone()]);
+            crate::delta::fold_deltas(val, std::slice::from_ref(delta));
         }
     }
 

@@ -130,6 +130,7 @@ where
 
     /// Create a new `MetadataServer` with a custom cache capacity and
     /// compaction configuration.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_config(
         metadata: Arc<M>,
         index: Arc<I>,

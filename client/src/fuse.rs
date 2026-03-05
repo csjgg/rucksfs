@@ -257,8 +257,8 @@ where
     ) {
         // Only support regular files. Other types (block/char devices,
         // sockets, FIFOs) are not implemented.
-        let file_type = mode & libc::S_IFMT as u32;
-        if file_type != libc::S_IFREG as u32 && file_type != 0 {
+        let file_type = mode & libc::S_IFMT;
+        if file_type != libc::S_IFREG && file_type != 0 {
             reply.error(EOPNOTSUPP);
             return;
         }
@@ -499,9 +499,9 @@ where
 #[cfg(target_os = "linux")]
 fn dir_entry_kind_to_file_type(kind: u32) -> FileType {
     let mt = kind & libc::S_IFMT;
-    if mt == libc::S_IFDIR as u32 {
+    if mt == libc::S_IFDIR {
         FileType::Directory
-    } else if mt == libc::S_IFLNK as u32 {
+    } else if mt == libc::S_IFLNK {
         FileType::Symlink
     } else {
         FileType::RegularFile

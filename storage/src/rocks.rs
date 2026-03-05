@@ -256,7 +256,7 @@ impl DirectoryIndex for RocksDirectoryIndex {
             .cf_handle(CF_DIR_ENTRIES)
             .ok_or_else(|| FsError::Io("CF 'dir_entries' not found".into()))?;
         let prefix = dir_entry_prefix(inode);
-        let iter = self.db.prefix_iterator_cf(&cf, &prefix);
+        let iter = self.db.prefix_iterator_cf(&cf, prefix.clone());
 
         let mut entries = Vec::new();
         for item in iter {
@@ -405,7 +405,7 @@ impl DeltaStore for RocksDeltaStore {
         for v in values {
             let seq = self.next_seq_inner(inode);
             let key = encode_delta_key(inode, seq);
-            batch.put_cf(&cf, &key, v);
+            batch.put_cf(&cf, key, v);
             assigned.push(seq);
         }
 
@@ -423,7 +423,7 @@ impl DeltaStore for RocksDeltaStore {
             .ok_or_else(|| FsError::Io("CF 'delta_entries' not found".into()))?;
 
         let prefix = delta_prefix(inode);
-        let iter = self.db.prefix_iterator_cf(&cf, &prefix);
+        let iter = self.db.prefix_iterator_cf(&cf, prefix);
 
         let mut result = Vec::new();
         for item in iter {
@@ -443,7 +443,7 @@ impl DeltaStore for RocksDeltaStore {
             .ok_or_else(|| FsError::Io("CF 'delta_entries' not found".into()))?;
 
         let prefix = delta_prefix(inode);
-        let iter = self.db.prefix_iterator_cf(&cf, &prefix);
+        let iter = self.db.prefix_iterator_cf(&cf, prefix);
 
         let mut result = Vec::new();
         for item in iter {
@@ -464,7 +464,7 @@ impl DeltaStore for RocksDeltaStore {
 
         // Scan and delete all delta entries for the given inode.
         let prefix = delta_prefix(inode);
-        let iter = self.db.prefix_iterator_cf(&cf, &prefix);
+        let iter = self.db.prefix_iterator_cf(&cf, prefix);
 
         let mut batch = WriteBatchWithTransaction::<true>::default();
         for item in iter {
@@ -500,7 +500,7 @@ impl DeltaStore for RocksDeltaStore {
             .ok_or_else(|| FsError::Io("CF 'delta_entries' not found".into()))?;
 
         let prefix = delta_prefix(inode);
-        let iter = self.db.prefix_iterator_cf(&cf, &prefix);
+        let iter = self.db.prefix_iterator_cf(&cf, prefix);
 
         let mut result = Vec::new();
         for item in iter {
@@ -629,13 +629,12 @@ impl<'db> AtomicWriteBatch for RocksWriteBatch<'db> {
         let prefix = dir_entry_prefix(parent);
         // Use transaction-level iterator so the read participates in
         // the transaction's snapshot, avoiding TOCTOU races.
-        let iter = self.txn.prefix_iterator_cf(&cf, &prefix);
-        for item in iter {
+        let mut iter = self.txn.prefix_iterator_cf(&cf, prefix.clone());
+        if let Some(item) = iter.next() {
             let (k, _) = item.map_err(|e| FsError::Io(format!("RocksDB txn iterator: {}", e)))?;
             if k.starts_with(&prefix) {
                 return Ok(false);
             }
-            break;
         }
         Ok(true)
     }
