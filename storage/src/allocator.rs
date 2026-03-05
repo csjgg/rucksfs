@@ -18,6 +18,9 @@ pub const ROOT_INODE: Inode = 1;
 /// First allocatable inode (0 and 1 are reserved).
 const FIRST_ALLOC_INODE: u64 = 2;
 
+/// Persist every N allocations instead of every one.
+const PERSIST_INTERVAL: u64 = 64;
+
 /// Thread-safe inode allocator backed by an `AtomicU64`.
 pub struct InodeAllocator {
     next: AtomicU64,
@@ -47,6 +50,19 @@ impl InodeAllocator {
     pub fn persist(&self, store: &dyn MetadataStore) -> FsResult<()> {
         let val = self.next.load(Ordering::Relaxed);
         store.put(NEXT_INODE_KEY, &val.to_be_bytes())
+    }
+
+    /// Persist the counter only every [`PERSIST_INTERVAL`] allocations.
+    ///
+    /// On crash, up to `PERSIST_INTERVAL - 1` inode numbers may be skipped
+    /// (harmless — they just become unused gaps).  This reduces the number
+    /// of synchronous writes on the hot allocation path.
+    pub fn maybe_persist(&self, store: &dyn MetadataStore) -> FsResult<()> {
+        let val = self.next.load(Ordering::Relaxed);
+        if val % PERSIST_INTERVAL == 0 {
+            store.put(NEXT_INODE_KEY, &val.to_be_bytes())?;
+        }
+        Ok(())
     }
 
     /// Restore the allocator state from a [`MetadataStore`].
@@ -154,5 +170,35 @@ mod tests {
         store.put(NEXT_INODE_KEY, &[1, 2, 3]).unwrap(); // wrong length
         let result = InodeAllocator::load(&store);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn maybe_persist_batches_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = open_rocks_db(tmp.path().join("meta.db")).unwrap();
+        let store = RocksMetadataStore::new(Arc::clone(&db));
+
+        let alloc = InodeAllocator::new();
+
+        // Allocate until we hit PERSIST_INTERVAL boundary.
+        // Start at 2, persist at next multiple of 64.
+        for _ in 0..62 {
+            alloc.alloc();
+            alloc.maybe_persist(&store).unwrap();
+        }
+        // After 62 allocs, next = 64.
+        assert_eq!(alloc.current(), 64);
+
+        // At 64, maybe_persist should write.
+        alloc.maybe_persist(&store).unwrap();
+        let restored = InodeAllocator::load(&store).unwrap();
+        assert_eq!(restored.current(), 64);
+
+        // One more alloc → 65, maybe_persist should NOT write.
+        alloc.alloc();
+        alloc.maybe_persist(&store).unwrap();
+        // The stored value should still be 64 (not 65).
+        let restored2 = InodeAllocator::load(&store).unwrap();
+        assert_eq!(restored2.current(), 64);
     }
 }
