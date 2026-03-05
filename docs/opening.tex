@@ -1,0 +1,346 @@
+\documentclass[supercite]{Hust-undergraduate-kaiti}
+
+\title{XXXX设计与实现}
+\school{计算机科学与技术学院}
+\author{XXXX}
+\classnum{XXXX}
+\stunum{U2019114514}
+\instructor{XXX} % 李平、孙伟平、范晔斌、陈加忠
+\usepackage{zhnumber} % change section number to chinese
+\usepackage{tikz}
+\usetikzlibrary{mindmap,trees}
+\usepackage{algorithm, multirow}
+\usepackage{algpseudocode}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{framed}
+\usepackage{mathtools}
+\usepackage{subcaption}
+\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{tabu}
+\usepackage{xltxtra} %提供了针对XeTeX的改进并且加入了XeTeX的LOGO, 自动调用xunicode宏包(提供Unicode字符宏)
+\usepackage{bm}
+\usepackage{longtable}
+\usepackage{tikz}
+\usepackage{pdfpages}
+\usepackage{tikzscale}
+\usepackage{pgfplots}
+%\usepackage{enumerate}
+\usepackage{graphicx}
+\pgfplotsset{compat=1.16}
+
+\setCJKmainfont[
+    BoldFont={FandolHei},
+    ItalicFont={FandolKai}
+]{FandolSong}
+\setmainfont{Times New Roman}
+
+\newcommand{\cfig}[3]{
+  \begin{figure}[htb]
+    \centering
+    \includegraphics[width=#2\textwidth]{images/#1.tikz}
+    \caption{#3}
+    \label{fig:#1}
+  \end{figure}
+}
+
+\newcommand{\sfig}[3]{
+  \begin{subfigure}[b]{#2\textwidth}
+    \includegraphics[width=\textwidth]{images/#1.tikz}
+    \caption{#3}
+    \label{fig:#1}
+  \end{subfigure}
+}
+
+\newcommand{\xfig}[3]{
+  \begin{figure}[htb]
+    \centering
+    #3
+    \caption{#2}
+    \label{fig:#1}
+  \end{figure}
+}
+
+\newcommand{\rfig}[1]{\autoref{fig:#1}}
+\newcommand{\ralg}[1]{\autoref{alg:#1}}
+\newcommand{\rthm}[1]{\autoref{thm:#1}}
+\newcommand{\rlem}[1]{\autoref{lem:#1}}
+\newcommand{\reqn}[1]{\autoref{eqn:#1}}
+\newcommand{\rtbl}[1]{\autoref{tbl:#1}}
+
+\algnewcommand\Null{\textsc{null }}
+\algnewcommand\algorithmicinput{\textbf{Input:}}
+\algnewcommand\Input{\item[\algorithmicinput]}
+\algnewcommand\algorithmicoutput{\textbf{Output:}}
+\algnewcommand\Output{\item[\algorithmicoutput]}
+\algnewcommand\algorithmicbreak{\textbf{break}}
+\algnewcommand\Break{\algorithmicbreak}
+\algnewcommand\algorithmiccontinue{\textbf{continue}}
+\algnewcommand\Continue{\algorithmiccontinue}
+\algnewcommand{\LeftCom}[1]{\State $\triangleright$ #1}
+
+
+\newtheorem{thm}{定理}[section]
+\newtheorem{lem}{引理}[section]
+\renewcommand {\thefigure} {\arabic{figure}}
+\colorlet{shadecolor}{black!15}
+
+\theoremstyle{definition}
+\newtheorem{alg}{算法}[section]
+\def\thmautorefname~#1\null{定理~#1~\null}
+\def\lemautorefname~#1\null{引理~#1~\null}
+\def\algautorefname~#1\null{算法~#1~\null}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage[skins]{tcolorbox}
+\tcbuselibrary{breakable}
+\newtcolorbox{abox}[1][]{enhanced,
+	fonttitle = \heiti \large \bfseries,% 标题字体设置
+	colbacktitle =black,% 标题背景颜色
+	coltitle=white,% 标题字体颜色
+	% halign title=center,% 标题对齐方式
+	attach boxed title to top left = {yshift = -5pt},
+	%	将标题以box 形式放在文本框左上角，并向下移动5pt	
+	%----------正文字体--------
+	fontupper = \kaishu,%正文字体设置
+	%colback = white,%正文背景颜色设置
+	%---------边框设置---------
+	arc = 4pt,%正文边框边角弧度
+	%	boxed title style={arc=0pt},%标题框边角弧度
+	colframe=black,%边框颜色设置
+	toprule  = 1pt,%取消上边框
+	rightrule = 1pt,%取消下边框
+	%---------调整字体位置------
+	top = 10pt,%增大正文文本与上边框距离
+	%---------设置标题为默认参数，不影响其他参数的设置
+	title=#1,
+	breakable
+}
+\newcommand{\tabincell}[2]{\begin{tabular}{@{}#1@{}}#2\end{tabular}}  
+\begin{document}
+
+\maketitle
+\clearpage
+
+\pagenumbering{Roman}
+
+\pagenumbering{arabic}
+\section{课题来源、目的及意义}
+\subsection{课题来源}
+
+本课题来源于国家自然科学基金项目"面向新型混合存储的高效异构融合系统架构及机制"（62172175）以及国家重点研发计划"ZB级海量冷数据存储架构及高效存储管理系统"（2024YFB4505105）。
+
+随着云计算、大数据和人工智能应用的快速发展，现代存储系统面临前所未有的元数据管理压力。据Meta公司2020年公开的数据中心工作负载分析，元数据操作占据了超过50\%的总I/O操作量；在海量小文件场景下（如AI训练数据集、容器镜像、日志采集等），元数据开销更是高达总延迟的40\%\cite{ref_bfo}。传统文件系统（ext4、XFS等）的元数据管理方式已难以满足高并发、低延迟的性能需求。近年来，JuiceFS、CephFS、Hadoop Ozone等工业级系统纷纷采用键值（Key-Value, KV）存储引擎管理元数据，证明了这一技术路线的可行性。本课题旨在设计并实现文件元数据的键值对存储方案和相应的POSIX文件操作函数。
+
+\subsection{课题目的}
+
+本课题的核心目的是：设计并实现文件元数据的键值对存储和相应的主要POSIX文件操作函数。具体而言包含以下三个层面：
+
+（1）设计文件命名空间到KV存储的映射方案。将文件系统的层级命名空间（目录树、inode属性、目录条目等）高效地映射到KV存储的扁平键空间上。
+
+（2）实现标准POSIX文件操作语义。在KV存储映射基础上，实现lookup、getattr、setattr、readdir、create、mkdir、unlink、rmdir、rename、open、read、write等标准文件操作，支持通过Linux FUSE进行挂载和透明访问。
+
+（3）构建可运行的原型系统。基于Rust语言实现一个用户态文件系统RucksFS，在真实Linux环境中运行和测试，并在实际硬件平台上评价整体性能。
+
+\subsection{课题意义}
+
+\subsubsection{理论意义}
+
+传统文件系统使用B-tree或B+tree管理元数据，在大量小文件创建、删除等场景下存在严重的随机I/O瓶颈。以ext4为例，一次create操作需修改inode位图、inode表、目录HTree、Journal等4$\sim$6个分散的磁盘区域，全部为随机写。而LSM-tree（Log-Structured Merge Tree）作为KV存储的核心数据结构，将随机写入转换为顺序追加写入，理论上可大幅提升元数据写入性能\cite{ref_lsm}。本课题通过实际系统验证这一理论优势，为文件系统元数据管理提供新的技术路径。
+
+\subsubsection{实践意义}
+
+当前工业界对基于KV存储的文件元数据管理有强烈需求，但这些系统设计复杂度极高，缺乏对"KV存储如何承载POSIX语义"这一核心问题的系统性分析。本课题通过从零构建一个完整原型系统，为理解和优化KV元数据管理提供参考实现。
+
+\section{国内外研究现况及发展趋势}
+\subsection{基于KV存储的文件元数据管理}
+
+利用KV存储管理文件系统元数据的研究始于2013年卡内基梅隆大学的TableFS系统，此后十余年间形成了从学术原型到超大规模生产系统的完整技术演进链。
+
+\subsubsection{学术验证阶段（2013—2017）}
+
+TableFS\cite{ref_tablefs}首次将LevelDB嵌入本地文件系统管理全量元数据，100万文件创建比ext4快5倍，证明了KV存储替代传统文件系统管理元数据的可行性。IndexFS\cite{ref_indexfs}将这一理念扩展到分布式场景，通过GIGA+哈希分裂算法支持128个MDS节点的水平扩展。LocoFS\cite{ref_locofs}通过目录元数据与文件属性的松耦合解聚合，将KV引擎利用率从18\%提升到93\%。
+
+\subsubsection{工业落地阶段（2018—2020）}
+
+JuiceFS使用Redis/TiKV管理元数据，在生产环境中广泛验证了KV元数据管理的可行性。Hadoop Ozone用三级RocksDB突破了HDFS 10亿文件限制。Yang等人的BFO（Batch-File Operations）\cite{ref_bfo}研究深入分析了批量文件操作中的元数据开销，发现80\%的小文件操作目标小于32字节，元数据开销占总延迟的40\%，这一发现直接启发了本课题中WriteBatch批量提交机制的设计。
+
+\subsubsection{极致优化阶段（2023—2025）}
+
+SingularFS\cite{ref_singularfs}证明精心优化的单机元数据服务器性能可超过多节点分布式方案，单MDS达8.36M IOPS，打破了"必须分布式"的思维定势——这对本课题的启示是，在走向分布式前应充分挖掘单机性能潜力。Mantle\cite{ref_mantle}提出Delta Record追加更新与IndexNode内存缓存层，避免高频属性的读-改-写模式，吞吐提升最高115倍。本课题的Delta增量更新机制直接受Mantle启发。
+
+\subsection{发展趋势}
+
+综合以上分析，文件元数据KV存储技术呈现以下趋势：（1）事务化与原子性保证成为标配，从简单KV读写演进到WriteBatch局部事务保证；（2）元数据与数据分离架构成为主流，实现独立优化和扩展；（3）增量更新替代读-改-写，通过追加式Delta记录减少写放大；（4）单机性能挖掘仍有巨大空间，SingularFS等系统证明单机可达十亿级文件管理。
+
+\section{研究内容与技术方案}
+
+\subsection{预计达到的目标}
+
+能够通过标准POSIX文件接口进行文件/目录访问，并进一步优化整体性能。具体包括：
+
+（1）完成文件命名空间到KV存储的完整映射设计与实现，覆盖inode元数据、目录条目、增量日志等核心概念。
+
+（2）实现22种FUSE文件操作，覆盖create、mkdir、lookup、getattr、setattr、readdir、unlink、rmdir、rename、open、read、write、flush、fsync、link、symlink、readlink、statfs、access、mknod、fallocate、release等标准操作。
+
+（3）构建事务化元数据管理引擎，所有元数据写操作具备原子性保证。
+
+（4）在实际硬件平台上进行性能测试和评价，对比KV存储方案与ext4等传统文件系统的性能差异。
+
+\subsection{关键理论和技术}
+
+\subsubsection{LSM-tree理论}
+
+LSM-tree\cite{ref_lsm}是RocksDB\cite{ref_rocksdb}的核心数据结构，写入先进入内存MemTable，满后刷盘为有序SSTable文件，后台Compaction合并多层SSTable。其核心优势在于将随机写转换为顺序写，而元数据操作以写入为主（创建、修改占60\%以上），单个inode体积小（约100字节）适合MemTable聚合，目录遍历可利用SSTable有序性进行前缀扫描。
+
+\subsubsection{层级KV映射方案}
+
+将文件系统层级命名空间映射到扁平KV空间有两种主流方案：扁平KV（完整路径做Key）和层级KV（parent\_inode + name做Key）。本课题采用层级方案，使用两个Column Family分别存储inode属性和目录条目。其核心优势在于：rename目录为$O(1)$操作（扁平方案为$O(N)$）、readdir可精确前缀扫描、Key存储紧凑（固定8字节加文件名）。
+
+\subsubsection{RocksDB PCC事务}
+
+元数据操作（如create、rename）通常涉及多个KV键的联合修改，需要事务保证原子性。本课题采用RocksDB的悲观并发控制（Pessimistic Concurrency Control, PCC）事务模式，所有写操作先缓存在WriteBatch中，commit时一次性原子写入。跨Column Family同样保证原子性。通过GetForUpdate获取行级排他锁，加锁失败立即返回Busy，封装execute\_with\_retry自动重试。
+
+\subsubsection{Delta增量更新}
+
+受Mantle\cite{ref_mantle}启发，对于高频修改的父目录属性（nlink、mtime、ctime），不执行传统的加锁-读-改-写路径，而是向独立的delta\_entries列族追加5$\sim$9字节的增量记录。读取时将基础值与Delta折叠合并（Fold-on-Read），后台Compaction Worker定期将Delta合并回基础值。这一设计将父目录更新从事务关键路径中移除，消除同目录操作的串行化瓶颈。
+
+\subsubsection{FUSE技术}
+
+FUSE（Filesystem in Userspace）是Linux内核提供的用户态文件系统框架，通过/dev/fuse设备将VFS调用转发到用户进程。本课题使用Rust的fuser crate\cite{ref_fuser}实现FUSE适配层，将系统的VfsOps接口暴露为标准Linux文件系统挂载点。
+
+\subsection{主要研究内容}
+
+（1）\textbf{调研现有采用键值对存储管理元数据的文件系统现状。}系统性研读TableFS、IndexFS、LocoFS、SingularFS、BFO、Mantle等代表性工作，分析各系统的键空间设计、编码格式、查询效率和性能表现，建立技术全景图。
+
+（2）\textbf{设计并实现采用键值对管理文件元数据的方法，文件命名空间到键值对存储的映射。}设计5类键编码方案（Inode键、目录条目键、Delta条目键、Chunk条目键、系统键），采用类型前缀加大端序编码策略，保证数值序等于字典序。通过RocksDB的Column Family机制将不同类型的元数据隔离存储，实现高效的前缀扫描和范围查询。
+
+（3）\textbf{设计并实现常用POSIX文件存取接口及函数，内部调度键值对存储接口存取其元数据。}实现完整的POSIX文件操作语义，每个写操作遵循begin\_txn $\rightarrow$ mutate $\rightarrow$ commit的事务模式。重点解决以下技术难点：create的目录条目存在性检查与原子插入；rename的跨目录原子移动（按ID排序加锁防死锁）；rmdir的非空检查与TOCTOU竞态防护；unlink的nlink引用计数管理。所有父目录属性更新通过Delta机制在事务外追加完成。
+
+（4）\textbf{在实际硬件平台上测试和评价整体性能。}设计包含三个层次的测试方案：使用pjdfstest标准套件验证POSIX正确性；使用Rust单元/集成测试覆盖正常和异常路径；使用自研元数据压测工具和mdtest标准工具进行性能评测，在10K/100K/1M文件梯度和1/2/4/8线程并发下与ext4对比。
+
+\subsection{完成课题的方案及主要措施}
+
+\subsubsection{总体方案}
+
+系统使用Rust语言开发，采用Cargo Workspace组织为多个独立crate，实现关注点分离。整体架构如图\ref{fig:overall}所示，为单进程FUSE文件系统：用户程序通过POSIX syscall进入内核VFS，经FUSE内核模块转发至/dev/fuse设备，再由用户态RucksFS进程处理。RucksFS内部分为FuseClient（解析FUSE请求）、VfsCore（元数据/数据路由）、MetadataServer（事务化元数据操作、Delta增量、LRU缓存、后台压缩）、DataServer（文件数据I/O）四个层次，底层分别对接RocksDB（元数据存储）和RawDisk（数据存储）。通过MetadataOps / DataOps / VfsOps三层Trait抽象，存储后端可独立替换。
+
+\begin{figure}[htb]
+    \centering
+    \includegraphics[width=0.85\textwidth]{overall.png}
+    \caption{RucksFS系统整体架构}
+    \label{fig:overall}
+\end{figure}
+
+\subsubsection{主要措施}
+
+（1）\textbf{迭代式开发。}采用增量开发模式：先实现内存后端验证POSIX语义正确性，再切换到RocksDB后端验证持久化和性能，最后实现FUSE集成进行端到端验证。
+
+（2）\textbf{测试驱动。}为每个核心模块编写充分的单元测试和集成测试。当前已完成10,000+行Rust代码和228个自动化测试。
+
+（3）\textbf{性能基准。}设计标准化的元数据基准测试套件，在统一硬件环境下与ext4进行对比测试。
+
+\section{课题研究进度安排}
+
+本课题的研究进度安排如表\ref{tbl:schedule}所示。
+
+\begin{table}[htb]
+\centering
+\caption{课题研究进度安排}
+\label{tbl:schedule}
+\begin{tabular}{|c|c|p{9cm}|}
+\hline
+\textbf{阶段} & \textbf{时间} & \textbf{工作内容} \\
+\hline
+第一阶段 & 第7学期 11—12月 & 文献调研：研读TableFS、IndexFS、LocoFS、SingularFS、BFO、Mantle等论文；撰写技术调研报告；明确系统架构设计 \\
+\hline
+第二阶段 & 第7学期 1—2月 & 核心实现（一）：完成KV编码方案设计与实现、RocksDB存储后端、MetadataServer基础框架、基本POSIX操作（create/mkdir/lookup/getattr/readdir/unlink/rmdir） \\
+\hline
+第三阶段 & 第8学期 2—3月 & 核心实现（二）：完成Delta增量更新与后台Compaction、rename/setattr等复杂操作、PCC事务化元数据管理、FUSE客户端集成 \\
+\hline
+第四阶段 & 第8学期 3—4月 & 测试与优化：部署pjdfstest正确性验证、自研压测工具和mdtest性能评测、并发安全修复、WAL写入优化、锁粒度细化 \\
+\hline
+第五阶段 & 第8学期 4—5月 & 论文撰写：整理实验数据、完成与ext4的性能对比分析、撰写毕业论文、准备答辩材料 \\
+\hline
+\end{tabular}
+\end{table}
+
+\section{主要参考文献}
+
+\begin{thebibliography}{99}
+
+\bibitem{ref_bfo}Yang Yang, Qiang Cao, Li Yang, et al. Batch-File Operations to Optimize Massive Files Accessing: Analysis, Design, and Application[J]. ACM Transactions on Storage, 2020, 16(3): 1-33.
+
+\bibitem{ref_singularfs}Jing Liu, Andrea Arpaci-Dusseau, Remzi Arpaci-Dusseau, et al. SingularFS: A Billion-Scale Distributed File System Using a Single Metadata Server[C]. Proceedings of the 2023 USENIX Annual Technical Conference (ATC'23), 2023.
+
+\bibitem{ref_fetchbpf}Xuechun Cao, Shaurya Patel, Soo-Yee Lim, et al. FetchBPF: Customizable Prefetching Policies in Linux with eBPF[C]. Proceedings of the 2024 USENIX Annual Technical Conference (ATC'24), 2024.
+
+\bibitem{ref_fbmm}Sandeep Kumar, Aravinda Prasad, et al. FBMM: Making Memory Management Extensible With Filesystems[C]. Proceedings of the 2024 USENIX Annual Technical Conference (ATC'24), 2024.
+
+\bibitem{ref_tablefs}Kai Ren, Garth Gibson. TableFS: Enhancing Metadata Efficiency in the Local File System[C]. Proceedings of the 2013 USENIX Annual Technical Conference (ATC'13), 2013.
+
+\bibitem{ref_indexfs}Kai Ren, Qing Zheng, Swapnil Patil, et al. IndexFS: Scaling File System Metadata Performance with Stateless Caching and Bulk Insertion[C]. Proceedings of the IEEE/ACM International Conference on High Performance Computing, Networking, Storage and Analysis (SC'14), 2014.
+
+\bibitem{ref_locofs}Siyang Li, Youyou Lu, Jiwu Shu, et al. LocoFS: A Loosely-Coupled Metadata Service for Distributed File Systems[C]. Proceedings of the IEEE/ACM International Conference on High Performance Computing, Networking, Storage and Analysis (SC'17), 2017.
+
+\bibitem{ref_mantle}Wenhao Lv, Qiang Cao, et al. Mantle: A Scalable Hierarchical Namespace Service for Object Storage[C]. Proceedings of the ACM SIGOPS Symposium on Operating Systems Principles (SOSP'25), 2025.
+
+\bibitem{ref_rocksdb}Facebook Inc. RocksDB: A Persistent Key-Value Store for Fast Storage Environments[EB/OL]. https://rocksdb.org, 2013.
+
+\bibitem{ref_lsm}Patrick O'Neil, Edward Cheng, Dieter Gawlick, et al. The Log-Structured Merge-Tree (LSM-Tree)[J]. Acta Informatica, 1996, 33(4): 351-385.
+
+\bibitem{ref_fuser}libfuse Contributors. fuser: Filesystem in Userspace (FUSE) for Rust[EB/OL]. https://github.com/cberner/fuser, 2020.
+
+\end{thebibliography}
+\clearpage
+\begin{comment}
+%\centerline{\zihao{4} \heiti 华中科技大学本科生毕业设计（论文）开题报告评审表}
+%\thispagestyle{empty}
+% Please add the following required packages to your document preamble:
+% \usepackage{multirow}
+% \usepackage[table,xcdraw]{xcolor}
+% If you use beamer only pass "xcolor=table" option, i.e. \documentclass[xcolor=table]{beamer}
+%
+%\begin{table}[htbp]
+
+%\resizebox{150mm}{93mm}{
+%\setlength{\tabcolsep}{10mm}{
+
+%\begin{tabular}{|cccccc|}
+%\hline
+%\multicolumn{1}{|c|}{\textbf{姓名}} & \multicolumn{1}{c|}{\textbf{}} & \multicolumn{1}{c|}{\textbf{学号}} & \multicolumn{1}{c|}{\textbf{}} & \multicolumn{1}{c|}{\textbf{指导教师}} & \textbf{} \\ \hline
+%\multicolumn{2}{|c|}{\textbf{院（系）专业}}                              & \multicolumn{4}{c|}{\textbf{}}                                                                                     \\ \hline
+%\multicolumn{6}{|c|}{\textbf{指导教师评语}}       \\                                                                            \multicolumn{6}{|l|}{{1.学生前期表现情况。}}    \\
+
+%\multicolumn{6}{|l|}{{2.是否具备开始设计（论文）条件？是否同意开始设计（论文）？ }}   \\
+%\multicolumn{6}{|l|}{{3.不足与建议。}}  \\
+%\hline
+%\multicolumn{6}{|c|}{{\color[HTML]{FF0000} }}                                                                                                                                           \\
+%\multicolumn{6}{|c|}{{\color[HTML]{FF0000} }}                                                                                                                                           \\
+\multicolumn{6}{|c|}{{\color[HTML]{FF0000} }}                                                                                                                                           \\
+\multicolumn{6}{|c|}{{\color[HTML]{FF0000} }}                                                                                                                                           \\
+\multicolumn{6}{|c|}{{\color[HTML]{FF0000} }}                                                                                                                                           \\
+\multicolumn{6}{|c|}{{\color[HTML]{FF0000} }}                                                                                                                                                                                                                    \\
+\multicolumn{6}{|c|}{{\color[HTML]{FF0000} }}                                                                                                                                           \\
+\multicolumn{6}{|c|}{{\color[HTML]{FF0000} }}                                                                                                                                           \\
+\multicolumn{6}{|c|}{\multirow{-15}{*}{{\color[HTML]{FF0000} }}}                                                                                                                        \\ \hline
+\multicolumn{6}{|l|}{}                                                                                                                                                                  \\
+\multicolumn{6}{|l|}{\multirow{-2}{*}{\qquad \qquad \qquad \qquad \qquad \qquad \qquad \qquad 指导教师（签名）：}}                                                                                                                                       \\ 
+\multicolumn{6}{|r|}{年\qquad 月\qquad 日}                                                                                                                                                       \\ \hline
+\multicolumn{6}{|c|}{\textbf{教研室（系、所）或开题报告答辩小组审核意见}}                                                                                                                                    \\ \hline
+\multicolumn{6}{|c|}{{\color[HTML]{FF0000} }}                                                                                                                                           \\
+\multicolumn{6}{|c|}{{\color[HTML]{FF0000} }}                                                                                                                                           \\
+\multicolumn{6}{|c|}{{\color[HTML]{FF0000} }}                                                                                                                                           \\
+\multicolumn{6}{|c|}{{\color[HTML]{FF0000} }}                                                                                                                                           \\
+\multicolumn{6}{|c|}{\multirow{-5}{*}{{\color[HTML]{FF0000} }}}                                                                                                                         \\ \hline
+\multicolumn{6}{|l|}{}                                                                                                                                                                  \\
+\multicolumn{6}{|l|}{\multirow{-2}{*}{教研室（系、所）或开题报告答辩小组负责人（签名）：}}                                                                                                                       \\ 
+\multicolumn{6}{|r|}{年\qquad 月\qquad 日}                                                                                                                                                       \\ \hline
+\end{tabular}
+}
+}
+
+\end{table}
+\end{comment}
+\includepdf[]{认定表.pdf}
+\end{document}
