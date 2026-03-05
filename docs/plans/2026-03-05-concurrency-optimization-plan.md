@@ -98,6 +98,120 @@ git commit -m "feat(storage): expose next_seq on DeltaStore trait"
 
 ---
 
+### Task 2b: Add `scan_deltas_with_keys` to DeltaStore trait
+
+**Rationale:** The current compaction code calls `scan_deltas` (values only) and then `scan_delta_keys` (keys only) as two separate scans. Between the two scans, a concurrent `append_deltas` can insert a new delta that appears in the second scan but not the first — causing compaction to delete a delta it never folded. This is a real correctness bug (though after Task 4 moves nlink into transactions, it only affects timestamps). Fix: single scan returning `(key, value)` pairs.
+
+**Files:**
+- Modify: `storage/src/lib.rs:20-36` (DeltaStore trait — add method)
+- Modify: `storage/src/rocks.rs:419-457` (RocksDeltaStore — implement)
+- Modify: `server/src/compaction.rs:134-187` (force_compact_inode — use new API)
+
+**Step 1: Add `scan_deltas_with_keys` to the DeltaStore trait**
+
+In `storage/src/lib.rs`, add to the `DeltaStore` trait:
+
+```rust
+/// Scan all pending deltas for `inode`, returning `(key, value)` pairs
+/// from a single consistent iterator pass. Used by compaction to ensure
+/// the set of keys deleted matches exactly the set of values folded.
+fn scan_deltas_with_keys(&self, inode: Inode) -> FsResult<Vec<(Vec<u8>, Vec<u8>)>>;
+```
+
+**Step 2: Implement in RocksDeltaStore**
+
+In `storage/src/rocks.rs`, add to the `DeltaStore` impl block:
+
+```rust
+fn scan_deltas_with_keys(&self, inode: Inode) -> FsResult<Vec<(Vec<u8>, Vec<u8>)>> {
+    let cf = self
+        .db
+        .cf_handle(CF_DELTA_ENTRIES)
+        .ok_or_else(|| FsError::Io("CF 'delta_entries' not found".into()))?;
+
+    let prefix = delta_prefix(inode);
+    let iter = self.db.prefix_iterator_cf(&cf, &prefix);
+
+    let mut result = Vec::new();
+    for item in iter {
+        let (k, v) = item.map_err(|e| FsError::Io(format!("RocksDB iterator: {}", e)))?;
+        if !k.starts_with(&prefix) {
+            break;
+        }
+        result.push((k.to_vec(), v.to_vec()));
+    }
+    Ok(result)
+}
+```
+
+**Step 3: Update `force_compact_inode` to use single-pass scan**
+
+In `server/src/compaction.rs`, replace the two separate scans in `force_compact_inode` (lines 137 and 162) with:
+
+```rust
+pub fn force_compact_inode(&self, inode: Inode) -> FsResult<bool> {
+    // 1. Single-pass scan: get (key, value) pairs from one iterator.
+    let kv_pairs = self.delta_store.scan_deltas_with_keys(inode)?;
+    if kv_pairs.is_empty() {
+        return Ok(false);
+    }
+
+    // 2. Begin transaction and lock the base inode.
+    let mut batch = self.storage_bundle.begin_write();
+    let key = encode_inode_key(inode);
+    let mut base = match batch.get_for_update_inode(&key)? {
+        Some(bytes) => InodeValue::deserialize(&bytes)?,
+        None => return Ok(false),
+    };
+
+    // 3. Fold values from the same scan.
+    let ops: Vec<DeltaOp> = kv_pairs
+        .iter()
+        .filter_map(|(_, v)| DeltaOp::deserialize(v).ok())
+        .collect();
+    delta::fold_deltas(&mut base, &ops);
+
+    // 4. Write merged inode + delete exactly the keys we folded.
+    batch.push(BatchOp::PutInode {
+        key: key.clone(),
+        value: base.serialize(),
+    });
+    for (dk, _) in &kv_pairs {
+        batch.push(BatchOp::DeleteDelta { key: dk.clone() });
+    }
+
+    // 5. Commit.
+    match batch.commit() {
+        Ok(()) => {}
+        Err(rucksfs_core::FsError::TransactionConflict) => {
+            return Ok(false);
+        }
+        Err(e) => return Err(e),
+    }
+
+    // 6. Invalidate cache so the next read picks up the fresh base.
+    self.cache.invalidate(inode);
+
+    Ok(true)
+}
+```
+
+Note: This also removes the redundant `clear_deltas` call (previously Task 5), since we now delete exactly the keys we scanned. New deltas appended after our scan are safe — they have different keys and will be folded in a future compaction round.
+
+**Step 4: Run tests**
+
+Run: `cargo test -p rucksfs-server`
+Expected: All compaction tests pass
+
+**Step 5: Commit**
+
+```bash
+git add storage/src/lib.rs storage/src/rocks.rs server/src/compaction.rs
+git commit -m "fix(storage,server): single-pass delta scan to prevent compaction race"
+```
+
+---
+
 ### Task 3: Rewrite `InodeFoldedCache` as `ShardedInodeCache`
 
 **Files:**
@@ -439,52 +553,9 @@ git commit -m "fix(server): move nlink deltas into transaction for crash atomici
 
 ---
 
-### Task 5: Remove redundant `clear_deltas` in compaction
+### Task 5: ~~Remove redundant `clear_deltas` in compaction~~ (MERGED into Task 2b)
 
-**Files:**
-- Modify: `server/src/compaction.rs:180-181`
-
-**Step 1: Remove the redundant call**
-
-In `force_compact_inode` at line 180-181, the transaction already deletes all delta keys via `BatchOp::DeleteDelta`. The subsequent `clear_deltas` call is a redundant scan+delete pass.
-
-Replace:
-```rust
-// 6. Update in-memory state after successful commit.
-let _ = self.delta_store.clear_deltas(inode);
-```
-
-With:
-```rust
-// 6. Reset in-memory delta sequence counter after commit.
-// The transaction already deleted all delta keys from RocksDB.
-// We only need to reset the in-memory seq counter.
-```
-
-However, the in-memory seq counter in `RocksDeltaStore` still needs to be reset. We need to either:
-- Add a `reset_seq` method to `DeltaStore` trait, or
-- Accept that the seq counter will keep incrementing (harmless — sequence numbers don't need to be contiguous).
-
-**Decision:** Accept non-contiguous sequence numbers. Remove the `clear_deltas` call entirely. The delta keys were already deleted by the transaction. The seq counter incrementing past deleted entries is harmless.
-
-```rust
-// 6. Invalidate cache so the next read picks up the fresh base.
-self.cache.invalidate(inode);
-
-Ok(true)
-```
-
-**Step 2: Run tests**
-
-Run: `cargo test -p rucksfs-server`
-Expected: All compaction tests pass
-
-**Step 3: Commit**
-
-```bash
-git add server/src/compaction.rs
-git commit -m "fix(server): remove redundant clear_deltas after transactional compaction"
-```
+This task has been superseded by Task 2b, which rewrites `force_compact_inode` to use `scan_deltas_with_keys` and removes both the redundant `clear_deltas` call and the two-scan race condition in a single change.
 
 ---
 

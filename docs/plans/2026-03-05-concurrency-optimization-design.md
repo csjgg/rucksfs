@@ -16,9 +16,9 @@ This design addresses correctness risks and performance bottlenecks identified i
 
 1. **Delta append outside transaction**: `create`, `mkdir`, `unlink`, `rmdir`, `rename`, `link`, `symlink` commit the main transaction first, then append parent deltas via non-transactional `WriteBatch`. If the process crashes between commit and delta append, nlink changes are lost — potentially corrupting directory link counts.
 
-2. **Delta append vs compaction race**: `append_deltas` uses non-transactional writes while `force_compact_inode` reads/deletes deltas within a transaction. A new delta written between compaction's scan and commit can be silently lost when the compacted base overwrites it.
+2. **Delta append vs compaction race**: `append_deltas` uses non-transactional writes while `force_compact_inode` calls `scan_deltas` (values) and `scan_delta_keys` (keys) as two separate scans. A new delta written between the two scans appears in the key list but not the value list — compaction deletes it without folding its value. **Fix:** Replace with a single `scan_deltas_with_keys` that returns `(key, value)` pairs from one iterator pass.
 
-3. **Redundant `clear_deltas`**: `compaction.rs:181` calls `clear_deltas` after the transaction already deleted all delta keys, causing an unnecessary scan+delete pass.
+3. **Redundant `clear_deltas`**: `compaction.rs:181` calls `clear_deltas` after the transaction already deleted all delta keys, causing an unnecessary scan+delete pass that can also delete newly-appended deltas. **Fix:** Remove entirely; handled by the single-pass scan approach above.
 
 ### P1 — Performance
 
@@ -203,11 +203,11 @@ fn check_and_clear_deferred_delete(&self, inode: Inode) -> bool {
 
 | Module | File(s) | Change | Risk |
 |--------|---------|--------|------|
-| Storage trait | `storage/src/lib.rs` | Expose `next_seq` on `DeltaStore` | Low |
-| Storage impl | `storage/src/rocks.rs` | Configure `TransactionOptions` | Low |
+| Storage trait | `storage/src/lib.rs` | Expose `next_seq` and `scan_deltas_with_keys` on `DeltaStore` | Low |
+| Storage impl | `storage/src/rocks.rs` | Configure `TransactionOptions`, implement new trait methods | Low |
 | Allocator | `storage/src/allocator.rs` | Batch persist (every 64) | Low |
 | Cache | `server/src/cache.rs` | Rewrite as `ShardedInodeCache` | Medium (API stable) |
-| Compaction | `server/src/compaction.rs` | Add `Condvar`, remove redundant `clear_deltas` | Low |
+| Compaction | `server/src/compaction.rs` | Single-pass scan, add `Condvar`, remove `clear_deltas` | Medium |
 | MetadataServer | `server/src/lib.rs` | In-txn nlink delta, backoff retry, lock helpers | Medium |
 | Dependencies | `server/Cargo.toml` | Add `parking_lot` | Low |
 
