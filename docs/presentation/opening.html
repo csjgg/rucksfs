@@ -1069,89 +1069,80 @@ tr:nth-child(even) { background: var(--bg-alt); }
     <h2 style="margin: 0;">PCC 事务 + Delta —— 高效的并发元数据管理</h2>
   </div>
 
-  <p class="muted" style="margin-bottom: 12px;">
-    RocksDB PCC（悲观并发控制）事务提供行级锁 + 跨 CF 原子写入；Delta 机制将父 inode 更新移出事务关键路径。
-    二者配合，不同目录的操作完全并行，同目录操作仅锁目录项而不锁父 inode。
+  <p class="muted" style="margin-bottom: 14px;">
+    RocksDB PCC 事务提供行级锁 + 跨 CF 原子写入；Delta 将父 inode 更新移出事务关键路径。
+    事务只锁 <strong>dir_entry</strong>，不锁父 inode——同目录不同文件名的操作可完全并行。
   </p>
 
-  <div class="columns" style="gap: 24px; margin-bottom: 16px;">
-    <!-- Left: Concurrency framework -->
-    <div>
-      <h3 style="margin-bottom: 10px;">并发控制框架</h3>
-      <div class="card card-accent" style="margin-bottom: 12px;">
-        <ul style="font-size: 0.83rem; margin: 0;">
-          <li><strong>get_for_update</strong> — 读取 Key 的同时加行锁，防止 TOCTOU 竞态</li>
-          <li><strong>AtomicWriteBatch</strong> — 跨 inodes/dir_entries CF 的原子提交</li>
-          <li><strong>execute_with_retry</strong> — 冲突时自动重试（最多 3 次）</li>
-          <li><strong>Delta 事务外追加</strong> — 父 inode 更新不参与事务锁争抢</li>
-        </ul>
-      </div>
+  <!-- Row 1: Concurrency primitives — horizontal tags -->
+  <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 12px; margin-bottom: 16px;">
+    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px;">
+      <div style="font-weight: 600; font-size: 0.82rem; margin-bottom: 4px; color: var(--primary);">get_for_update</div>
+      <div style="font-size: 0.78rem; color: var(--text-secondary);">读取 Key 同时加行锁，防止 TOCTOU 竞态</div>
+    </div>
+    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px;">
+      <div style="font-weight: 600; font-size: 0.82rem; margin-bottom: 4px; color: var(--primary);">AtomicWriteBatch</div>
+      <div style="font-size: 0.78rem; color: var(--text-secondary);">跨 inodes / dir_entries CF 原子提交</div>
+    </div>
+    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px;">
+      <div style="font-weight: 600; font-size: 0.82rem; margin-bottom: 4px; color: var(--primary);">execute_with_retry</div>
+      <div style="font-size: 0.78rem; color: var(--text-secondary);">事务冲突时自动重试（最多 3 次）</div>
+    </div>
+    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px;">
+      <div style="font-weight: 600; font-size: 0.82rem; margin-bottom: 4px; color: var(--primary);">Delta 事务外追加</div>
+      <div style="font-size: 0.78rem; color: var(--text-secondary);">父 inode nlink/mtime 不参与锁争抢</div>
+    </div>
+  </div>
 
-      <h3 style="margin-bottom: 8px;">为什么不锁父 inode？</h3>
-      <p class="small" style="margin-bottom: 8px;">
-        传统方案在事务内 <code>get_for_update(parent_inode)</code>，所有同目录操作串行等待。
-        Delta 方案下，事务只锁<strong>目录项（dir_entry）</strong>——不同文件名的 create 在同目录下也可以并行，
-        因为它们锁的是不同的 dir_entry Key。父 inode 的 nlink/mtime 更新通过事务外追加 Delta 完成。
-      </p>
-
-      <h3 style="margin-bottom: 8px;">rename 的死锁预防</h3>
-      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.6;">
-        <div style="color: var(--text-secondary);">// 跨目录 rename：按 inode ID 排序加锁</div>
-        <div>inode_ids = [src, dst?, parent, new_parent]</div>
-        <div>inode_ids.<span style="color: var(--primary);">sort()</span>.<span style="color: var(--primary);">dedup()</span></div>
-        <div>for id in inode_ids: <span style="color: var(--accent);">get_for_update</span>(id)</div>
-        <div style="margin-top: 4px; color: var(--text-secondary);">→ 全局一致的加锁顺序，杜绝死锁</div>
+  <!-- Row 2: Three POSIX operations — equal-width columns -->
+  <h3 style="margin: 0 0 10px 0; font-size: 0.92rem;">核心 POSIX 操作</h3>
+  <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; margin-bottom: 16px;">
+    <!-- create -->
+    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px;">
+      <div style="font-weight: 600; font-size: 0.84rem; margin-bottom: 6px; color: var(--primary);">create("new.txt")</div>
+      <div style="font-family: var(--font-mono); font-size: 0.72rem; line-height: 1.65;">
+        <div>1. begin_txn()</div>
+        <div>2. <span style="color: var(--accent);">get_for_update</span>(dir_entry)</div>
+        <div style="padding-left: 12px; color: var(--text-secondary);">→ 已存在则 EEXIST</div>
+        <div>3. put(inode) + put(dir_entry)</div>
+        <div>4. <span style="color: #166534;">commit()</span></div>
+        <div>5. <span style="color: var(--text-secondary);">append_delta(parent)</span></div>
       </div>
     </div>
 
-    <!-- Right: 3 key POSIX operations -->
-    <div>
-      <h3 style="margin-bottom: 10px;">三个核心 POSIX 操作详解</h3>
-
-      <!-- create -->
-      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 10px;">
-        <p style="font-size: 0.84rem; font-weight: 600; margin-bottom: 4px; color: var(--primary);">create("new.txt") in /home/alice/</p>
-        <div style="font-family: var(--font-mono); font-size: 0.73rem; line-height: 1.6;">
-          <div>1. <span style="color: var(--primary);">begin_txn()</span></div>
-          <div>2. <span style="color: var(--accent);">get_for_update</span>(dir_entry[3|"new.txt"]) → 加行锁，已存在则 EEXIST</div>
-          <div>3. batch_put(inode[12], {file, 0B}) + batch_put(dir_entry[3|"new.txt"], 12)</div>
-          <div>4. <span style="color: #166534;">commit()</span> → 原子写入 WAL，跨 inodes + dir_entries CF</div>
-          <div>5. <span style="color: var(--text-secondary);">append_delta(parent, mtime=now)</span> ← 事务外，不阻塞其他线程</div>
-        </div>
+    <!-- rename (cross-directory) -->
+    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px;">
+      <div style="font-weight: 600; font-size: 0.84rem; margin-bottom: 6px; color: var(--primary);">rename — 跨目录</div>
+      <div style="font-family: var(--font-mono); font-size: 0.72rem; line-height: 1.65;">
+        <div>1. begin_txn()</div>
+        <div>2. <span style="color: var(--accent);">get_for_update</span>(sorted keys)</div>
+        <div style="padding-left: 12px; color: var(--text-secondary);">→ 按 ID 排序加锁，防死锁</div>
+        <div>3. delete(src) + put(dst)</div>
+        <div>4. <span style="color: #166534;">commit()</span></div>
+        <div>5. <span style="color: var(--text-secondary);">delta(old_parent + new_parent)</span></div>
       </div>
+    </div>
 
-      <!-- rename -->
-      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 10px;">
-        <p style="font-size: 0.84rem; font-weight: 600; margin-bottom: 4px; color: var(--primary);">rename("a.txt", "/other/b.txt") — 跨目录</p>
-        <div style="font-family: var(--font-mono); font-size: 0.73rem; line-height: 1.6;">
-          <div>1. <span style="color: var(--primary);">begin_txn()</span></div>
-          <div>2. <span style="color: var(--accent);">get_for_update</span>(src_entry + dst_entry + sorted inodes)</div>
-          <div>3. delete(src_entry) + put(dst_entry) + update src inode ctime</div>
-          <div>4. <span style="color: #166534;">commit()</span></div>
-          <div>5. <span style="color: var(--text-secondary);">append_delta(old_parent, mtime) + append_delta(new_parent, mtime)</span></div>
-        </div>
-      </div>
-
-      <!-- rmdir -->
-      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px;">
-        <p style="font-size: 0.84rem; font-weight: 600; margin-bottom: 4px; color: var(--primary);">rmdir("/home/alice/empty_dir/")</p>
-        <div style="font-family: var(--font-mono); font-size: 0.73rem; line-height: 1.6;">
-          <div>1. <span style="color: var(--primary);">begin_txn()</span></div>
-          <div>2. <span style="color: var(--accent);">get_for_update</span>(dir_entry + child_inode)</div>
-          <div>3. prefix_scan [child_inode|*] → 非空则 ENOTEMPTY <span style="color: var(--text-secondary);">(TOCTOU 安全)</span></div>
-          <div>4. delete(dir_entry) + delete(child_inode)</div>
-          <div>5. <span style="color: #166534;">commit()</span></div>
-          <div>6. <span style="color: var(--text-secondary);">append_delta(parent, nlink-1, mtime=now)</span></div>
-        </div>
+    <!-- rmdir -->
+    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px;">
+      <div style="font-weight: 600; font-size: 0.84rem; margin-bottom: 6px; color: var(--primary);">rmdir</div>
+      <div style="font-family: var(--font-mono); font-size: 0.72rem; line-height: 1.65;">
+        <div>1. begin_txn()</div>
+        <div>2. <span style="color: var(--accent);">get_for_update</span>(entry + inode)</div>
+        <div>3. prefix_scan → 非空 ENOTEMPTY</div>
+        <div style="padding-left: 12px; color: var(--text-secondary);">→ TOCTOU 安全</div>
+        <div>4. delete(entry) + delete(inode)</div>
+        <div>5. <span style="color: #166534;">commit()</span></div>
+        <div>6. <span style="color: var(--text-secondary);">delta(parent, nlink-1)</span></div>
       </div>
     </div>
   </div>
 
+  <!-- Row 3: Summary -->
   <div class="card card-highlight" style="padding: 12px 20px;">
     <p style="font-size: 0.86rem; margin: 0;">
       <strong>设计关键：</strong>事务只保护<em>结构变更</em>（inode + dir_entry 的原子写入），
-      父目录属性更新（nlink/mtime）通过 Delta 追加在事务外完成。
-      即使 Delta 丢失（崩溃），仅影响 mtime 准确性，不影响文件系统结构完整性。
+      父目录属性更新（nlink/mtime）通过 Delta 在事务外追加完成。即使 Delta 丢失，仅影响 mtime 准确性，不影响文件系统结构完整性。
     </p>
   </div>
 </section>
