@@ -545,7 +545,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
   <div style="background: var(--bg-alt); border: 1px solid var(--border); border-left: 3px solid var(--primary); border-radius: var(--radius); padding: 18px 24px; margin-bottom: 20px;">
     <div style="font-size: 1.05rem; font-weight: 700; margin-bottom: 6px; color: var(--primary-dark);">关键洞察：元数据操作以写为主（create/mkdir/unlink 占比 &gt;60%），而传统文件系统的写路径代价极高</div>
     <div style="font-size: 0.84rem; color: var(--text-secondary); line-height: 1.55;">
-      读操作（lookup/stat）方面，ext4 的 B-tree 和 RocksDB 的 LSM-tree 都是随机点查，性能差距不大。<strong style="color: var(--primary);">真正的性能鸿沟在写路径上</strong>——这恰好是元数据最频繁的操作。
+读操作（lookup/stat）方面，ext4 的 HTree 和 RocksDB 的 LSM-tree 都是随机点查，性能差距不大。<strong style="color: var(--primary);">真正的性能鸿沟在写路径上</strong>——这恰好是元数据最频繁的操作。
     </div>
   </div>
 
@@ -569,7 +569,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
             <div style="font-size: 0.7rem; color: var(--primary);">写 2</div>
           </div>
           <div style="background: var(--primary-light); border: 1px solid #b4c9ee; border-radius: 5px; padding: 6px 10px; text-align: center; flex: 1; min-width: 80px;">
-            <div style="font-weight: 700; color: var(--primary-dark); font-size: 0.78rem;">目录 B-tree</div>
+<div style="font-weight: 700; color: var(--primary-dark); font-size: 0.78rem;">目录 HTree</div>
             <div style="font-size: 0.7rem; color: var(--primary);">写 3 (可能分裂)</div>
           </div>
           <div style="background: var(--primary-light); border: 1px solid #b4c9ee; border-radius: 5px; padding: 6px 10px; text-align: center; flex: 1; min-width: 80px;">
@@ -578,7 +578,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
           </div>
         </div>
         <div style="font-size: 0.8rem; color: var(--text); line-height: 1.6;">
-          <strong>问题 1 — 写放大：</strong>每次 create 需要修改 4 个不同的磁盘区域（位图 + inode + 目录 + journal），且每个位置都是<strong>随机写</strong>。B-tree 节点分裂还可能额外增加写入。<br>
+<strong>问题 1 — 写放大：</strong>每次 create 需要修改 4 个不同的磁盘区域（位图 + inode + 目录 + journal），且每个位置都是<strong>随机写</strong>。HTree 索引块分裂还可能额外增加写入。<br>
           <strong>问题 2 — 容量固定：</strong>inode 数量在 <code>mkfs</code> 时确定。磁盘空间还剩很多，但 inode 用完就无法再创建文件。
         </div>
       </div>
@@ -730,7 +730,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
       <td><strong>TableFS</strong><br><span class="small">ATC'13 · CMU</span></td>
       <td>首次用 LevelDB 管理全量文件元数据；小文件内容内联存入 KV</td>
       <td>100 万文件创建比 ext4 <em>快 5 倍</em></td>
-      <td>验证了 KV 存储替代传统 B-tree 管理元数据的可行性；LSM-tree 的顺序写特性天然适配写密集型元数据工作负载</td>
+      <td>验证了 KV 存储替代传统文件系统管理元数据的可行性；LSM-tree 的顺序写特性天然适配写密集型元数据工作负载</td>
     </tr>
     <tr>
       <td><strong>IndexFS</strong><br><span class="small">SC'14 · CMU</span></td>
