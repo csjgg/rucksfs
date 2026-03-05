@@ -10,6 +10,7 @@ pub mod fsck;
 
 use std::collections::{HashMap as StdHashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use rucksfs_core::{
@@ -344,6 +345,8 @@ where
 
     /// Execute a closure that creates and commits a transaction, retrying
     /// up to `TXN_MAX_RETRIES` times on `FsError::TransactionConflict`.
+    ///
+    /// Uses exponential backoff with jitter: 1ms, 2ms, 4ms base delays.
     fn execute_with_retry<F, T>(&self, mut f: F) -> FsResult<T>
     where
         F: FnMut() -> FsResult<T>,
@@ -352,7 +355,15 @@ where
             match f() {
                 Ok(v) => return Ok(v),
                 Err(FsError::TransactionConflict) if attempt + 1 < TXN_MAX_RETRIES => {
-                    // Retry on transient conflict.
+                    let base_us = 1000u64 << attempt; // 1ms, 2ms, 4ms
+                    // Simple deterministic jitter from pointer address + attempt.
+                    let jitter_us = {
+                        let seed = (&attempt as *const usize as u64)
+                            .wrapping_mul(0x9E3779B97F4A7C15)
+                            .wrapping_add(attempt as u64);
+                        seed % (base_us / 2 + 1)
+                    };
+                    std::thread::sleep(Duration::from_micros(base_us + jitter_us));
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -502,7 +513,7 @@ where
         })?;
 
         // Persist allocator counter outside the transaction (hot-key avoidance).
-        self.allocator.persist(self.metadata.as_ref())?;
+        self.allocator.maybe_persist(self.metadata.as_ref())?;
 
         // Update in-memory state after successful commit.
         self.cache.put(new_inode, iv.clone());
@@ -566,7 +577,7 @@ where
         })?;
 
         // Persist allocator counter outside the transaction.
-        self.allocator.persist(self.metadata.as_ref())?;
+        self.allocator.maybe_persist(self.metadata.as_ref())?;
 
         // Update in-memory state.
         self.cache.put(new_inode, iv.clone());
@@ -1081,7 +1092,7 @@ where
         })?;
 
         // Persist allocator counter outside the transaction.
-        self.allocator.persist(self.metadata.as_ref())?;
+        self.allocator.maybe_persist(self.metadata.as_ref())?;
 
         // Store the symlink target as file data.
         self.data_client
