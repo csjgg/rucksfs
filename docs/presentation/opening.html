@@ -429,25 +429,18 @@ tr:nth-child(even) { background: var(--bg-alt); }
       <span style="background: var(--primary); color: #fff; width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.9rem; flex-shrink: 0;">1</span>
       <div>
         <div style="font-weight: 600; font-size: 1.05rem;">研究背景与动机</div>
-        <div class="muted">元数据瓶颈 · KV 存储的适配性 · 学术研究脉络</div>
+        <div class="muted">元数据瓶颈 · 传统方案的不足 · KV 存储的适配性 · 学术研究脉络</div>
       </div>
     </div>
     <div style="display: flex; align-items: center; gap: 16px;">
       <span style="background: var(--primary); color: #fff; width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.9rem; flex-shrink: 0;">2</span>
       <div>
-        <div style="font-weight: 600; font-size: 1.05rem;">系统设计</div>
-        <div class="muted">整体架构 · 命名空间 KV 映射 · 增量更新 · 并发与优化方向</div>
+        <div style="font-weight: 600; font-size: 1.05rem;">系统设计与验证</div>
+        <div class="muted">整体架构 · 命名空间 KV 映射 · 增量更新 · 测试与评测方案</div>
       </div>
     </div>
     <div style="display: flex; align-items: center; gap: 16px;">
       <span style="background: var(--primary); color: #fff; width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.9rem; flex-shrink: 0;">3</span>
-      <div>
-        <div style="font-weight: 600; font-size: 1.05rem;">验证方案</div>
-        <div class="muted">POSIX 正确性测试 · 元数据性能压测</div>
-      </div>
-    </div>
-    <div style="display: flex; align-items: center; gap: 16px;">
-      <span style="background: var(--primary); color: #fff; width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.9rem; flex-shrink: 0;">4</span>
       <div>
         <div style="font-weight: 600; font-size: 1.05rem;">总结与计划</div>
         <div class="muted">当前进展 · 后续规划 · 时间安排</div>
@@ -468,60 +461,164 @@ tr:nth-child(even) { background: var(--bg-alt); }
 </section>
 
 <!-- ====================================================================
-     SLIDE 4 — The Metadata Problem
+     SLIDE 4 — What is Metadata
      ==================================================================== -->
 <section class="slide" data-slide="4 / 16">
   <div class="slide-header">
     <span class="tag">背景</span>
-    <h2 style="margin: 0;">元数据操作：文件系统的核心瓶颈</h2>
+    <h2 style="margin: 0;">什么是文件元数据？为什么它如此重要？</h2>
   </div>
 
   <div class="columns">
     <div class="col">
-      <div class="card card-warn" style="margin-bottom: 14px;">
-        <h3>问题有多严重？</h3>
-        <ul>
-          <li>Meta 2020 年生产集群统计：元数据操作占文件系统总 I/O 的 <em>&gt;50%</em></li>
-          <li>BFO (ACM TOS 2020)：元数据开销占小文件访问延迟的 <em>40%</em></li>
-          <li>HDFS NameNode 单机极限约 10 亿文件，已成为 Hadoop 生态已知瓶颈</li>
-        </ul>
+      <h3>文件系统的"两类数据"</h3>
+      <p style="font-size: 0.92rem; margin-bottom: 14px;">
+        文件系统管理的信息天然分为两部分：
+      </p>
+      <div class="card card-accent" style="margin-bottom: 12px;">
+        <h3>数据 (Data)</h3>
+        <p style="font-size: 0.88rem; margin: 0;">文件的实际内容——文档文字、图片像素、代码文本等。操作：read / write。</p>
+      </div>
+      <div class="card card-warn" style="margin-bottom: 12px;">
+        <h3>元数据 (Metadata)</h3>
+        <p style="font-size: 0.88rem; margin: 0;">描述文件本身的信息——文件名、大小、权限、时间戳、目录结构等。操作：create / stat / mkdir / readdir / rename / unlink / chmod ...</p>
       </div>
       <div class="card card-highlight">
-        <p style="font-size: 0.9rem; margin: 0;">
-          <strong>核心矛盾：</strong>文件越多、越小，元数据操作占比越大——而现代应用（AI 训练、微服务日志、容器镜像层）恰恰产生海量小文件。
+        <p style="font-size: 0.88rem; margin: 0;">
+          <strong>关键事实：</strong>每一次文件访问都必须先经过元数据操作（路径解析 → lookup → 权限检查 → 打开文件），
+          元数据是文件系统<strong>所有操作的入口</strong>。
         </p>
       </div>
     </div>
     <div class="col">
-      <h3>传统文件系统的结构性瓶颈</h3>
-      <table>
-        <tr><th>瓶颈</th><th>原因</th></tr>
-        <tr><td><strong>B-tree 随机写放大</strong></td><td>每次创建文件触发 B-tree 节点分裂和日志写入</td></tr>
-        <tr><td><strong>大目录性能退化</strong></td><td>ext4 htree 索引在百万文件级别 lookup 劣化</td></tr>
-        <tr><td><strong>Inode 表固定布局</strong></td><td>格式化时预分配，容量受限于初始参数</td></tr>
-        <tr><td><strong>元数据分散存储</strong></td><td>inode、目录项、位图分布在不同磁盘位置，随机 I/O 密集</td></tr>
-      </table>
-      <p class="small" style="margin-top: 10px;">
-        这些瓶颈源自文件系统诞生时"文件数量有限"的假设，与当今海量文件场景严重不匹配。
-      </p>
+      <h3>元数据操作的占比有多大？</h3>
+      <div class="stat-grid" style="grid-template-columns: 1fr 1fr; margin-bottom: 14px;">
+        <div class="stat-item">
+          <div class="stat-val">&gt;50%</div>
+          <div class="stat-lbl">元数据占总 I/O 比例<br><span class="small">Meta 2020 生产集群</span></div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-val">40%</div>
+          <div class="stat-lbl">元数据占小文件延迟<br><span class="small">BFO, ACM TOS 2020</span></div>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom: 12px;">
+        <h3>海量小文件场景加剧问题</h3>
+        <p style="font-size: 0.88rem; margin: 0;">
+          现代应用产生海量小文件：AI 训练数据（数十亿小图片）、容器镜像层（万级文件）、微服务日志、IoT 传感器数据。
+          <strong>文件越小、越多，元数据操作占比越大。</strong>
+        </p>
+      </div>
+      <div class="card">
+        <h3>性能瓶颈的位置</h3>
+        <p style="font-size: 0.88rem; margin: 0;">
+          HDFS NameNode 单机管理极限约 <em>10 亿</em>文件。
+          阿里巴巴 Pangu 2.0 文件系统论文报告元数据节点承受 <em>数亿 QPS</em> 压力。
+          <strong>元数据管理是文件系统扩展性的核心瓶颈。</strong>
+        </p>
+      </div>
     </div>
   </div>
-  <p class="source-note">数据来源: Meta OSDI'20 Trace, Ren et al. (ACM TOS 2020)</p>
+  <p class="source-note">数据来源: Meta OSDI'20 Trace, Ren et al. (ACM TOS 2020), HDFS Architecture Guide</p>
 </section>
 
 <!-- ====================================================================
-     SLIDE 5 — Why KV Storage
+     SLIDE 5 — Traditional FS Problems
      ==================================================================== -->
 <section class="slide" data-slide="5 / 16">
   <div class="slide-header">
-    <span class="tag">思路</span>
-    <h2 style="margin: 0;">核心思路：用 LSM-tree KV 存储管理元数据</h2>
+    <span class="tag">问题</span>
+    <h2 style="margin: 0;">传统文件系统为什么管不好海量元数据？</h2>
   </div>
 
   <div class="columns">
     <div class="col">
-      <h3>LSM-tree 的结构性优势</h3>
-      <div class="stat-grid" style="grid-template-columns: 1fr 1fr;">
+      <h3>ext4 / XFS 的元数据存储方式</h3>
+      <p style="font-size: 0.9rem; margin-bottom: 12px;">
+        传统文件系统在磁盘上使用<strong>固定布局</strong>的数据结构来管理元数据：
+      </p>
+      <table style="margin-bottom: 14px;">
+        <tr><th>数据结构</th><th>作用</th><th>问题</th></tr>
+        <tr><td><strong>Inode 表</strong></td><td>存储文件属性</td><td>格式化时预分配，数量固定，用完无法扩展</td></tr>
+        <tr><td><strong>B-tree / htree</strong></td><td>目录索引</td><td>每次插入可能触发节点分裂，随机写放大 ~2x</td></tr>
+        <tr><td><strong>块位图</strong></td><td>空间分配</td><td>与 inode 表、目录索引分散在不同磁盘区域</td></tr>
+        <tr><td><strong>日志 (Journal)</strong></td><td>崩溃一致性</td><td>每次元数据修改需先写日志再写数据，双重写入</td></tr>
+      </table>
+      <div class="card card-warn">
+        <h3>一次 create 操作的实际开销</h3>
+        <p style="font-size: 0.86rem; margin: 0;">
+          在 ext4 上创建一个空文件需要：①分配 inode（读位图→改位图→写位图）→
+          ②初始化 inode（写 inode 表）→ ③添加目录项（读目录块→插入 B-tree→可能分裂→写目录块）→
+          ④写 journal 日志。<strong>涉及至少 4-6 次磁盘写入</strong>，且位置分散。
+        </p>
+      </div>
+    </div>
+    <div class="col">
+      <h3>四个结构性瓶颈</h3>
+      <div class="card card-accent" style="margin-bottom: 10px;">
+        <h3>① B-tree 随机写放大</h3>
+        <p style="font-size: 0.86rem; margin: 0;">
+          每次创建/删除文件需修改 B-tree 目录索引。节点分裂产生随机写 I/O。
+          百万文件级别下 B-tree 深度增加，查找开销从 O(log n) 实际劣化。
+        </p>
+      </div>
+      <div class="card card-accent" style="margin-bottom: 10px;">
+        <h3>② 大目录性能退化</h3>
+        <p style="font-size: 0.86rem; margin: 0;">
+          ext4 htree 在单目录 >100 万文件时 lookup 性能严重退化。
+          readdir 需遍历整个 htree，无法高效前缀扫描。
+        </p>
+      </div>
+      <div class="card card-accent" style="margin-bottom: 10px;">
+        <h3>③ 元数据布局分散</h3>
+        <p style="font-size: 0.86rem; margin: 0;">
+          inode 表、目录块、位图分布在磁盘不同位置。一次 stat 可能需要多次寻道。
+          SSD 虽缓解了寻道延迟，但随机 I/O 仍消耗大量 IOPS。
+        </p>
+      </div>
+      <div class="card card-accent">
+        <h3>④ 固定容量，无法弹性扩展</h3>
+        <p style="font-size: 0.86rem; margin: 0;">
+          Inode 数量在 mkfs 时确定，用完后无法创建新文件——即使磁盘空间充足。
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================================================================
+     SLIDE 6 — Why KV Storage
+     ==================================================================== -->
+<section class="slide" data-slide="6 / 16">
+  <div class="slide-header">
+    <span class="tag">方案</span>
+    <h2 style="margin: 0;">解决思路：用 LSM-tree KV 存储替代传统元数据管理</h2>
+  </div>
+
+  <div class="columns">
+    <div class="col">
+      <h3>LSM-tree 如何逐一解决传统瓶颈</h3>
+      <table style="font-size: 0.86rem;">
+        <tr><th>传统瓶颈</th><th>KV 存储 (LSM-tree) 的解法</th></tr>
+        <tr>
+          <td>B-tree 随机写放大</td>
+          <td>所有写入先追加到内存 MemTable，后台异步刷盘为有序 SST 文件。<strong>随机写变顺序写</strong>，写入带宽提升 <em>3~10x</em></td>
+        </tr>
+        <tr>
+          <td>大目录性能退化</td>
+          <td>目录项以 <strong>parent_inode + name</strong> 为 Key，天然有序。readdir = 按前缀扫描，O(n) 顺序读取，不受目录大小影响</td>
+        </tr>
+        <tr>
+          <td>元数据布局分散</td>
+          <td>所有元数据集中存储在 KV 引擎中，<strong>空间局部性极佳</strong>。inode 和目录项相邻存放，一次 I/O 可获取多条记录</td>
+        </tr>
+        <tr>
+          <td>固定容量无法扩展</td>
+          <td>KV 存储<strong>动态增长</strong>，无需预分配。理论上仅受磁盘容量限制</td>
+        </tr>
+      </table>
+
+      <div class="stat-grid" style="grid-template-columns: 1fr 1fr; margin-top: 14px;">
         <div class="stat-item">
           <div class="stat-val">3~10x</div>
           <div class="stat-lbl">写入带宽提升<br><span class="small">随机写 → 顺序写</span></div>
@@ -531,32 +628,27 @@ tr:nth-child(even) { background: var(--bg-alt); }
           <div class="stat-lbl">单条写入复杂度<br><span class="small">追加写 MemTable</span></div>
         </div>
       </div>
-      <div class="card" style="margin-top: 14px;">
-        <h3>为什么特别适合元数据</h3>
-        <ul style="font-size: 0.88rem;">
-          <li><strong>写密集</strong> — 创建/修改操作占比 &gt;60%</li>
-          <li><strong>记录小</strong> — inode ~100-200B，天然适合 KV</li>
-          <li><strong>前缀扫描</strong> — readdir = 按 parent_inode 前缀扫描</li>
-          <li><strong>原子批量写</strong> — WriteBatch 天然支持多键原子提交</li>
-        </ul>
-      </div>
     </div>
     <div class="col">
-      <h3>B-tree (ext4) vs LSM-tree (RocksDB)</h3>
-      <table>
-        <tr><th>特性</th><th>B-tree</th><th>LSM-tree</th></tr>
-        <tr><td>写入方式</td><td>原地更新 + 日志</td><td>追加写 + 后台合并</td></tr>
-        <tr><td>写放大</td><td>~2x</td><td>10~30x (可调优)</td></tr>
-        <tr><td>写入带宽</td><td>基准</td><td><em>3~10x 提升</em></td></tr>
-        <tr><td>空间利用</td><td>预分配，固定</td><td>动态增长</td></tr>
-        <tr><td>范围扫描</td><td>遍历 B-tree</td><td>SST 有序，高效</td></tr>
-        <tr><td>批量写入</td><td>逐条提交</td><td>WriteBatch 原子批量</td></tr>
-      </table>
-      <div class="card card-highlight" style="margin-top: 14px;">
-        <p style="font-size: 0.88rem; margin: 0;">
-          <strong>工业验证：</strong>JuiceFS (Redis/TiKV)、CephFS (RocksDB)、Hadoop Ozone (三级 RocksDB) 均已在生产环境采用 KV 存储管理元数据。
-        </p>
+      <h3>元数据操作的天然适配性</h3>
+      <div class="card" style="margin-bottom: 12px;">
+        <h3>为什么元数据特别适合 KV</h3>
+        <ul style="font-size: 0.86rem;">
+          <li><strong>写密集</strong> — 创建/修改操作占比 &gt;60%，LSM-tree 写入优势最大化</li>
+          <li><strong>记录小</strong> — inode ~100-200B，远小于 KV 引擎的 block size，命中率高</li>
+          <li><strong>前缀扫描</strong> — readdir 映射为按 parent_inode 前缀扫描，利用 SST 有序性</li>
+          <li><strong>原子批量写</strong> — WriteBatch 天然支持多键原子提交，一次 create 的多个写入可以聚合</li>
+        </ul>
       </div>
+
+      <h3>工业界已广泛验证</h3>
+      <table style="font-size: 0.86rem;">
+        <tr><th>系统</th><th>元数据 KV 引擎</th><th>规模</th></tr>
+        <tr><td><strong>JuiceFS</strong></td><td>Redis / TiKV</td><td>生产环境，千亿文件</td></tr>
+        <tr><td><strong>CephFS</strong></td><td>RocksDB (BlueStore)</td><td>EB 级存储</td></tr>
+        <tr><td><strong>Hadoop Ozone</strong></td><td>三级 RocksDB</td><td>突破 HDFS 10 亿文件限制</td></tr>
+        <tr><td><strong>CockroachDB</strong></td><td>Pebble (RocksDB fork)</td><td>分布式 SQL</td></tr>
+      </table>
     </div>
   </div>
 </section>
@@ -564,7 +656,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
 <!-- ====================================================================
      SLIDE 6 — Research Timeline
      ==================================================================== -->
-<section class="slide" data-slide="6 / 16">
+<section class="slide" data-slide="7 / 16">
   <div class="slide-header">
     <span class="tag">调研</span>
     <h2 style="margin: 0;">技术演进：从学术探索到工业实践</h2>
@@ -633,7 +725,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
 <!-- ====================================================================
      SLIDE 7 — Key Papers Insights
      ==================================================================== -->
-<section class="slide" data-slide="7 / 16">
+<section class="slide" data-slide="8 / 16">
   <div class="slide-header">
     <span class="tag">论文</span>
     <h2 style="margin: 0;">关键论文与设计启示</h2>
@@ -688,10 +780,10 @@ tr:nth-child(even) { background: var(--bg-alt); }
 <!-- ====================================================================
      PART 2 — SECTION
      ==================================================================== -->
-<section class="slide section-slide" data-slide="8 / 16">
+<section class="slide section-slide" data-slide="9 / 16">
   <div>
     <div style="font-size: 0.95rem; letter-spacing: 0.12em; opacity: 0.55; margin-bottom: 10px;">PART 2</div>
-    <h2>系统设计</h2>
+    <h2>系统设计与验证</h2>
     <div class="section-sub">RucksFS — 基于 RocksDB 的单机 FUSE 文件系统</div>
   </div>
 </section>
@@ -699,7 +791,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
 <!-- ====================================================================
      SLIDE 9 — System Architecture
      ==================================================================== -->
-<section class="slide" data-slide="9 / 16">
+<section class="slide" data-slide="10 / 16">
   <div class="slide-header">
     <span class="tag">架构</span>
     <h2 style="margin: 0;">系统整体架构</h2>
@@ -772,7 +864,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
 <!-- ====================================================================
      SLIDE 10 — Namespace to KV Mapping (Part 1)
      ==================================================================== -->
-<section class="slide" data-slide="10 / 16">
+<section class="slide" data-slide="11 / 16">
   <div class="slide-header">
     <span class="tag">核心设计</span>
     <h2 style="margin: 0;">文件命名空间到 KV 存储的映射</h2>
@@ -848,7 +940,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
 <!-- ====================================================================
      SLIDE 11 — Namespace Mapping: Operations
      ==================================================================== -->
-<section class="slide" data-slide="11 / 16">
+<section class="slide" data-slide="12 / 16">
   <div class="slide-header">
     <span class="tag">核心设计</span>
     <h2 style="margin: 0;">文件操作到 KV 操作的映射</h2>
@@ -924,81 +1016,59 @@ tr:nth-child(even) { background: var(--bg-alt); }
 </section>
 
 <!-- ====================================================================
-     PART 3 — SECTION
-     ==================================================================== -->
-<section class="slide section-slide" data-slide="12 / 16">
-  <div>
-    <div style="font-size: 0.95rem; letter-spacing: 0.12em; opacity: 0.55; margin-bottom: 10px;">PART 3</div>
-    <h2>验证方案</h2>
-    <div class="section-sub">POSIX 正确性测试 · 元数据性能压测</div>
-  </div>
-</section>
-
-<!-- ====================================================================
-     SLIDE 13 — Verification Plan
+     SLIDE 13 — Verification (part of Part 2)
      ==================================================================== -->
 <section class="slide" data-slide="13 / 16">
   <div class="slide-header">
     <span class="tag">验证</span>
-    <h2 style="margin: 0;">正确性验证与性能评测方案</h2>
+    <h2 style="margin: 0;">测试与评测方案</h2>
   </div>
 
   <div class="columns">
     <div class="col">
       <h3>一、POSIX 正确性验证</h3>
       <div class="card card-green" style="margin-bottom: 14px;">
-        <h3>pjdfstest — 业界标准 POSIX 合规测试</h3>
+        <h3>pjdfstest — POSIX 合规测试套件</h3>
         <p style="font-size: 0.88rem;">
-          pjdfstest 是 FreeBSD/Linux 文件系统社区广泛使用的 POSIX 合规性测试套件，
-          覆盖 <strong>chmod、chown、link、mkdir、mkfifo、open、rename、rmdir、
-          symlink、truncate、unlink</strong> 等操作的正确性边界情况。
+          FreeBSD/Linux 文件系统社区广泛使用的标准测试工具，
+          覆盖 chmod、chown、link、mkdir、open、rename、rmdir、
+          symlink、truncate、unlink 等操作的边界情况。
         </p>
         <p style="font-size: 0.88rem; margin: 0;">
-          将 RucksFS 挂载为 FUSE 文件系统后，在挂载点上运行完整测试套件。
-        </p>
-      </div>
-      <div class="card" style="margin-bottom: 14px;">
-        <h3>自定义正确性测试</h3>
-        <p style="font-size: 0.88rem; margin: 0;">
-          补充 pjdfstest 未覆盖的场景：
-          write+read 数据一致性、rename 原子性、deferred unlink（打开文件后删除仍可读写）、
-          fsck 一致性检查、fallocate 空间分配。
+          将 RucksFS 挂载为 FUSE 文件系统后，在挂载点上运行完整测试套件，验证 POSIX 语义正确性。
         </p>
       </div>
       <div class="card">
-        <h3>单元/集成测试</h3>
+        <h3>Rust 单元/集成测试</h3>
         <p style="font-size: 0.88rem; margin: 0;">
-          基于 Rust 测试框架，使用真实 RocksDB 后端（非 mock），覆盖每个文件操作的正常和异常路径。
+          基于真实 RocksDB 后端（非 mock），覆盖每个文件操作的正常和异常路径。
+          补充 pjdfstest 未覆盖的场景：write+read 数据一致性、deferred unlink、fsck 一致性检查。
           当前已有 <em>228 个</em>自动化测试。
         </p>
       </div>
     </div>
     <div class="col">
-      <h3>二、元数据性能压测</h3>
+      <h3>二、元数据性能评测</h3>
       <div class="card card-green" style="margin-bottom: 14px;">
-        <h3>自研 Rust 压测工具（对标 mdtest）</h3>
+        <h3>mdtest — HPC 业界标准元数据压测工具</h3>
         <p style="font-size: 0.88rem;">
-          mdtest 是 HPC 领域标准的元数据性能测试工具（C 实现）。
-          将实现一个 Rust 原生压测工具，通过 FUSE 挂载点直接发起 POSIX syscall，
-          避免 shell 脚本的 fork/exec 开销（实测 shell 循环在 ext4 上也仅 ~1,500 ops/s）。
+          mdtest 是 IO500 (HPC 存储排行榜) 官方指定的元数据性能测试工具，也是 TableFS、IndexFS、LocoFS 等论文使用的评测基准。
+          通过 C 原生 syscall 直接操作 FUSE 挂载点，无 shell fork/exec 开销。
         </p>
         <ul style="font-size: 0.86rem;">
-          <li>支持操作类型：<strong>create / stat / unlink / mkdir / readdir / 混合</strong></li>
-          <li>可配置并发度：<strong>1~N 线程</strong>同时压测</li>
-          <li>可配置规模：<strong>1K ~ 1M</strong> 文件数</li>
-          <li>输出 CSV 格式：ops/sec、延迟百分位（P50/P99）</li>
+          <li><strong>mdtest-easy</strong>：每线程独立目录，测试分散创建</li>
+          <li><strong>mdtest-hard</strong>：所有线程共享单目录，测试竞争下的创建</li>
+          <li>支持 create / stat / read / remove 全流程</li>
+          <li>可配置并发进程数、文件总量、目录深度</li>
         </ul>
       </div>
       <div class="card">
-        <h3>测试场景设计</h3>
-        <p style="font-size: 0.88rem; margin: 0;">
-          参考 TableFS (ATC'13) 和 mdtest (IO500) 的经典测试模式：
-        </p>
+        <h3>评测对比设计</h3>
         <ul style="font-size: 0.86rem;">
-          <li><strong>单目录大量小文件创建</strong>（mdtest-hard 模式）</li>
-          <li><strong>多目录分散创建</strong>（mdtest-easy 模式）</li>
-          <li><strong>大目录 readdir + stat</strong>（ls -l 模拟）</li>
-          <li>与 ext4 对照：相同工具、相同硬件、相同操作</li>
+          <li><strong>对照组</strong>：相同硬件上的 ext4，使用同一 mdtest 参数</li>
+          <li><strong>规模</strong>：10K / 100K / 1M 文件梯度测试</li>
+          <li><strong>并发</strong>：1 / 2 / 4 / 8 进程扩展性测试</li>
+          <li><strong>指标</strong>：ops/sec（与 TableFS 论文数据直接对比）</li>
         </ul>
       </div>
     </div>
@@ -1010,7 +1080,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
      ==================================================================== -->
 <section class="slide section-slide" data-slide="14 / 16">
   <div>
-    <div style="font-size: 0.95rem; letter-spacing: 0.12em; opacity: 0.55; margin-bottom: 10px;">PART 4</div>
+    <div style="font-size: 0.95rem; letter-spacing: 0.12em; opacity: 0.55; margin-bottom: 10px;">PART 3</div>
     <h2>总结与计划</h2>
     <div class="section-sub">当前进展 · 后续规划 · 时间安排</div>
   </div>
