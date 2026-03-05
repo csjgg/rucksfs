@@ -978,164 +978,185 @@ tr:nth-child(even) { background: var(--bg-alt); }
 </section>
 
 <!-- ====================================================================
-     SLIDE 12 — Delta Updates & Operations
+     SLIDE 12 — Delta Record Mechanism
      ==================================================================== -->
 <section class="slide" data-slide="11 / 17">
   <div class="slide-header">
     <span class="tag">核心设计</span>
-    <h2 style="margin: 0;">Delta 增量更新与操作映射</h2>
+    <h2 style="margin: 0;">Delta 增量更新机制</h2>
   </div>
 
-  <div class="columns">
-    <div class="col">
-      <h3>问题：高频属性修改的写放大</h3>
-      <div class="card card-warn" style="margin-bottom: 12px;">
-        <p style="font-size: 0.86rem; margin: 0;">
-          在 <code>/home/alice/</code> 下连续创建 1000 个文件，每次都需要更新父目录 (inode 3) 的 mtime 和 nlink。
-          传统做法：每次 <strong>读取 57B → 修改 → 写回 57B</strong>，1000 次 = 1000 次读-改-写。
-        </p>
-      </div>
+  <p class="muted" style="margin-bottom: 12px;">受 Mantle (SOSP'25) Delta Record 机制启发——将父目录 inode 的高频属性更新从<strong>读-改-写</strong>转为<strong>追加写</strong></p>
 
-      <h3>方案：Delta Record 追加更新</h3>
-      <p class="small" style="margin-bottom: 8px;">受 Mantle (SOSP'25) 的 Delta Record 机制启发</p>
+  <div class="columns" style="gap: 28px; margin-bottom: 16px;">
+    <!-- Left: The Problem -->
+    <div>
+      <h3 style="margin-bottom: 10px;">问题：热目录的父 inode 争抢</h3>
+      <p class="small" style="margin-bottom: 8px;">
+        每次 <code>create</code>/<code>mkdir</code>/<code>unlink</code> 都需要更新父目录 inode 的 nlink 和 mtime。
+        传统做法是<strong>读 → 改 → 写回</strong>，必须对父 inode 加锁：
+      </p>
 
-      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; font-size: 0.82rem; line-height: 1.7; margin-bottom: 12px;">
-        <div><code style="color: var(--primary);">create("f1")</code> → append <span style="color: var(--accent);">Δ(mtime=T1, nlink+1)</span></div>
-        <div><code style="color: var(--primary);">create("f2")</code> → append <span style="color: var(--accent);">Δ(mtime=T2, nlink+1)</span></div>
-        <div><code style="color: var(--primary);">create("f3")</code> → append <span style="color: var(--accent);">Δ(mtime=T3, nlink+1)</span></div>
-        <div style="margin-top: 6px; border-top: 1px dashed var(--border); padding-top: 6px;">
-          <code style="color: #166534;">getattr(parent)</code> → fold: base + Δ₁ + Δ₂ + Δ₃ → <strong>最终属性</strong>
+      <!-- Traditional RMW diagram -->
+      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; font-family: var(--font-mono); font-size: 0.76rem; line-height: 1.7; margin-bottom: 12px;">
+        <div style="color: var(--text-secondary); margin-bottom: 4px;">// 传统读-改-写（串行瓶颈）</div>
+        <div>Thread A: <span style="color: var(--accent);">lock(parent)</span> → read 57B → nlink++ → write 57B → <span style="color: var(--accent);">unlock</span></div>
+        <div>Thread B: <span style="color: var(--text-secondary);">blocked ⏳ waiting for lock...</span></div>
+        <div>Thread C: <span style="color: var(--text-secondary);">blocked ⏳ waiting for lock...</span></div>
+        <div style="margin-top: 6px; border-top: 1px dashed var(--border); padding-top: 6px; color: var(--accent);">
+          → N 个并发 create 被串行化，吞吐 = 1/N
         </div>
       </div>
 
-      <div class="card card-highlight">
-        <h3>三层架构</h3>
-        <ul style="font-size: 0.84rem;">
-          <li><strong>InodeFoldedCache (LRU)</strong> — O(1) 命中返回折叠后属性</li>
-          <li><strong>Fold-on-Read</strong> — 缓存未命中时读 base + delta 折叠</li>
-          <li><strong>后台 Compaction</strong> — delta 超过 32 条时异步合并为新 base</li>
-        </ul>
+      <!-- Delta approach diagram -->
+      <h3 style="margin-bottom: 10px;">解法：追加 Delta Record（无锁并行）</h3>
+      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; font-family: var(--font-mono); font-size: 0.76rem; line-height: 1.7;">
+        <div style="color: var(--text-secondary); margin-bottom: 4px;">// Delta 追加（并行无阻塞）</div>
+        <div>Thread A: append <span style="color: var(--primary);">Δ(nlink+1, mtime=T1)</span> → 5~9 bytes</div>
+        <div>Thread B: append <span style="color: var(--primary);">Δ(nlink+1, mtime=T2)</span> → 5~9 bytes</div>
+        <div>Thread C: append <span style="color: var(--primary);">Δ(nlink+1, mtime=T3)</span> → 5~9 bytes</div>
+        <div style="margin-top: 6px; border-top: 1px dashed var(--border); padding-top: 6px; color: var(--primary);">
+          → 追加操作无需读取父 inode，无需加锁，吞吐 = N
+        </div>
       </div>
     </div>
 
-    <div class="col">
-      <h3>POSIX 操作 → KV 操作映射</h3>
-      <table style="font-size: 0.82rem;">
-        <tr><th>文件操作</th><th>KV 操作序列</th></tr>
-        <tr>
-          <td><strong>create</strong></td>
-          <td>① get_for_update 检查重名 ② put inode ③ put dir_entry ④ commit ⑤ append delta(mtime)</td>
-        </tr>
-        <tr>
-          <td><strong>lookup</strong></td>
-          <td>① get dir_entry(parent+name) ② get inode(child)</td>
-        </tr>
-        <tr>
-          <td><strong>readdir</strong></td>
-          <td>① prefix_scan dir_entries(parent)</td>
-        </tr>
-        <tr>
-          <td><strong>unlink</strong></td>
-          <td>① delete dir_entry ② update inode(nlink-1) ③ nlink=0 则 delete inode</td>
-        </tr>
-        <tr>
-          <td><strong>rename</strong></td>
-          <td>① delete src_entry + put dst_entry ② append delta(both parents)</td>
-        </tr>
-        <tr>
-          <td><strong>mkdir</strong></td>
-          <td>① put inode(dir) ② put dir_entry ③ append delta(parent nlink+1)</td>
-        </tr>
-        <tr>
-          <td><strong>rmdir</strong></td>
-          <td>① check dir empty (prefix_scan) ② delete entry + inode ③ delta(nlink-1)</td>
-        </tr>
-      </table>
+    <!-- Right: How It Works -->
+    <div>
+      <h3 style="margin-bottom: 10px;">读取路径：Fold-on-Read + LRU 缓存</h3>
+      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; font-size: 0.82rem; line-height: 1.7; margin-bottom: 14px;">
+        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+          <span style="background: var(--primary); color: white; padding: 2px 10px; border-radius: 4px; font-size: 0.75rem;">getattr(parent)</span>
+        </div>
+        <div>① 查 <strong>InodeFoldedCache</strong>（LRU）→ 命中则 O(1) 返回</div>
+        <div>② 未命中 → 读 base inode (inodes CF) + scan deltas (delta_entries CF)</div>
+        <div>③ <strong>fold</strong>：base + Δ₁ + Δ₂ + ... + Δₙ → 最终属性值</div>
+        <div>④ 写入缓存，后续读取直接命中</div>
+      </div>
 
-      <div class="card card-accent" style="margin-top: 12px;">
-        <h3>关键设计原则</h3>
-        <ul style="font-size: 0.84rem;">
-          <li><strong>关键路径最小化</strong>：delta 追加在事务外，丢失仅影响 mtime</li>
-          <li><strong>双写消除</strong>：shares_batch_storage 检测避免 CF 重复写入</li>
-          <li><strong>定长编码</strong>：InodeValue 57B 定长，借鉴 LocoFS 零序列化</li>
+      <h3 style="margin-bottom: 10px;">Fold 语义：可交换 &amp; 可结合</h3>
+      <div class="card card-accent" style="margin-bottom: 14px;">
+        <ul style="font-size: 0.83rem; margin: 0;">
+          <li><code>IncrementNlink(n)</code> — 整数加法，可结合</li>
+          <li><code>SetMtime(t)</code> / <code>SetCtime(t)</code> — 取 max，可交换</li>
         </ul>
+        <p class="small" style="margin-top: 6px; margin-bottom: 0;">并发追加的 delta 无论到达顺序如何，fold 结果都正确</p>
+      </div>
+
+      <h3 style="margin-bottom: 10px;">后台 Compaction</h3>
+      <div class="card" style="margin-bottom: 0;">
+        <p style="font-size: 0.83rem; margin: 0;">
+          <strong>DeltaCompactionWorker</strong> 每 5 秒扫描一次，当某 inode 的 delta 累积超过 <strong>32 条</strong>时，
+          将所有 delta fold 进 base inode → 原子写回 inodes CF → 清除已合并的 delta → 使缓存失效。
+          读放大始终被控制在有界范围内。
+        </p>
       </div>
     </div>
+  </div>
+
+  <div class="card card-highlight" style="padding: 12px 20px;">
+    <p style="font-size: 0.86rem; margin: 0;">
+      <strong>Delta 的核心价值：</strong>将父 inode 更新从事务关键路径中移除。
+      传统方案需要在事务内 get_for_update(parent inode) 加行锁，所有同目录操作串行等待；
+      Delta 方案只需在事务外追加一条 5~9 字节的记录，父 inode 完全不参与锁争抢。
+      这正是 Mantle 在百度 EB 级存储中验证的核心优化——同目录高并发 create 吞吐提升两个数量级。
+    </p>
   </div>
 </section>
 
 <!-- ====================================================================
-     SLIDE 13 — Concurrency Control
+     SLIDE 13 — Concurrency & POSIX Operations
      ==================================================================== -->
 <section class="slide" data-slide="12 / 17">
   <div class="slide-header">
     <span class="tag">并发控制</span>
-    <h2 style="margin: 0;">事务化元数据管理与并发安全</h2>
+    <h2 style="margin: 0;">PCC 事务 + Delta —— 高效的并发元数据管理</h2>
   </div>
 
-  <div class="columns">
-    <div class="col">
-      <h3>为什么需要事务？</h3>
-      <div class="card card-warn" style="margin-bottom: 12px;">
-        <h3>举例：并发 rename 的竞态</h3>
-        <p style="font-size: 0.84rem; margin: 0;">
-          线程 A：<code>rename("a", "c")</code> — 删除源目录项 + 写入目标目录项<br>
-          线程 B：<code>rename("b", "c")</code> — 删除源目录项 + 写入目标目录项<br>
-          如果不加事务保护，两个线程可能同时写入目标 "c"，导致一个文件丢失。
-        </p>
+  <p class="muted" style="margin-bottom: 12px;">
+    RocksDB PCC（悲观并发控制）事务提供行级锁 + 跨 CF 原子写入；Delta 机制将父 inode 更新移出事务关键路径。
+    二者配合，不同目录的操作完全并行，同目录操作仅锁目录项而不锁父 inode。
+  </p>
+
+  <div class="columns" style="gap: 24px; margin-bottom: 16px;">
+    <!-- Left: Concurrency framework -->
+    <div>
+      <h3 style="margin-bottom: 10px;">并发控制框架</h3>
+      <div class="card card-accent" style="margin-bottom: 12px;">
+        <ul style="font-size: 0.83rem; margin: 0;">
+          <li><strong>get_for_update</strong> — 读取 Key 的同时加行锁，防止 TOCTOU 竞态</li>
+          <li><strong>AtomicWriteBatch</strong> — 跨 inodes/dir_entries CF 的原子提交</li>
+          <li><strong>execute_with_retry</strong> — 冲突时自动重试（最多 3 次）</li>
+          <li><strong>Delta 事务外追加</strong> — 父 inode 更新不参与事务锁争抢</li>
+        </ul>
       </div>
 
-      <h3>PCC 悲观并发控制</h3>
-      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 18px; font-family: var(--font-mono); font-size: 0.78rem; line-height: 1.8; margin-bottom: 12px;">
-        <div style="color: var(--text-secondary);">// create("new.txt") 事务流程</div>
-        <div>1. <span style="color: var(--primary);">begin_transaction()</span></div>
-        <div>2. <span style="color: var(--accent);">get_for_update</span>(dir_entry[3|"new.txt"])</div>
-        <div>&nbsp;&nbsp;&nbsp;→ 加行锁，若已存在返回 EEXIST</div>
-        <div>3. batch_put(inode[12], value)</div>
-        <div>4. batch_put(dir_entry[3|"new.txt"], 12)</div>
-        <div>5. <span style="color: #166534;">commit()</span> → 原子写入 WAL</div>
-        <div>6. append_delta(parent_mtime) <span style="color: var(--text-secondary);">// 事务外</span></div>
-      </div>
+      <h3 style="margin-bottom: 8px;">为什么不锁父 inode？</h3>
+      <p class="small" style="margin-bottom: 8px;">
+        传统方案在事务内 <code>get_for_update(parent_inode)</code>，所有同目录操作串行等待。
+        Delta 方案下，事务只锁<strong>目录项（dir_entry）</strong>——不同文件名的 create 在同目录下也可以并行，
+        因为它们锁的是不同的 dir_entry Key。父 inode 的 nlink/mtime 更新通过事务外追加 Delta 完成。
+      </p>
 
-      <div class="card card-accent">
-        <h3>TOCTOU 防护</h3>
-        <p style="font-size: 0.84rem; margin: 0;">
-          <strong>rmdir</strong> 在事务内执行 prefix_scan 检查目录是否为空。
-          get_for_update 对目录项加行锁，防止检查后被其他线程插入新文件。
-        </p>
+      <h3 style="margin-bottom: 8px;">rename 的死锁预防</h3>
+      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.6;">
+        <div style="color: var(--text-secondary);">// 跨目录 rename：按 inode ID 排序加锁</div>
+        <div>inode_ids = [src, dst?, parent, new_parent]</div>
+        <div>inode_ids.<span style="color: var(--primary);">sort()</span>.<span style="color: var(--primary);">dedup()</span></div>
+        <div>for id in inode_ids: <span style="color: var(--accent);">get_for_update</span>(id)</div>
+        <div style="margin-top: 4px; color: var(--text-secondary);">→ 全局一致的加锁顺序，杜绝死锁</div>
       </div>
     </div>
 
-    <div class="col">
-      <h3>冲突重试机制</h3>
-      <div class="card" style="margin-bottom: 12px;">
-        <h3>execute_with_retry</h3>
-        <p style="font-size: 0.84rem; margin: 0;">
-          当两个事务同时锁定同一行时，后提交者收到 <code>TransactionConflict</code>。
-          系统自动重试（最多 3 次），对上层返回 EAGAIN。
-          参考 RocksDB TransactionDB 的悲观锁语义。
-        </p>
+    <!-- Right: 3 key POSIX operations -->
+    <div>
+      <h3 style="margin-bottom: 10px;">三个核心 POSIX 操作详解</h3>
+
+      <!-- create -->
+      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 10px;">
+        <p style="font-size: 0.84rem; font-weight: 600; margin-bottom: 4px; color: var(--primary);">create("new.txt") in /home/alice/</p>
+        <div style="font-family: var(--font-mono); font-size: 0.73rem; line-height: 1.6;">
+          <div>1. <span style="color: var(--primary);">begin_txn()</span></div>
+          <div>2. <span style="color: var(--accent);">get_for_update</span>(dir_entry[3|"new.txt"]) → 加行锁，已存在则 EEXIST</div>
+          <div>3. batch_put(inode[12], {file, 0B}) + batch_put(dir_entry[3|"new.txt"], 12)</div>
+          <div>4. <span style="color: #166534;">commit()</span> → 原子写入 WAL，跨 inodes + dir_entries CF</div>
+          <div>5. <span style="color: var(--text-secondary);">append_delta(parent, mtime=now)</span> ← 事务外，不阻塞其他线程</div>
+        </div>
       </div>
 
-      <h3>AtomicWriteBatch 跨 CF 原子性</h3>
-      <div class="card" style="margin-bottom: 12px;">
-        <p style="font-size: 0.84rem; margin: 0;">
-          一次 create 需要同时写入 <strong>inodes CF</strong>（新 inode）和 <strong>dir_entries CF</strong>（目录项）。
-          AtomicWriteBatch 保证跨 CF 写入的原子性——要么全部成功写入 WAL，要么全部回滚。
-        </p>
+      <!-- rename -->
+      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 10px;">
+        <p style="font-size: 0.84rem; font-weight: 600; margin-bottom: 4px; color: var(--primary);">rename("a.txt", "/other/b.txt") — 跨目录</p>
+        <div style="font-family: var(--font-mono); font-size: 0.73rem; line-height: 1.6;">
+          <div>1. <span style="color: var(--primary);">begin_txn()</span></div>
+          <div>2. <span style="color: var(--accent);">get_for_update</span>(src_entry + dst_entry + sorted inodes)</div>
+          <div>3. delete(src_entry) + put(dst_entry) + update src inode ctime</div>
+          <div>4. <span style="color: #166534;">commit()</span></div>
+          <div>5. <span style="color: var(--text-secondary);">append_delta(old_parent, mtime) + append_delta(new_parent, mtime)</span></div>
+        </div>
       </div>
 
-      <h3>事务化操作一览</h3>
-      <table style="font-size: 0.82rem;">
-        <tr><th>操作</th><th>锁定的 Key</th><th>原子写入内容</th></tr>
-        <tr><td>create</td><td>目标 dir_entry</td><td>inode + dir_entry</td></tr>
-        <tr><td>mkdir</td><td>目标 dir_entry</td><td>inode + dir_entry</td></tr>
-        <tr><td>unlink</td><td>目标 dir_entry + inode</td><td>delete entry, update inode</td></tr>
-        <tr><td>rmdir</td><td>目标 dir_entry + 子项扫描</td><td>delete entry + inode</td></tr>
-        <tr><td>rename</td><td>源 + 目标 dir_entry</td><td>delete src + put dst</td></tr>
-        <tr><td>link</td><td>目标 dir_entry + inode</td><td>put entry, update nlink</td></tr>
-      </table>
+      <!-- rmdir -->
+      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px;">
+        <p style="font-size: 0.84rem; font-weight: 600; margin-bottom: 4px; color: var(--primary);">rmdir("/home/alice/empty_dir/")</p>
+        <div style="font-family: var(--font-mono); font-size: 0.73rem; line-height: 1.6;">
+          <div>1. <span style="color: var(--primary);">begin_txn()</span></div>
+          <div>2. <span style="color: var(--accent);">get_for_update</span>(dir_entry + child_inode)</div>
+          <div>3. prefix_scan [child_inode|*] → 非空则 ENOTEMPTY <span style="color: var(--text-secondary);">(TOCTOU 安全)</span></div>
+          <div>4. delete(dir_entry) + delete(child_inode)</div>
+          <div>5. <span style="color: #166534;">commit()</span></div>
+          <div>6. <span style="color: var(--text-secondary);">append_delta(parent, nlink-1, mtime=now)</span></div>
+        </div>
+      </div>
     </div>
+  </div>
+
+  <div class="card card-highlight" style="padding: 12px 20px;">
+    <p style="font-size: 0.86rem; margin: 0;">
+      <strong>设计关键：</strong>事务只保护<em>结构变更</em>（inode + dir_entry 的原子写入），
+      父目录属性更新（nlink/mtime）通过 Delta 追加在事务外完成。
+      即使 Delta 丢失（崩溃），仅影响 mtime 准确性，不影响文件系统结构完整性。
+    </p>
   </div>
 </section>
 
@@ -1263,13 +1284,6 @@ tr:nth-child(even) { background: var(--bg-alt); }
           每次事务 commit 触发 WAL fsync，严重限制写入吞吐。
           优化方向：<strong>WAL Group Commit</strong>（聚合多次 fsync 为一次）、
           WriteBatch 批量聚合、LRU 缓存预热。
-        </p>
-      </div>
-      <div class="card card-warn" style="margin-bottom: 10px;">
-        <h3>FUSE 固有开销</h3>
-        <p style="font-size: 0.84rem; margin: 0;">
-          每次文件操作经历 用户态→内核→用户态 上下文切换（~3-5μs）。
-          这是 FUSE 架构的固有开销，可通过 FUSE 多线程 / splice 等方式部分缓解。
         </p>
       </div>
       <div class="card card-warn">
