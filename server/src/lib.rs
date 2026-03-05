@@ -17,7 +17,7 @@ use rucksfs_core::{
     OpenResponse, SetAttrRequest, StatFs,
 };
 use rucksfs_storage::allocator::{InodeAllocator, ROOT_INODE};
-use rucksfs_storage::encoding::{encode_dir_entry_key, encode_inode_key, InodeValue};
+use rucksfs_storage::encoding::{encode_delta_key, encode_dir_entry_key, encode_inode_key, InodeValue};
 use rucksfs_storage::{
     AtomicWriteBatch, BatchOp, DeltaStore, DirectoryIndex, MetadataStore, StorageBundle,
 };
@@ -290,6 +290,25 @@ where
         });
     }
 
+    /// Write nlink delta operations for a parent directory inside the
+    /// transaction batch.  Each delta is stored as a `PutDelta` operation
+    /// using the shared `delta_store`'s sequence allocator.
+    fn batch_nlink_deltas(
+        batch: &mut dyn AtomicWriteBatch,
+        delta_store: &dyn DeltaStore,
+        parent: Inode,
+        deltas: &[DeltaOp],
+    ) {
+        for delta in deltas {
+            let seq = delta_store.next_seq(parent);
+            let key = encode_delta_key(parent, seq);
+            batch.push(BatchOp::PutDelta {
+                key: key.to_vec(),
+                value: delta.serialize(),
+            });
+        }
+    }
+
     // -- helper: delta append -----------------------------------------------
 
     /// Append delta operations for a parent directory and update the cache.
@@ -532,6 +551,15 @@ where
 
             Self::batch_put_inode(batch.as_mut(), new_inode, &iv);
             Self::batch_put_dir_entry(batch.as_mut(), parent, &name_owned, new_inode, iv.mode);
+
+            // Nlink delta inside transaction for correctness.
+            Self::batch_nlink_deltas(
+                batch.as_mut(),
+                self.delta_store.as_ref(),
+                parent,
+                &[DeltaOp::IncrementNlink(1)],
+            );
+
             batch.commit()?;
 
             Ok((iv, new_inode))
@@ -542,21 +570,19 @@ where
 
         // Update in-memory state.
         self.cache.put(new_inode, iv.clone());
+        self.cache.apply_delta(parent, &DeltaOp::IncrementNlink(1));
+        self.compaction.mark_dirty(parent);
         if !self.index.shares_batch_storage() {
             let _ = self
                 .index
                 .insert_child(parent, &name_owned, new_inode, iv.to_attr());
         }
 
-        // Delta append outside transaction.
+        // Timestamp deltas remain outside transaction.
         let ts = now_secs();
         let _ = self.append_parent_deltas(
             parent,
-            &[
-                DeltaOp::IncrementNlink(1),
-                DeltaOp::SetMtime(ts),
-                DeltaOp::SetCtime(ts),
-            ],
+            &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
         );
 
         Ok(iv.to_attr())
@@ -669,6 +695,15 @@ where
 
             Self::batch_delete_dir_entry(batch.as_mut(), parent, &name_owned);
             Self::batch_delete_inode(batch.as_mut(), child_inode);
+
+            // Nlink delta inside transaction for correctness.
+            Self::batch_nlink_deltas(
+                batch.as_mut(),
+                self.delta_store.as_ref(),
+                parent,
+                &[DeltaOp::IncrementNlink(-1)],
+            );
+
             batch.commit()?;
 
             // Update in-memory state after commit.
@@ -681,14 +716,15 @@ where
             Ok(())
         })?;
 
+        // Update cache for the nlink delta written inside the transaction.
+        self.cache.apply_delta(parent, &DeltaOp::IncrementNlink(-1));
+        self.compaction.mark_dirty(parent);
+
+        // Timestamp deltas remain outside transaction.
         let ts = now_secs();
         let _ = self.append_parent_deltas(
             parent,
-            &[
-                DeltaOp::IncrementNlink(-1),
-                DeltaOp::SetMtime(ts),
-                DeltaOp::SetCtime(ts),
-            ],
+            &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
         );
 
         Ok(())
@@ -704,7 +740,15 @@ where
         let name_owned = name.to_string();
         let new_name_owned = new_name.to_string();
 
-        let need_delete_data = self.execute_with_retry(|| {
+        /// Tracks which nlink deltas were written inside the transaction
+        /// so we can update the cache after commit.
+        struct RenameResult {
+            delete_inode: Option<Inode>,
+            src_is_dir: bool,
+            dst_was_dir: bool,
+        }
+
+        let result = self.execute_with_retry(|| {
             let mut batch = self.begin_write();
 
             // Read and lock the source dir entry.
@@ -795,6 +839,30 @@ where
             updated_src.ctime = ts;
             Self::batch_put_inode(batch.as_mut(), src_inode, &updated_src);
 
+            // Nlink deltas inside transaction for correctness.
+            if dst_was_dir {
+                Self::batch_nlink_deltas(
+                    batch.as_mut(),
+                    self.delta_store.as_ref(),
+                    new_parent,
+                    &[DeltaOp::IncrementNlink(-1)],
+                );
+            }
+            if src_is_dir && parent != new_parent {
+                Self::batch_nlink_deltas(
+                    batch.as_mut(),
+                    self.delta_store.as_ref(),
+                    parent,
+                    &[DeltaOp::IncrementNlink(-1)],
+                );
+                Self::batch_nlink_deltas(
+                    batch.as_mut(),
+                    self.delta_store.as_ref(),
+                    new_parent,
+                    &[DeltaOp::IncrementNlink(1)],
+                );
+            }
+
             batch.commit()?;
 
             // Update in-memory state after commit.
@@ -814,53 +882,40 @@ where
             }
             self.cache.put(src_inode, updated_src);
 
-            // Delta appends outside batch.
-            if dst_was_dir {
-                let _ = self.append_parent_deltas(
-                    new_parent,
-                    &[
-                        DeltaOp::IncrementNlink(-1),
-                        DeltaOp::SetMtime(ts),
-                        DeltaOp::SetCtime(ts),
-                    ],
-                );
-            }
-
-            if src_is_dir && parent != new_parent {
-                let _ = self.append_parent_deltas(
-                    parent,
-                    &[
-                        DeltaOp::IncrementNlink(-1),
-                        DeltaOp::SetMtime(ts),
-                        DeltaOp::SetCtime(ts),
-                    ],
-                );
-                let _ = self.append_parent_deltas(
-                    new_parent,
-                    &[
-                        DeltaOp::IncrementNlink(1),
-                        DeltaOp::SetMtime(ts),
-                        DeltaOp::SetCtime(ts),
-                    ],
-                );
-            } else {
-                let _ = self.append_parent_deltas(
-                    parent,
-                    &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
-                );
-                if parent != new_parent {
-                    let _ = self.append_parent_deltas(
-                        new_parent,
-                        &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
-                    );
-                }
-            }
-
-            Ok(delete_inode)
+            Ok(RenameResult {
+                delete_inode,
+                src_is_dir,
+                dst_was_dir,
+            })
         })?;
 
+        // Update cache for nlink deltas written inside the transaction.
+        let ts = now_secs();
+        if result.dst_was_dir {
+            self.cache.apply_delta(new_parent, &DeltaOp::IncrementNlink(-1));
+            self.compaction.mark_dirty(new_parent);
+        }
+        if result.src_is_dir && parent != new_parent {
+            self.cache.apply_delta(parent, &DeltaOp::IncrementNlink(-1));
+            self.compaction.mark_dirty(parent);
+            self.cache.apply_delta(new_parent, &DeltaOp::IncrementNlink(1));
+            self.compaction.mark_dirty(new_parent);
+        }
+
+        // Timestamp deltas remain outside transaction.
+        let _ = self.append_parent_deltas(
+            parent,
+            &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
+        );
+        if parent != new_parent {
+            let _ = self.append_parent_deltas(
+                new_parent,
+                &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
+            );
+        }
+
         // Ask DataServer to clean up data (outside transaction scope).
-        if let Some(inode) = need_delete_data {
+        if let Some(inode) = result.delete_inode {
             self.data_client.delete_data(inode).await?;
         }
 
