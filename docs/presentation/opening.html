@@ -888,7 +888,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
 </section>
 
 <!-- ====================================================================
-     SLIDE 11 — Namespace to KV Mapping with Example
+     SLIDE 11 — Namespace to KV Mapping: Flat vs Hierarchical
      ==================================================================== -->
 <section class="slide" data-slide="10 / 17">
   <div class="slide-header">
@@ -896,65 +896,84 @@ tr:nth-child(even) { background: var(--bg-alt); }
     <h2 style="margin: 0;">文件命名空间到 KV 存储的映射</h2>
   </div>
 
-  <div class="columns">
-    <div class="col">
-      <h3>举例：一个目录树如何存入 KV？</h3>
-      <p class="muted" style="margin-bottom: 10px;">考虑以下目录结构：</p>
+  <!-- Example directory tree -->
+  <p class="muted" style="margin-bottom: 8px;">以目录树 <code>/home/alice/{notes.txt, photo.jpg}</code> 为例，对比两种 KV 映射方案：</p>
 
-      <!-- Directory tree diagram -->
-      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 20px; font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.8; margin-bottom: 14px;">
-        <div><strong style="color: var(--primary);">/</strong> &nbsp;(inode 1, 目录)</div>
-        <div>&nbsp;├── <strong style="color: var(--primary);">home/</strong> &nbsp;(inode 2, 目录)</div>
-        <div>&nbsp;│&nbsp;&nbsp; └── <strong style="color: var(--primary);">alice/</strong> &nbsp;(inode 3, 目录)</div>
-        <div>&nbsp;│&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ├── notes.txt &nbsp;(inode 10, 文件, 1024B)</div>
-        <div>&nbsp;│&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; └── photo.jpg &nbsp;(inode 11, 文件, 2MB)</div>
-        <div>&nbsp;└── <strong style="color: var(--primary);">etc/</strong> &nbsp;(inode 4, 目录)</div>
-      </div>
-
-      <h3>映射为 KV 后的存储内容</h3>
-      <p class="small" style="margin-bottom: 6px;"><strong>CF: inodes</strong> — 每个文件/目录一条记录</p>
-      <div style="font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.6; background: #f8fafc; padding: 8px 12px; border-radius: 4px; border: 1px solid var(--border);">
-        <div><span style="color: #1e40af;">Key: [1]</span> → <span style="color: #166534;">{ mode: dir, nlink: 4, mtime: ... }</span></div>
-        <div><span style="color: #1e40af;">Key: [2]</span> → <span style="color: #166534;">{ mode: dir, nlink: 3, mtime: ... }</span></div>
-        <div><span style="color: #1e40af;">Key: [3]</span> → <span style="color: #166534;">{ mode: dir, nlink: 4, mtime: ... }</span></div>
-        <div><span style="color: #1e40af;">Key: [10]</span> → <span style="color: #166534;">{ mode: file, size: 1024, uid: alice }</span></div>
-        <div><span style="color: #1e40af;">Key: [11]</span> → <span style="color: #166534;">{ mode: file, size: 2MB, uid: alice }</span></div>
+  <div class="columns" style="gap: 28px; margin-bottom: 20px;">
+    <!-- Left: Flat KV -->
+    <div>
+      <h3 style="color: var(--accent); margin-bottom: 10px;">方案 A：扁平 KV（完整路径做 Key）</h3>
+      <p class="small" style="margin-bottom: 6px;">S3、COS 等对象存储的常见做法</p>
+      <div style="font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.7; background: var(--bg-alt); padding: 10px 14px; border-radius: var(--radius); border: 1px solid var(--border);">
+        <div><span style="color: #92400e;">"/home"</span> → <span style="color: #64748b;">{ mode: dir, ... }</span></div>
+        <div><span style="color: #92400e;">"/home/alice"</span> → <span style="color: #64748b;">{ mode: dir, ... }</span></div>
+        <div><span style="color: #92400e;">"/home/alice/notes.txt"</span> → <span style="color: #64748b;">{ size: 1024, ... }</span></div>
+        <div><span style="color: #92400e;">"/home/alice/photo.jpg"</span> → <span style="color: #64748b;">{ size: 2MB, ... }</span></div>
+        <div><span style="color: #92400e;">"/home/alice_backup/a.txt"</span> → <span style="color: #64748b;">{ ... }</span></div>
       </div>
     </div>
 
-    <div class="col">
-      <p class="small" style="margin-bottom: 6px;"><strong>CF: dir_entries</strong> — 每个"父→子"关系一条记录</p>
-      <div style="font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.6; background: #f8fafc; padding: 8px 12px; border-radius: 4px; border: 1px solid var(--border); margin-bottom: 14px;">
-        <div><span style="color: #1e40af;">Key: [1|"home"]</span> → <span style="color: #166534;">{ child: 2, type: dir }</span></div>
-        <div><span style="color: #1e40af;">Key: [1|"etc"]</span> → <span style="color: #166534;">{ child: 4, type: dir }</span></div>
-        <div><span style="color: #1e40af;">Key: [2|"alice"]</span> → <span style="color: #166534;">{ child: 3, type: dir }</span></div>
-        <div><span style="color: #1e40af;">Key: [3|"notes.txt"]</span> → <span style="color: #166534;">{ child: 10, type: file }</span></div>
-        <div><span style="color: #1e40af;">Key: [3|"photo.jpg"]</span> → <span style="color: #166534;">{ child: 11, type: file }</span></div>
-      </div>
-
-      <h3>这种映射为什么高效？</h3>
-      <div class="card card-accent" style="margin-bottom: 10px;">
-        <h3>lookup /home/alice/notes.txt</h3>
-        <p style="font-size: 0.84rem; margin: 0;">
-          逐级查询：<code>[1|"home"]→2</code> → <code>[2|"alice"]→3</code> → <code>[3|"notes.txt"]→10</code> → 读 inode [10]。
-          <strong>每一级只需一次精确 KV get，无需遍历。</strong>
-        </p>
-      </div>
-      <div class="card card-accent" style="margin-bottom: 10px;">
-        <h3>readdir /home/alice/</h3>
-        <p style="font-size: 0.84rem; margin: 0;">
-          前缀扫描 <code>[3|*]</code>，返回所有以 inode 3 为前缀的 Key。
-          <strong>RocksDB SST 文件有序，前缀扫描 = 顺序读取，极其高效。</strong>
-        </p>
-      </div>
-      <div class="card card-accent">
-        <h3>create /home/alice/new.txt</h3>
-        <p style="font-size: 0.84rem; margin: 0;">
-          原子写入：① put inode [12] ② put dir_entry [3|"new.txt"]→12。
-          <strong>WriteBatch 一次提交，保证原子性。</strong>
-        </p>
+    <!-- Right: Hierarchical KV (ours) -->
+    <div>
+      <h3 style="color: var(--primary); margin-bottom: 10px;">方案 B：层级 KV（parent_inode + name 做 Key）</h3>
+      <p class="small" style="margin-bottom: 6px;">本系统采用，两个 Column Family 分别存储</p>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+        <div>
+          <p class="small" style="margin-bottom: 4px; font-weight: 600;">CF: inodes</p>
+          <div style="font-family: var(--font-mono); font-size: 0.73rem; line-height: 1.7; background: var(--bg-alt); padding: 8px 12px; border-radius: var(--radius); border: 1px solid var(--border);">
+            <div><span style="color: #1e40af;">[2]</span> → <span style="color: #166534;">{ dir, nlink:3 }</span></div>
+            <div><span style="color: #1e40af;">[3]</span> → <span style="color: #166534;">{ dir, nlink:4 }</span></div>
+            <div><span style="color: #1e40af;">[10]</span> → <span style="color: #166534;">{ file, 1024B }</span></div>
+            <div><span style="color: #1e40af;">[11]</span> → <span style="color: #166534;">{ file, 2MB }</span></div>
+          </div>
+        </div>
+        <div>
+          <p class="small" style="margin-bottom: 4px; font-weight: 600;">CF: dir_entries</p>
+          <div style="font-family: var(--font-mono); font-size: 0.73rem; line-height: 1.7; background: var(--bg-alt); padding: 8px 12px; border-radius: var(--radius); border: 1px solid var(--border);">
+            <div><span style="color: #1e40af;">[1|"home"]</span> → <span style="color: #166534;">child:2</span></div>
+            <div><span style="color: #1e40af;">[2|"alice"]</span> → <span style="color: #166534;">child:3</span></div>
+            <div><span style="color: #1e40af;">[3|"notes.txt"]</span> → <span style="color: #166534;">child:10</span></div>
+            <div><span style="color: #1e40af;">[3|"photo.jpg"]</span> → <span style="color: #166534;">child:11</span></div>
+          </div>
+        </div>
       </div>
     </div>
+  </div>
+
+  <!-- Comparison table -->
+  <table style="font-size: 0.82rem; margin-bottom: 16px;">
+    <tr>
+      <th style="width: 20%;">操作</th>
+      <th style="width: 40%;">扁平 KV（完整路径）</th>
+      <th style="width: 40%;">层级 KV（本系统）</th>
+    </tr>
+    <tr>
+      <td><strong>rename 目录</strong><br/><span class="small">mv /home/alice → /home/bob</span></td>
+      <td style="color: var(--accent);"><strong>O(N)</strong> — 必须改写所有子孙 Key<br/><span class="small" style="color: var(--text-secondary);">路径前缀变了，每条记录都要删旧写新</span></td>
+      <td style="color: var(--primary);"><strong>O(1)</strong> — 只改一条 dir_entry<br/><span class="small" style="color: var(--text-secondary);">[1|"alice"]→3 改为 [1|"bob"]→3，子孙不动</span></td>
+    </tr>
+    <tr>
+      <td><strong>readdir</strong><br/><span class="small">ls /home/alice/</span></td>
+      <td style="color: var(--accent);">前缀扫描 <code>"/home/alice/"</code><br/><span class="small" style="color: var(--text-secondary);">会误扫到 "/home/alice_backup/..." 需过滤</span></td>
+      <td style="color: var(--primary);">前缀扫描 <code>[3|*]</code>（8字节数字前缀）<br/><span class="small" style="color: var(--text-secondary);">精确匹配，无误扫；RocksDB 有序 SST 顺序读取</span></td>
+    </tr>
+    <tr>
+      <td><strong>lookup</strong><br/><span class="small">stat /home/alice/notes.txt</span></td>
+      <td>单次 get <code>"/home/alice/notes.txt"</code><br/><span class="small" style="color: var(--text-secondary);">Key 平均 30+ 字节，比较开销大</span></td>
+      <td>逐级 get：<code>[1|"home"]</code>→<code>[2|"alice"]</code>→<code>[3|"notes.txt"]</code><br/><span class="small" style="color: var(--text-secondary);">3 次 get，但每次 Key 短，且可缓存中间结果</span></td>
+    </tr>
+    <tr>
+      <td><strong>Key 大小</strong></td>
+      <td>路径越深越长 — 平均 <strong>30~100 B</strong><br/><span class="small" style="color: var(--text-secondary);">深层嵌套场景下 Key 占比超过 Value</span></td>
+      <td>固定 <strong>8 B + name</strong> — 平均 <strong>~20 B</strong><br/><span class="small" style="color: var(--text-secondary);">Key 紧凑，RocksDB Bloom Filter / 压缩更高效</span></td>
+    </tr>
+  </table>
+
+  <div class="card card-highlight" style="padding: 12px 20px;">
+    <p style="font-size: 0.88rem; margin: 0;">
+      <strong>选择层级 KV 的核心原因：</strong>rename 是 POSIX 语义的基础操作，扁平 KV 下 rename 目录代价为 O(N) 是不可接受的。
+      层级 KV 以 lookup 多一两次 get 为代价（可通过 VFS 缓存消除），换取 rename O(1)、readdir 精确扫描、Key 存储紧凑三大优势。
+    </p>
   </div>
 </section>
 
