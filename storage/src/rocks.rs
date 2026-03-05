@@ -643,7 +643,9 @@ impl<'db> AtomicWriteBatch for RocksWriteBatch<'db> {
 
 impl StorageBundle for RocksStorageBundle {
     fn begin_write(&self) -> Box<dyn AtomicWriteBatch + '_> {
-        let txn_opts = TransactionOptions::default();
+        let mut txn_opts = TransactionOptions::default();
+        txn_opts.set_lock_timeout(5000); // 5s lock wait timeout
+        txn_opts.set_deadlock_detect(true);
         let write_opts = WriteOptions::default();
         let txn = self.db.transaction_opt(&write_opts, &txn_opts);
         Box::new(RocksWriteBatch {
