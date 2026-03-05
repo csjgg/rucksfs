@@ -1070,32 +1070,53 @@ tr:nth-child(even) { background: var(--bg-alt); }
   </div>
 
   <p class="muted" style="margin-bottom: 14px;">
-    RocksDB PCC 事务提供行级锁 + 跨 CF 原子写入；Delta 将父 inode 更新移出事务关键路径。
-    事务只锁 <strong>dir_entry</strong>，不锁父 inode——同目录不同文件名的操作可完全并行。
+    RocksDB <strong>TransactionDB (Pessimistic)</strong> 提供 ACID 事务语义；我们在此基础上用 Delta 机制进一步缩小事务临界区。
   </p>
 
-  <!-- Row 1: Concurrency primitives — horizontal tags -->
-  <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 12px; margin-bottom: 16px;">
-    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px;">
-      <div style="font-weight: 600; font-size: 0.82rem; margin-bottom: 4px; color: var(--primary);">get_for_update</div>
-      <div style="font-size: 0.78rem; color: var(--text-secondary);">读取 Key 同时加行锁，防止 TOCTOU 竞态</div>
+  <!-- Row 1: RocksDB Transaction Fundamentals -->
+  <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; margin-bottom: 16px;">
+    <!-- Atomicity -->
+    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px;">
+      <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px;">
+        <span style="font-size: 1rem;">⚛️</span>
+        <span style="font-weight: 700; font-size: 0.84rem; color: var(--primary);">原子性 (Atomicity)</span>
+      </div>
+      <div style="font-size: 0.76rem; color: var(--text-secondary); line-height: 1.6;">
+        所有写操作先缓存在内存 <strong>WriteBatch</strong> 中，commit 时一次性写入 WAL + MemTable——要么全部成功，要么全部回滚。
+        <strong>跨 Column Family 同样保证原子性</strong>。
+      </div>
     </div>
-    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px;">
-      <div style="font-weight: 600; font-size: 0.82rem; margin-bottom: 4px; color: var(--primary);">AtomicWriteBatch</div>
-      <div style="font-size: 0.78rem; color: var(--text-secondary);">跨 inodes / dir_entries CF 原子提交</div>
+    <!-- Isolation -->
+    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px;">
+      <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px;">
+        <span style="font-size: 1rem;">🔒</span>
+        <span style="font-weight: 700; font-size: 0.84rem; color: var(--primary);">隔离级别 & 行级锁</span>
+      </div>
+      <div style="font-size: 0.76rem; color: var(--text-secondary); line-height: 1.6;">
+        PCC 模式下每次写 / <code style="font-size: 0.72rem;">GetForUpdate</code> 都先获取 <strong>行级排他锁</strong>。
+        默认 <strong>Read Committed</strong>；通过 <code style="font-size: 0.72rem;">SetSnapshot</code> 可提升到 <strong>Repeatable Read</strong>。
+      </div>
     </div>
-    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px;">
-      <div style="font-weight: 600; font-size: 0.82rem; margin-bottom: 4px; color: var(--primary);">execute_with_retry</div>
-      <div style="font-size: 0.78rem; color: var(--text-secondary);">事务冲突时自动重试（最多 3 次）</div>
-    </div>
-    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px;">
-      <div style="font-weight: 600; font-size: 0.82rem; margin-bottom: 4px; color: var(--primary);">Delta 事务外追加</div>
-      <div style="font-size: 0.78rem; color: var(--text-secondary);">父 inode nlink/mtime 不参与锁争抢</div>
+    <!-- Conflict & Retry -->
+    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px;">
+      <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px;">
+        <span style="font-size: 1rem;">🔄</span>
+        <span style="font-weight: 700; font-size: 0.84rem; color: var(--primary);">冲突检测 & 重试</span>
+      </div>
+      <div style="font-size: 0.76rem; color: var(--text-secondary); line-height: 1.6;">
+        加锁失败立即返回 <code style="font-size: 0.72rem;">Busy</code>，无需等到 commit 再做冲突检测。
+        我们封装 <code style="font-size: 0.72rem;">execute_with_retry</code>，冲突时自动重试最多 3 次。
+      </div>
     </div>
   </div>
 
-  <!-- Row 2: Three POSIX operations — equal-width columns -->
-  <h3 style="margin: 0 0 10px 0; font-size: 0.92rem;">核心 POSIX 操作</h3>
+  <!-- Row 1.5: How we use it — subtitle + key point -->
+  <div style="display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px;">
+    <h3 style="margin: 0; font-size: 0.92rem;">核心 POSIX 操作示例</h3>
+    <span class="muted" style="font-size: 0.76rem;">
+      事务只锁 <strong>dir_entry</strong>，不锁父 inode——同目录不同文件名的操作可完全并行；父目录属性更新通过 Delta 事务外追加。
+    </span>
+  </div>
   <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; margin-bottom: 16px;">
     <!-- create -->
     <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px;">
