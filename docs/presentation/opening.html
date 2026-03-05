@@ -519,21 +519,16 @@ tr:nth-child(even) { background: var(--bg-alt); }
     <!-- Right: scenarios -->
     <div class="col">
       <h3 style="margin-bottom: 14px;">海量小文件：瓶颈的放大器</h3>
-      <div class="card card-accent" style="margin-bottom: 10px;">
-        <h3>AI 训练数据</h3>
-        <p style="font-size: 0.84rem; margin: 0;">ImageNet 含 1400 万张图片，每张 &lt;100 KB。训练前 <code>readdir + stat</code> 扫描即产生<strong>数千万次元数据操作</strong>。</p>
-      </div>
-      <div class="card card-accent" style="margin-bottom: 10px;">
-        <h3>容器与微服务</h3>
-        <p style="font-size: 0.84rem; margin: 0;">单个容器镜像含数万文件。Kubernetes 集群启动数百 Pod 时，文件系统面临<strong>突发性的元数据风暴</strong>。</p>
-      </div>
-      <div class="card card-accent" style="margin-bottom: 10px;">
-        <h3>日志与 IoT 数据</h3>
-        <p style="font-size: 0.84rem; margin: 0;">微服务日志、传感器数据以<strong>高频 create</strong> 模式持续写入。单集群日产亿级小文件，元数据压力远超数据 I/O。</p>
+      <div class="card card-accent" style="margin-bottom: 14px;">
+        <h3>大量小文件场景无处不在</h3>
+        <p style="font-size: 0.86rem; margin: 0; line-height: 1.7;">
+          AI 训练（千万级小图片）、容器镜像（数万碎片文件）、日志采集（高频 create）、IoT 数据流等场景，均会产生<strong>海量小文件</strong>，对元数据管理造成巨大压力。
+        </p>
       </div>
       <div class="card card-warn">
-        <p style="font-size: 0.84rem; margin: 0; line-height: 1.6;">
-          <strong>共同特征：</strong>文件数量极大、单文件极小 → 每字节有效数据需要的元数据操作反而更多，元数据成为<strong>真正的性能主导因素</strong>。
+        <h3>共同特征</h3>
+        <p style="font-size: 0.86rem; margin: 0; line-height: 1.7;">
+          文件数量极大、单文件极小 → 每字节有效数据需要的元数据操作反而更多。<strong>元数据成为真正的性能主导因素</strong>。
         </p>
       </div>
     </div>
