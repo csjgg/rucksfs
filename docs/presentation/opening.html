@@ -469,22 +469,21 @@ tr:nth-child(even) { background: var(--bg-alt); }
     <h2 style="margin: 0;">元数据已成为文件系统的核心性能瓶颈</h2>
   </div>
 
-  <!-- Hero conclusion banner -->
-  <div style="background: var(--bg-alt); border: 1px solid var(--border); border-left: 3px solid var(--primary); border-radius: var(--radius); padding: 18px 24px; margin-bottom: 24px;">
-    <div style="font-size: 1.05rem; font-weight: 700; margin-bottom: 6px; color: var(--primary-dark);">核心论点：每一次文件访问都必须先经过元数据操作</div>
-    <div style="font-size: 0.88rem; color: var(--text-secondary); line-height: 1.65;">
-      路径解析 → lookup → 权限检查 → 打开文件。文件越小、越多，元数据操作在总 I/O 中的占比越大。在海量小文件场景下，元数据管理已成为文件系统扩展性的<strong style="color: var(--primary);">第一瓶颈</strong>。
+  <!-- Concise banner — no "核心论点" label -->
+  <div style="background: var(--bg-alt); border: 1px solid var(--border); border-left: 3px solid var(--primary); border-radius: var(--radius); padding: 16px 24px; margin-bottom: 22px;">
+    <div style="font-size: 0.92rem; color: var(--text); line-height: 1.7;">
+      在生产环境中，<strong style="color: var(--primary);">元数据操作已占文件系统总 I/O 的一半以上</strong>。文件越小、数量越多，元数据在总开销中的占比越大，成为制约系统吞吐与扩展性的首要瓶颈。
     </div>
   </div>
 
-  <div class="columns" style="gap: 32px;">
+  <div class="columns" style="gap: 28px;">
     <!-- Left: key data -->
     <div class="col">
-      <h3 style="margin-bottom: 14px;">生产环境数据佐证</h3>
-      <table style="font-size: 0.84rem; margin-bottom: 16px;">
+      <h3 style="margin-bottom: 12px;">生产环境数据佐证</h3>
+      <table style="font-size: 0.84rem; margin-bottom: 14px;">
         <tr>
-          <th style="width: 22%;">指标</th>
-          <th style="width: 18%;">数值</th>
+          <th style="width: 24%;">指标</th>
+          <th style="width: 16%;">数值</th>
           <th>来源</th>
         </tr>
         <tr>
@@ -494,35 +493,34 @@ tr:nth-child(even) { background: var(--bg-alt); }
         </tr>
         <tr>
           <td>元数据占小文件延迟</td>
-          <td><strong style="color: var(--accent); font-size: 1.05rem;">40%</strong></td>
+          <td><strong style="color: var(--primary); font-size: 1.05rem;">40%</strong></td>
           <td>Yang et al. <span class="small">[MSST'19]</span></td>
         </tr>
-
         <tr>
           <td>元数据节点 QPS</td>
-          <td><strong style="color: #7c3aed; font-size: 1.05rem;">数亿</strong></td>
+          <td><strong style="color: var(--primary); font-size: 1.05rem;">数亿</strong></td>
           <td>阿里 Pangu 2.0 <span class="small">[FAST'23]</span></td>
         </tr>
       </table>
 
-      <div class="card card-highlight">
+      <div class="card card-accent">
         <p style="font-size: 0.86rem; margin: 0; line-height: 1.6;">
-          <strong>结论：</strong>在现代文件系统的生产负载中，元数据操作占比超过一半，已成为限制系统吞吐与扩展性的<strong>主要矛盾</strong>——优化元数据管理刻不容缓。
+          <strong>结论：</strong>元数据操作占比超过一半，已成为限制系统吞吐与扩展性的主要矛盾——优化元数据管理刻不容缓。
         </p>
       </div>
     </div>
 
     <!-- Right: scenarios -->
     <div class="col">
-      <h3 style="margin-bottom: 14px;">海量小文件：瓶颈的放大器</h3>
-      <div class="card card-accent" style="margin-bottom: 14px;">
-        <h3>大量小文件场景无处不在</h3>
+      <h3 style="margin-bottom: 12px;">海量小文件：瓶颈的放大器</h3>
+      <div class="card card-accent" style="margin-bottom: 12px;">
+        <h3 style="margin-bottom: 6px;">大量小文件场景无处不在</h3>
         <p style="font-size: 0.86rem; margin: 0; line-height: 1.7;">
           AI 训练（千万级小图片）、容器镜像（数万碎片文件）、日志采集（高频 create）、IoT 数据流等场景，均会产生<strong>海量小文件</strong>，对元数据管理造成巨大压力。
         </p>
       </div>
-      <div class="card card-warn">
-        <h3>共同特征</h3>
+      <div class="card card-accent">
+        <h3 style="margin-bottom: 6px;">共同特征</h3>
         <p style="font-size: 0.86rem; margin: 0; line-height: 1.7;">
           文件数量极大、单文件极小 → 每字节有效数据需要的元数据操作反而更多。<strong>元数据成为真正的性能主导因素</strong>。
         </p>
