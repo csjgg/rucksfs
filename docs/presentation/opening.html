@@ -789,66 +789,100 @@ tr:nth-child(even) { background: var(--bg-alt); }
     <h2 style="margin: 0;">系统整体架构</h2>
   </div>
 
-  <div class="columns">
-    <div class="col">
-      <div class="arch" style="max-width: 100%;">
-        <div class="arch-row">
-          <div class="arch-box layer-app" style="flex: 1;">用户程序 (ls, cp, cat, gcc, ...)</div>
+  <!-- Full-width layered architecture diagram -->
+  <div style="max-width: 760px; margin: 0 auto 20px; font-family: var(--font-mono); font-size: 0.82rem;">
+
+    <!-- Layer 1: User programs -->
+    <div style="display: flex; justify-content: center; margin-bottom: 4px;">
+      <div style="flex: 1; background: var(--bg-alt); border: 1px solid var(--border); border-radius: 6px; padding: 10px 20px; text-align: center; font-weight: 500; color: var(--text);">
+        用户程序 &nbsp;(ls, cp, cat, gcc, ...)
+      </div>
+    </div>
+    <div style="text-align: center; color: var(--text-secondary); font-size: 0.75rem; line-height: 1.4; margin-bottom: 4px;">↕ POSIX syscall</div>
+
+    <!-- Kernel zone -->
+    <div style="background: #f1f5f9; border: 1px dashed var(--border); border-radius: 8px; padding: 10px 14px; margin-bottom: 4px;">
+      <div style="font-size: 0.68rem; color: var(--text-secondary); margin-bottom: 6px; font-family: var(--font-sans); font-weight: 600;">KERNEL SPACE</div>
+      <div style="display: flex; gap: 8px;">
+        <div style="flex: 1; background: #fff; border: 1px solid var(--border); border-radius: 6px; padding: 9px 16px; text-align: center; font-weight: 500; color: var(--text);">
+          Linux VFS
         </div>
-        <div class="arch-arrow">↕ &nbsp;POSIX syscall</div>
-        <div class="arch-row">
-          <div class="arch-box layer-fuse" style="flex: 1;">Linux FUSE &nbsp;(/dev/fuse)</div>
-        </div>
-        <div class="arch-arrow">↕ &nbsp;FUSE protocol</div>
-        <div class="arch-row">
-          <div class="arch-box layer-client" style="flex: 1;">FUSE 客户端 → VFS 路由层 → 嵌入式客户端</div>
-        </div>
-        <div class="arch-arrow">↕ &nbsp;trait MetadataOps / DataOps</div>
-        <div class="arch-row">
-          <div class="arch-box layer-engine" style="flex: 1;">
-            元数据引擎<br>
-            <span style="font-size: 0.72rem;">PCC 事务 · Delta 增量 · LRU 缓存 · 后台压缩</span>
-          </div>
-          <div class="arch-box layer-engine" style="flex: 0.5;">
-            数据引擎<br>
-            <span style="font-size: 0.72rem;">文件读写</span>
-          </div>
-        </div>
-        <div class="arch-arrow">↕ &nbsp;storage traits</div>
-        <div class="arch-row">
-          <div class="arch-box layer-store" style="flex: 1;">RocksDB (3 Column Family)</div>
-          <div class="arch-box layer-store" style="flex: 0.5;">RawDisk (flat file)</div>
+        <div style="display: flex; align-items: center; color: var(--text-secondary); font-size: 0.75rem;">→</div>
+        <div style="flex: 1; background: #fff; border: 1px solid var(--border); border-radius: 6px; padding: 9px 16px; text-align: center; font-weight: 500; color: var(--text);">
+          FUSE 内核模块
         </div>
       </div>
     </div>
-    <div class="col">
-      <h3>设计要点</h3>
-      <div class="card" style="margin-bottom: 10px;">
-        <h3>单二进制、零网络开销</h3>
-        <p style="font-size: 0.88rem; margin: 0;">
-          元数据引擎、数据引擎、FUSE 客户端运行在同一进程内。
-          类似 JuiceFS 的单 binary 架构，所有操作均为本地函数调用。
-        </p>
+    <div style="text-align: center; color: var(--text-secondary); font-size: 0.75rem; line-height: 1.4; margin-bottom: 4px;">↕ /dev/fuse</div>
+
+    <!-- User-space zone -->
+    <div style="background: var(--primary-light); border: 1px solid #c5d5f0; border-radius: 8px; padding: 10px 14px; margin-bottom: 0;">
+      <div style="font-size: 0.68rem; color: var(--primary-dark); margin-bottom: 6px; font-family: var(--font-sans); font-weight: 600;">USER SPACE — RucksFS 单进程</div>
+
+      <!-- FuseClient -->
+      <div style="background: #fff; border: 1px solid #c5d5f0; border-radius: 6px; padding: 9px 16px; text-align: center; font-weight: 500; color: var(--primary-dark); margin-bottom: 6px;">
+        FuseClient &nbsp;<span style="font-weight: 400; color: var(--text-secondary); font-size: 0.76rem;">(impl fuser::Filesystem — 解析 FUSE 请求)</span>
       </div>
-      <div class="card" style="margin-bottom: 10px;">
-        <h3>Trait-Based 分层解耦</h3>
-        <p style="font-size: 0.88rem; margin: 0;">
-          参考 JuiceFS 的 Meta Engine 可替换设计。
-          通过 MetadataOps / DataOps / VfsOps 三层 trait 定义接口，存储后端可独立替换。
-        </p>
+      <div style="text-align: center; color: var(--text-secondary); font-size: 0.72rem; margin-bottom: 4px;">↓ VfsOps trait</div>
+
+      <!-- EmbeddedClient + VfsCore -->
+      <div style="background: #fff; border: 1px solid #c5d5f0; border-radius: 6px; padding: 9px 16px; text-align: center; font-weight: 500; color: var(--primary-dark); margin-bottom: 6px;">
+        EmbeddedClient → VfsCore &nbsp;<span style="font-weight: 400; color: var(--text-secondary); font-size: 0.76rem;">(路由：元数据 vs 数据)</span>
       </div>
-      <div class="card" style="margin-bottom: 10px;">
-        <h3>Rust 实现</h3>
-        <p style="font-size: 0.88rem; margin: 0;">
-          10,000+ 行代码。利用 Rust 所有权模型保证并发安全，无 GC 停顿。
-        </p>
+      <div style="text-align: center; color: var(--text-secondary); font-size: 0.72rem; margin-bottom: 4px;">↓ MetadataOps &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ↓ DataOps</div>
+
+      <!-- MetadataServer + DataServer -->
+      <div style="display: flex; gap: 8px; margin-bottom: 6px;">
+        <div style="flex: 2; background: #fff; border: 1px solid #c5d5f0; border-radius: 6px; padding: 9px 14px; text-align: center;">
+          <div style="font-weight: 600; color: var(--primary-dark); font-size: 0.82rem;">MetadataServer</div>
+          <div style="font-size: 0.7rem; color: var(--text-secondary); margin-top: 2px;">PCC 事务 · Delta 增量 · LRU 缓存 · 后台压缩</div>
+        </div>
+        <div style="flex: 1; background: #fff; border: 1px solid #c5d5f0; border-radius: 6px; padding: 9px 14px; text-align: center;">
+          <div style="font-weight: 600; color: var(--primary-dark); font-size: 0.82rem;">DataServer</div>
+          <div style="font-size: 0.7rem; color: var(--text-secondary); margin-top: 2px;">文件 I/O</div>
+        </div>
       </div>
-      <div class="card">
-        <h3>FUSE 权限委托</h3>
-        <p style="font-size: 0.88rem; margin: 0;">
-          使用 default_permissions + allow_other 挂载选项，由内核 VFS 层处理 POSIX 权限检查。
-        </p>
+      <div style="text-align: center; color: var(--text-secondary); font-size: 0.72rem; margin-bottom: 4px;">↓ Storage traits</div>
+
+      <!-- Storage backends -->
+      <div style="display: flex; gap: 8px;">
+        <div style="flex: 2; background: #fff; border: 1px solid #c5d5f0; border-radius: 6px; padding: 9px 14px; text-align: center;">
+          <div style="font-weight: 600; color: var(--primary-dark); font-size: 0.82rem;">RocksDB</div>
+          <div style="font-size: 0.7rem; color: var(--text-secondary); margin-top: 2px;">CF: inodes · dir_entries · delta_entries · system</div>
+        </div>
+        <div style="flex: 1; background: #fff; border: 1px solid #c5d5f0; border-radius: 6px; padding: 9px 14px; text-align: center;">
+          <div style="font-weight: 600; color: var(--primary-dark); font-size: 0.82rem;">RawDisk</div>
+          <div style="font-size: 0.7rem; color: var(--text-secondary); margin-top: 2px;">flat file I/O</div>
+        </div>
       </div>
+    </div>
+  </div>
+
+  <!-- Compact design notes — single row of cards below the diagram -->
+  <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;">
+    <div class="card card-accent" style="padding: 12px 14px;">
+      <h3 style="font-size: 0.82rem; margin-bottom: 4px;">单二进制</h3>
+      <p style="font-size: 0.76rem; margin: 0; color: var(--text-secondary); line-height: 1.5;">
+        所有组件运行在同一进程，零网络开销，纯本地函数调用。
+      </p>
+    </div>
+    <div class="card card-accent" style="padding: 12px 14px;">
+      <h3 style="font-size: 0.82rem; margin-bottom: 4px;">Trait 分层解耦</h3>
+      <p style="font-size: 0.76rem; margin: 0; color: var(--text-secondary); line-height: 1.5;">
+        MetadataOps / DataOps / VfsOps 三层 trait，存储后端可独立替换。
+      </p>
+    </div>
+    <div class="card card-accent" style="padding: 12px 14px;">
+      <h3 style="font-size: 0.82rem; margin-bottom: 4px;">Rust 实现</h3>
+      <p style="font-size: 0.76rem; margin: 0; color: var(--text-secondary); line-height: 1.5;">
+        10,000+ 行代码，所有权模型保证并发安全，无 GC 停顿。
+      </p>
+    </div>
+    <div class="card card-accent" style="padding: 12px 14px;">
+      <h3 style="font-size: 0.82rem; margin-bottom: 4px;">权限委托内核</h3>
+      <p style="font-size: 0.76rem; margin: 0; color: var(--text-secondary); line-height: 1.5;">
+        default_permissions 挂载，由内核 VFS 层处理 POSIX 权限检查。
+      </p>
     </div>
   </div>
 </section>
