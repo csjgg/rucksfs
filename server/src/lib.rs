@@ -371,6 +371,23 @@ where
         }
         unreachable!()
     }
+
+    /// Decrement the open handle count for `inode` and check if a deferred
+    /// delete should be performed now that the last handle is closed.
+    ///
+    /// **Lock order**: `open_handles` → `pending_deletes` (always).
+    fn check_and_clear_deferred_delete(&self, inode: Inode) -> bool {
+        let mut handles = self.open_handles.lock().expect("open_handles poisoned");
+        if let Some(count) = handles.get_mut(&inode) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                handles.remove(&inode);
+                let mut pending = self.pending_deletes.lock().expect("pending_deletes poisoned");
+                return pending.remove(&inode);
+            }
+        }
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1134,27 +1151,7 @@ where
     }
 
     async fn release(&self, inode: Inode) -> FsResult<()> {
-        let should_delete = {
-            let mut handles = self.open_handles.lock().expect("open_handles poisoned");
-            if let Some(count) = handles.get_mut(&inode) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    handles.remove(&inode);
-                    let pending = self.pending_deletes.lock().expect("pending_deletes poisoned");
-                    pending.contains(&inode)
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        };
-        if should_delete {
-            {
-                let mut pending = self.pending_deletes.lock().expect("pending_deletes poisoned");
-                pending.remove(&inode);
-            }
-            // Delete inode data.
+        if self.check_and_clear_deferred_delete(inode) {
             self.data_client.delete_data(inode).await?;
         }
         Ok(())
