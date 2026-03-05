@@ -415,3 +415,318 @@ mod rocksdb_tests {
         }
     }
 }
+
+// ===========================================================================
+// Hard link tests (US-002, US-003)
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn link_creates_hard_link() {
+    let (_tmp, client) = new_client();
+    let file = client.create(ROOT, "original", 0o644, 0, 0).await.unwrap();
+    let linked = client.link(ROOT, "hardlink", file.inode).await.unwrap();
+
+    // Same inode, nlink incremented to 2.
+    assert_eq!(linked.inode, file.inode);
+    assert_eq!(linked.nlink, 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn link_data_shared() {
+    let (_tmp, client) = new_client();
+    let file = client.create(ROOT, "orig", 0o644, 0, 0).await.unwrap();
+    client.write(file.inode, 0, b"shared data", 0).await.unwrap();
+    client.link(ROOT, "link1", file.inode).await.unwrap();
+
+    // Read via original and via link should see the same data.
+    let link_attr = client.lookup(ROOT, "link1").await.unwrap();
+    assert_eq!(link_attr.inode, file.inode);
+    let data = client.read(file.inode, 0, 100).await.unwrap();
+    assert!(data.starts_with(b"shared data"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn link_write_via_link_read_via_original() {
+    let (_tmp, client) = new_client();
+    let file = client.create(ROOT, "a", 0o644, 0, 0).await.unwrap();
+    client.link(ROOT, "b", file.inode).await.unwrap();
+
+    // Write through the linked name.
+    client.write(file.inode, 0, b"written via link", 0).await.unwrap();
+
+    // Read via original name.
+    let data = client.read(file.inode, 0, 100).await.unwrap();
+    assert!(data.starts_with(b"written via link"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn link_to_directory_returns_eperm() {
+    let (_tmp, client) = new_client();
+    let dir = client.mkdir(ROOT, "mydir", 0o755, 0, 0).await.unwrap();
+    let result = client.link(ROOT, "dirlink", dir.inode).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn link_duplicate_name_returns_eexist() {
+    let (_tmp, client) = new_client();
+    let file = client.create(ROOT, "file1", 0o644, 0, 0).await.unwrap();
+    client.create(ROOT, "existing", 0o644, 0, 0).await.unwrap();
+    let result = client.link(ROOT, "existing", file.inode).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn link_nonexistent_target_returns_enoent() {
+    let (_tmp, client) = new_client();
+    let result = client.link(ROOT, "broken", 99999).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unlink_hardlink_preserves_data() {
+    let (_tmp, client) = new_client();
+    let file = client.create(ROOT, "x", 0o644, 0, 0).await.unwrap();
+    client.write(file.inode, 0, b"keep me", 0).await.unwrap();
+    client.link(ROOT, "y", file.inode).await.unwrap();
+
+    // Unlink original name — inode should survive (nlink > 0).
+    client.unlink(ROOT, "x").await.unwrap();
+
+    // Data should still be accessible via the remaining link.
+    let attr = client.lookup(ROOT, "y").await.unwrap();
+    assert_eq!(attr.inode, file.inode);
+    assert_eq!(attr.nlink, 1);
+    let data = client.read(file.inode, 0, 100).await.unwrap();
+    assert!(data.starts_with(b"keep me"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unlink_last_link_deletes_data() {
+    let (_tmp, client) = new_client();
+    let file = client.create(ROOT, "sole", 0o644, 0, 0).await.unwrap();
+    client.write(file.inode, 0, b"goodbye", 0).await.unwrap();
+
+    client.unlink(ROOT, "sole").await.unwrap();
+
+    // Inode should be gone.
+    assert!(client.lookup(ROOT, "sole").await.is_err());
+    assert!(client.getattr(file.inode).await.is_err());
+}
+
+// ===========================================================================
+// Symbolic link tests (US-004, US-005)
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn symlink_create_and_readlink() {
+    let (_tmp, client) = new_client();
+    let attr = client
+        .symlink(ROOT, "mylink", "/target/path", 1000, 1000)
+        .await
+        .unwrap();
+
+    // Check symlink attributes.
+    assert_eq!(attr.mode & 0o170000, 0o120000); // S_IFLNK
+    assert_eq!(attr.mode & 0o7777, 0o777);      // permissions
+    assert_eq!(attr.size, "/target/path".len() as u64);
+    assert_eq!(attr.nlink, 1);
+    assert_eq!(attr.uid, 1000);
+    assert_eq!(attr.gid, 1000);
+
+    // Read back the target.
+    let target = client.readlink(attr.inode).await.unwrap();
+    assert_eq!(target, "/target/path");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn symlink_lookup_returns_symlink_type() {
+    let (_tmp, client) = new_client();
+    let attr = client
+        .symlink(ROOT, "sl", "target", 0, 0)
+        .await
+        .unwrap();
+    let looked_up = client.lookup(ROOT, "sl").await.unwrap();
+    assert_eq!(looked_up.inode, attr.inode);
+    assert_eq!(looked_up.mode & 0o170000, 0o120000);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn symlink_duplicate_name_returns_eexist() {
+    let (_tmp, client) = new_client();
+    client.create(ROOT, "taken", 0o644, 0, 0).await.unwrap();
+    let result = client.symlink(ROOT, "taken", "target", 0, 0).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn readlink_on_regular_file_returns_einval() {
+    let (_tmp, client) = new_client();
+    let file = client.create(ROOT, "regular", 0o644, 0, 0).await.unwrap();
+    let result = client.readlink(file.inode).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn readlink_on_directory_returns_einval() {
+    let (_tmp, client) = new_client();
+    let dir = client.mkdir(ROOT, "adir", 0o755, 0, 0).await.unwrap();
+    let result = client.readlink(dir.inode).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn symlink_roundtrip_long_target() {
+    let (_tmp, client) = new_client();
+    let long_target = "/a/very/long/path/".to_string() + &"x".repeat(200);
+    let attr = client
+        .symlink(ROOT, "longlink", &long_target, 0, 0)
+        .await
+        .unwrap();
+    let readback = client.readlink(attr.inode).await.unwrap();
+    assert_eq!(readback, long_target);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unlink_symlink_removes_it() {
+    let (_tmp, client) = new_client();
+    let attr = client
+        .symlink(ROOT, "ephemeral", "target", 0, 0)
+        .await
+        .unwrap();
+    client.unlink(ROOT, "ephemeral").await.unwrap();
+    assert!(client.lookup(ROOT, "ephemeral").await.is_err());
+    assert!(client.getattr(attr.inode).await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn readdir_shows_symlink() {
+    let (_tmp, client) = new_client();
+    client.create(ROOT, "file1", 0o644, 0, 0).await.unwrap();
+    client.symlink(ROOT, "link1", "target", 0, 0).await.unwrap();
+    client.mkdir(ROOT, "dir1", 0o755, 0, 0).await.unwrap();
+
+    let entries = client.readdir(ROOT).await.unwrap();
+    assert_eq!(entries.len(), 3);
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+    assert!(names.contains(&"file1"));
+    assert!(names.contains(&"link1"));
+    assert!(names.contains(&"dir1"));
+
+    // Check that the symlink's dir entry has S_IFLNK kind.
+    let symlink_entry = entries.iter().find(|e| e.name == "link1").unwrap();
+    assert_eq!(symlink_entry.kind & 0o170000, 0o120000);
+}
+
+// ===========================================================================
+// Deferred unlink tests (T-22)
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deferred_unlink_open_file_survives() {
+    let (_tmp, client) = new_client();
+    let file = client.create(ROOT, "victim", 0o644, 0, 0).await.unwrap();
+    client.write(file.inode, 0, b"keep alive", 0).await.unwrap();
+
+    // Open the file (increments handle count).
+    let _fh = client.open(file.inode, 0).await.unwrap();
+
+    // Unlink while open — inode should survive (nlink=0, handles>0).
+    client.unlink(ROOT, "victim").await.unwrap();
+
+    // Directory entry gone.
+    assert!(client.lookup(ROOT, "victim").await.is_err());
+
+    // But data is still accessible via inode.
+    let data = client.read(file.inode, 0, 100).await.unwrap();
+    assert!(data.starts_with(b"keep alive"));
+
+    // Release the file handle → triggers deferred delete.
+    client.release(file.inode).await.unwrap();
+
+    // Now inode data should be gone.
+    assert!(client.getattr(file.inode).await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unlink_without_open_deletes_immediately() {
+    let (_tmp, client) = new_client();
+    let file = client.create(ROOT, "ephemeral", 0o644, 0, 0).await.unwrap();
+    client.write(file.inode, 0, b"bye", 0).await.unwrap();
+
+    // Unlink without open — should delete immediately.
+    client.unlink(ROOT, "ephemeral").await.unwrap();
+    assert!(client.getattr(file.inode).await.is_err());
+}
+
+// ===========================================================================
+// Fallocate tests (setattr size extension simulates mode-0 fallocate)
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fallocate_mode0_extends_file_size() {
+    let (_tmp, client) = new_client();
+    let file = client.create(ROOT, "falloc", 0o644, 0, 0).await.unwrap();
+
+    // File starts at size 0.
+    let attr = client.getattr(file.inode).await.unwrap();
+    assert_eq!(attr.size, 0);
+
+    // Simulate fallocate mode 0: extend file size to 4096 via setattr.
+    let req = rucksfs_core::SetAttrRequest {
+        size: Some(4096),
+        ..Default::default()
+    };
+    let attr = client.setattr(file.inode, req).await.unwrap();
+    assert_eq!(attr.size, 4096);
+
+    // Reading the extended region should return zeros.
+    let data = client.read(file.inode, 0, 4096).await.unwrap();
+    assert_eq!(data.len(), 4096);
+    assert!(data.iter().all(|&b| b == 0), "extended region should be zero-filled");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fallocate_does_not_shrink() {
+    let (_tmp, client) = new_client();
+    let file = client.create(ROOT, "falloc2", 0o644, 0, 0).await.unwrap();
+    client.write(file.inode, 0, b"hello world", 0).await.unwrap();
+
+    let attr = client.getattr(file.inode).await.unwrap();
+    assert_eq!(attr.size, 11);
+
+    // setattr with size < current: should truncate (this is setattr, not fallocate).
+    // But when fallocate offset+length < current size, it's a no-op.
+    // Here we test that setattr with a larger size extends correctly.
+    let req = rucksfs_core::SetAttrRequest {
+        size: Some(1024),
+        ..Default::default()
+    };
+    let attr = client.setattr(file.inode, req).await.unwrap();
+    assert_eq!(attr.size, 1024);
+
+    // Original data should still be readable.
+    let data = client.read(file.inode, 0, 11).await.unwrap();
+    assert_eq!(&data[..5], b"hello");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fallocate_extend_preserves_existing_data() {
+    let (_tmp, client) = new_client();
+    let file = client.create(ROOT, "falloc3", 0o644, 0, 0).await.unwrap();
+    client.write(file.inode, 0, b"existing", 0).await.unwrap();
+
+    // Extend to 1MB.
+    let req = rucksfs_core::SetAttrRequest {
+        size: Some(1024 * 1024),
+        ..Default::default()
+    };
+    client.setattr(file.inode, req).await.unwrap();
+
+    let attr = client.getattr(file.inode).await.unwrap();
+    assert_eq!(attr.size, 1024 * 1024);
+
+    // Original data preserved.
+    let data = client.read(file.inode, 0, 8).await.unwrap();
+    assert_eq!(&data, b"existing");
+}

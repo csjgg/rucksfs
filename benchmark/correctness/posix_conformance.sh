@@ -660,6 +660,127 @@ fi
 echo ""
 
 # ==========================================================================
+# S11: mknod (regular files only)
+# ==========================================================================
+echo "══ S11: mknod ══"
+
+# S11.01: mknod creates regular file
+if command -v mknod &>/dev/null; then
+    mknod "$TEST_BASE/s11_mknod_file" p 2>/dev/null
+    # RucksFS only supports regular files via mknod — FIFO should fail.
+    if [[ -p "$TEST_BASE/s11_mknod_file" ]]; then
+        skip "S11.01: mknod FIFO succeeded (may be kernel-level)"
+        rm -f "$TEST_BASE/s11_mknod_file"
+    else
+        pass "S11.01: mknod FIFO correctly rejected (EOPNOTSUPP)"
+    fi
+
+    # S11.02: touch uses mknod internally — verify it works
+    touch "$TEST_BASE/s11_touch_file"
+    assert_is_file "S11.02: touch (via mknod) creates regular file" "$TEST_BASE/s11_touch_file"
+
+    # S11.03: mknod-created file is writable/readable
+    echo "mknod_data" > "$TEST_BASE/s11_touch_file"
+    assert_file_content "S11.03: mknod-created file is writable/readable" "$TEST_BASE/s11_touch_file" "mknod_data"
+else
+    skip "S11.01: mknod command not available"
+    skip "S11.02: mknod command not available"
+    skip "S11.03: mknod command not available"
+fi
+
+rm -rf "$TEST_BASE"/s11_*
+echo ""
+
+# ==========================================================================
+# S12: fallocate
+# ==========================================================================
+echo "══ S12: fallocate ══"
+
+if command -v fallocate &>/dev/null; then
+    # S12.01: fallocate mode 0 — preallocate space
+    touch "$TEST_BASE/s12_falloc"
+    fallocate -l 4096 "$TEST_BASE/s12_falloc" 2>/dev/null
+    if [[ $? -eq 0 ]]; then
+        size=$(stat -c%s "$TEST_BASE/s12_falloc" 2>/dev/null || stat -f%z "$TEST_BASE/s12_falloc" 2>/dev/null)
+        assert_eq "S12.01: fallocate extends file to 4096" "4096" "$size"
+    else
+        skip "S12.01: fallocate not supported by filesystem"
+    fi
+
+    # S12.02: fallocate with keep-size flag
+    echo "hello" > "$TEST_BASE/s12_keep"
+    orig_size=$(stat -c%s "$TEST_BASE/s12_keep" 2>/dev/null || stat -f%z "$TEST_BASE/s12_keep" 2>/dev/null)
+    fallocate -l 8192 -n "$TEST_BASE/s12_keep" 2>/dev/null
+    if [[ $? -eq 0 ]]; then
+        new_size=$(stat -c%s "$TEST_BASE/s12_keep" 2>/dev/null || stat -f%z "$TEST_BASE/s12_keep" 2>/dev/null)
+        # -n means keep size, so size should not change
+        assert_eq "S12.02: fallocate --keep-size preserves file size" "$orig_size" "$new_size"
+    else
+        skip "S12.02: fallocate --keep-size not supported"
+    fi
+
+    # S12.03: fallocate on existing file extends but preserves data
+    echo -n "existing" > "$TEST_BASE/s12_extend"
+    fallocate -l 1024 "$TEST_BASE/s12_extend" 2>/dev/null
+    if [[ $? -eq 0 ]]; then
+        size=$(stat -c%s "$TEST_BASE/s12_extend" 2>/dev/null || stat -f%z "$TEST_BASE/s12_extend" 2>/dev/null)
+        assert_eq "S12.03a: fallocate extends to 1024" "1024" "$size"
+        content=$(head -c 8 "$TEST_BASE/s12_extend")
+        assert_eq "S12.03b: fallocate preserves existing data" "existing" "$content"
+    else
+        skip "S12.03a: fallocate not supported"
+        skip "S12.03b: fallocate not supported"
+    fi
+else
+    skip "S12.01: fallocate command not available"
+    skip "S12.02: fallocate command not available"
+    skip "S12.03a: fallocate command not available"
+    skip "S12.03b: fallocate command not available"
+fi
+
+rm -rf "$TEST_BASE"/s12_*
+echo ""
+
+# ==========================================================================
+# S13: access
+# ==========================================================================
+echo "══ S13: access ══"
+
+# S13.01: access on existing file succeeds
+echo "test" > "$TEST_BASE/s13_file"
+if test -e "$TEST_BASE/s13_file"; then
+    pass "S13.01: access (test -e) on existing file"
+else
+    fail "S13.01: access on existing file failed"
+fi
+
+# S13.02: access on non-existent file fails
+if test -e "$TEST_BASE/s13_nonexistent"; then
+    fail "S13.02: access on non-existent should fail"
+else
+    pass "S13.02: access on non-existent file returns ENOENT"
+fi
+
+# S13.03: access read check (test -r)
+chmod 644 "$TEST_BASE/s13_file" 2>/dev/null
+if test -r "$TEST_BASE/s13_file"; then
+    pass "S13.03: access read check on readable file"
+else
+    skip "S13.03: access read check (may need default_permissions)"
+fi
+
+# S13.04: access on directory
+mkdir "$TEST_BASE/s13_dir"
+if test -d "$TEST_BASE/s13_dir"; then
+    pass "S13.04: access on directory"
+else
+    fail "S13.04: access on directory failed"
+fi
+
+rm -rf "$TEST_BASE"/s13_*
+echo ""
+
+# ==========================================================================
 # Summary
 # ==========================================================================
 

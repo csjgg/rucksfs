@@ -167,16 +167,23 @@ for d in $(seq 1 "$NUM_DIRS"); do
 done
 
 files_per_dir=$((NUM_FILES / NUM_DIRS))
-start=$(now_ns)
+
+# Pre-generate the file list outside the timed section to exclude shell
+# loop overhead from the measurement (only FUSE touch ops are timed).
+B2_FILE_LIST=$(mktemp)
 for d in $(seq 1 "$NUM_DIRS"); do
     for f in $(seq 1 "$files_per_dir"); do
-        touch "$B2_DIR/d_$d/f_$f"
+        echo "$B2_DIR/d_$d/f_$f"
     done
-done
+done > "$B2_FILE_LIST"
+total_created=$(wc -l < "$B2_FILE_LIST")
+
+start=$(now_ns)
+xargs touch < "$B2_FILE_LIST"
 end=$(now_ns)
 dur=$((end - start))
-total_created=$((NUM_DIRS * files_per_dir))
 
+rm -f "$B2_FILE_LIST"
 record "file_create" "multi_dir" "$total_created" "$NUM_DIRS" "0" "$total_created" "$dur"
 rm -rf "$B2_DIR"
 echo ""

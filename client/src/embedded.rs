@@ -95,4 +95,27 @@ impl VfsOps for EmbeddedClient {
     async fn fsync(&self, inode: Inode, datasync: bool) -> FsResult<()> {
         self.vfs.fsync(inode, datasync).await
     }
+
+    async fn link(&self, parent: Inode, name: &str, target_inode: Inode) -> FsResult<FileAttr> {
+        self.vfs.link(parent, name, target_inode).await
+    }
+
+    async fn symlink(
+        &self,
+        parent: Inode,
+        name: &str,
+        link_target: &str,
+        uid: u32,
+        gid: u32,
+    ) -> FsResult<FileAttr> {
+        self.vfs.symlink(parent, name, link_target, uid, gid).await
+    }
+
+    async fn readlink(&self, inode: Inode) -> FsResult<String> {
+        self.vfs.readlink(inode).await
+    }
+
+    async fn release(&self, inode: Inode) -> FsResult<()> {
+        self.vfs.release(inode).await
+    }
 }

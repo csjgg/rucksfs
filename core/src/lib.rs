@@ -124,6 +124,24 @@ pub trait MetadataOps: Send + Sync {
         new_size: u64,
         mtime: u64,
     ) -> FsResult<()>;
+    /// Create a hard link: add a directory entry `name` under `parent` that
+    /// points to the existing `target_inode`. Returns the target's FileAttr.
+    async fn link(&self, parent: Inode, name: &str, target_inode: Inode) -> FsResult<FileAttr>;
+    /// Create a symbolic link: add a new S_IFLNK inode under `parent` with
+    /// directory entry `name`, storing `link_target` as the symlink target.
+    async fn symlink(
+        &self,
+        parent: Inode,
+        name: &str,
+        link_target: &str,
+        uid: u32,
+        gid: u32,
+    ) -> FsResult<FileAttr>;
+    /// Read the target path of a symbolic link.
+    async fn readlink(&self, inode: Inode) -> FsResult<String>;
+    /// Notify that a file handle has been closed. Decrements open handle
+    /// count and triggers deferred deletion if nlink=0 and no handles remain.
+    async fn release(&self, inode: Inode) -> FsResult<()>;
 }
 
 /// Pure data I/O operations. Implemented by DataServer.
@@ -162,4 +180,15 @@ pub trait VfsOps: Send + Sync {
     async fn write(&self, inode: Inode, offset: u64, data: &[u8], flags: u32) -> FsResult<u32>;
     async fn flush(&self, inode: Inode) -> FsResult<()>;
     async fn fsync(&self, inode: Inode, datasync: bool) -> FsResult<()>;
+    async fn link(&self, parent: Inode, name: &str, target_inode: Inode) -> FsResult<FileAttr>;
+    async fn symlink(
+        &self,
+        parent: Inode,
+        name: &str,
+        link_target: &str,
+        uid: u32,
+        gid: u32,
+    ) -> FsResult<FileAttr>;
+    async fn readlink(&self, inode: Inode) -> FsResult<String>;
+    async fn release(&self, inode: Inode) -> FsResult<()>;
 }

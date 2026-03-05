@@ -6,8 +6,10 @@
 pub mod cache;
 pub mod compaction;
 pub mod delta;
+pub mod fsck;
 
-use std::sync::Arc;
+use std::collections::{HashMap as StdHashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rucksfs_core::{
@@ -24,9 +26,10 @@ use crate::cache::InodeFoldedCache;
 use crate::compaction::{CompactionConfig, DeltaCompactionWorker};
 use crate::delta::DeltaOp;
 
-/// File-type mode bits (S_IFDIR, S_IFREG).
+/// File-type mode bits (S_IFDIR, S_IFREG, S_IFLNK).
 const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
+const S_IFLNK: u32 = 0o120000;
 
 /// Return current UNIX timestamp in seconds.
 fn now_secs() -> u64 {
@@ -69,6 +72,12 @@ where
     allocator: InodeAllocator,
     /// Storage bundle for atomic cross-store writes.
     storage_bundle: Arc<dyn StorageBundle>,
+    /// Open file handle counter per inode. Tracks how many open() calls
+    /// have not been balanced by release() for each inode.
+    open_handles: Arc<Mutex<StdHashMap<Inode, u32>>>,
+    /// Inodes whose nlink reached 0 while open handles > 0.
+    /// Actual deletion is deferred until the last handle is closed.
+    pending_deletes: Arc<Mutex<HashSet<Inode>>>,
 }
 
 impl<M, I, DS> MetadataServer<M, I, DS>
@@ -109,6 +118,8 @@ where
             compaction,
             allocator,
             storage_bundle,
+            open_handles: Arc::new(Mutex::new(StdHashMap::new())),
+            pending_deletes: Arc::new(Mutex::new(HashSet::new())),
         };
 
         // Ensure root directory exists.
@@ -150,6 +161,8 @@ where
             compaction,
             allocator,
             storage_bundle,
+            open_handles: Arc::new(Mutex::new(StdHashMap::new())),
+            pending_deletes: Arc::new(Mutex::new(HashSet::new())),
         };
 
         // Ensure root directory exists.
@@ -166,10 +179,10 @@ where
                 version: 1,
                 inode: ROOT_INODE,
                 size: 0,
-                mode: S_IFDIR | 0o755,
+                mode: S_IFDIR | 0o777,
                 nlink: 2, // "." and parent
-                uid: 0,
-                gid: 0,
+                uid: unsafe { libc::getuid() },
+                gid: unsafe { libc::getgid() },
                 atime: ts,
                 mtime: ts,
                 ctime: ts,
@@ -295,6 +308,11 @@ where
         mode & S_IFDIR != 0
     }
 
+    /// Helper: check whether a mode represents a symbolic link.
+    fn is_symlink(mode: u32) -> bool {
+        (mode & 0o170000) == S_IFLNK
+    }
+
     /// Decode a dir-entry value (`[inode: u64 BE][mode: u32 BE]`).
     fn decode_dir_entry_value(data: &[u8]) -> FsResult<(Inode, u32)> {
         if data.len() < 12 {
@@ -379,12 +397,16 @@ where
                 iv.mtime = mtime;
             }
 
-            // Track whether we need to truncate after commit.
+            // Track whether we need to truncate (zero-fill) after commit.
+            // Only shrink requires zeroing the truncated region in the data
+            // store; extending is a metadata-only operation because the data
+            // store returns zeros for unwritten regions (sparse semantics).
             let mut do_truncate = false;
             if let Some(new_size) = truncate_size {
                 if new_size != iv.size {
+                    let is_shrink = new_size < iv.size;
                     iv.size = new_size;
-                    do_truncate = true;
+                    do_truncate = is_shrink;
                 }
             }
 
@@ -595,7 +617,17 @@ where
 
         // Ask DataServer to clean up file data (outside transaction scope).
         if let Some(inode) = need_delete_data {
-            self.data_client.delete_data(inode).await?;
+            let has_handles = {
+                let handles = self.open_handles.lock().expect("open_handles poisoned");
+                handles.get(&inode).copied().unwrap_or(0) > 0
+            };
+            if has_handles {
+                // Defer deletion until last handle is closed.
+                let mut pending = self.pending_deletes.lock().expect("pending_deletes poisoned");
+                pending.insert(inode);
+            } else {
+                self.data_client.delete_data(inode).await?;
+            }
         }
 
         let ts = now_secs();
@@ -840,8 +872,13 @@ where
         if Self::is_dir(iv.mode) {
             return Err(FsError::IsADirectory);
         }
+        // Increment open handle count.
+        {
+            let mut handles = self.open_handles.lock().expect("open_handles poisoned");
+            *handles.entry(inode).or_insert(0) += 1;
+        }
         Ok(OpenResponse {
-            handle: 0, // We don't track open files yet.
+            handle: inode, // Use inode as handle for simplicity.
             data_location: self.data_location.clone(),
         })
     }
@@ -872,5 +909,188 @@ where
             self.cache.put(inode, iv);
             Ok(())
         })
+    }
+
+    async fn link(&self, parent: Inode, name: &str, target_inode: Inode) -> FsResult<FileAttr> {
+        let name_owned = name.to_string();
+
+        let target_iv = self.execute_with_retry(|| {
+            let mut batch = self.begin_write();
+
+            // Lock and check the target inode exists.
+            let inode_key = encode_inode_key(target_inode);
+            let inode_raw = batch
+                .get_for_update_inode(&inode_key)?
+                .ok_or(FsError::NotFound)?;
+            let mut target_iv = InodeValue::deserialize(&inode_raw)?;
+
+            // POSIX: hard links to directories are not allowed.
+            if Self::is_dir(target_iv.mode) {
+                return Err(FsError::PermissionDenied);
+            }
+
+            // Check if the name already exists in the parent (with row lock).
+            let dir_key = encode_dir_entry_key(parent, &name_owned);
+            if batch.get_for_update_dir_entry(&dir_key)?.is_some() {
+                return Err(FsError::AlreadyExists);
+            }
+
+            // Verify parent directory exists.
+            let parent_key = encode_inode_key(parent);
+            let parent_raw = batch
+                .get_for_update_inode(&parent_key)?
+                .ok_or(FsError::NotFound)?;
+            let parent_iv = InodeValue::deserialize(&parent_raw)?;
+            if !Self::is_dir(parent_iv.mode) {
+                return Err(FsError::NotADirectory);
+            }
+
+            // Increment nlink and update ctime.
+            target_iv.nlink += 1;
+            target_iv.ctime = now_secs();
+
+            Self::batch_put_inode(batch.as_mut(), target_inode, &target_iv);
+            Self::batch_put_dir_entry(
+                batch.as_mut(),
+                parent,
+                &name_owned,
+                target_inode,
+                target_iv.mode,
+            );
+            batch.commit()?;
+
+            // Update in-memory state after commit.
+            self.cache.put(target_inode, target_iv.clone());
+            if !self.index.shares_batch_storage() {
+                let _ = self.index.insert_child(
+                    parent,
+                    &name_owned,
+                    target_inode,
+                    target_iv.to_attr(),
+                );
+            }
+
+            Ok(target_iv)
+        })?;
+
+        // Update parent dir timestamps via delta.
+        let ts = now_secs();
+        let _ = self.append_parent_deltas(
+            parent,
+            &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
+        );
+
+        Ok(target_iv.to_attr())
+    }
+
+    async fn symlink(
+        &self,
+        parent: Inode,
+        name: &str,
+        link_target: &str,
+        uid: u32,
+        gid: u32,
+    ) -> FsResult<FileAttr> {
+        let name_owned = name.to_string();
+        let target_owned = link_target.to_string();
+
+        let (iv, new_inode) = self.execute_with_retry(|| {
+            let mut batch = self.begin_write();
+
+            // Check if the name already exists (with row lock).
+            let dir_key = encode_dir_entry_key(parent, &name_owned);
+            if batch.get_for_update_dir_entry(&dir_key)?.is_some() {
+                return Err(FsError::AlreadyExists);
+            }
+
+            let new_inode = self.allocator.alloc();
+            let ts = now_secs();
+            let iv = InodeValue {
+                version: 1,
+                inode: new_inode,
+                size: target_owned.len() as u64,
+                mode: S_IFLNK | 0o777,
+                nlink: 1,
+                uid,
+                gid,
+                atime: ts,
+                mtime: ts,
+                ctime: ts,
+            };
+
+            Self::batch_put_inode(batch.as_mut(), new_inode, &iv);
+            Self::batch_put_dir_entry(batch.as_mut(), parent, &name_owned, new_inode, iv.mode);
+            batch.commit()?;
+
+            Ok((iv, new_inode))
+        })?;
+
+        // Persist allocator counter outside the transaction.
+        self.allocator.persist(self.metadata.as_ref())?;
+
+        // Store the symlink target as file data.
+        self.data_client
+            .write_data(new_inode, 0, target_owned.as_bytes())
+            .await?;
+
+        // Update in-memory state.
+        self.cache.put(new_inode, iv.clone());
+        if !self.index.shares_batch_storage() {
+            let _ = self
+                .index
+                .insert_child(parent, &name_owned, new_inode, iv.to_attr());
+        }
+
+        // Update parent dir timestamps via delta.
+        let ts = now_secs();
+        let _ = self.append_parent_deltas(
+            parent,
+            &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
+        );
+
+        Ok(iv.to_attr())
+    }
+
+    async fn readlink(&self, inode: Inode) -> FsResult<String> {
+        let iv = self.load_inode(inode)?;
+
+        // POSIX: readlink on non-symlink returns EINVAL.
+        if !Self::is_symlink(iv.mode) {
+            return Err(FsError::InvalidInput("not a symbolic link".into()));
+        }
+
+        let data = self
+            .data_client
+            .read_data(inode, 0, iv.size as u32)
+            .await?;
+
+        String::from_utf8(data).map_err(|e| FsError::Io(format!("invalid symlink target: {}", e)))
+    }
+
+    async fn release(&self, inode: Inode) -> FsResult<()> {
+        let should_delete = {
+            let mut handles = self.open_handles.lock().expect("open_handles poisoned");
+            if let Some(count) = handles.get_mut(&inode) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    handles.remove(&inode);
+                    let pending = self.pending_deletes.lock().expect("pending_deletes poisoned");
+                    pending.contains(&inode)
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        if should_delete {
+            {
+                let mut pending = self.pending_deletes.lock().expect("pending_deletes poisoned");
+                pending.remove(&inode);
+            }
+            // Delete inode data.
+            self.data_client.delete_data(inode).await?;
+        }
+        Ok(())
     }
 }

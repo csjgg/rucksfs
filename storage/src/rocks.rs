@@ -38,6 +38,44 @@ const CF_DELTA_ENTRIES: &str = "delta_entries";
 /// All column family names used by the storage layer.
 const ALL_CFS: &[&str] = &[CF_INODES, CF_DIR_ENTRIES, CF_SYSTEM, CF_DELTA_ENTRIES];
 
+/// Build per-column-family options based on access patterns.
+///
+/// - `inodes`: point lookups → bloom filter + LZ4.
+/// - `dir_entries`: prefix scans by parent inode → prefix extractor + bloom + LZ4.
+/// - `delta_entries`: prefix scans + high churn → prefix extractor + bloom.
+/// - `system`: rare access → LZ4 only.
+fn cf_options(name: &str) -> Options {
+    let mut opts = Options::default();
+
+    // Helper: create block-based table options with a bloom filter.
+    let block_opts_with_bloom = || {
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+        block_opts.set_bloom_filter(10.0, false);
+        block_opts
+    };
+
+    match name {
+        CF_INODES => {
+            opts.set_block_based_table_factory(&block_opts_with_bloom());
+            opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        }
+        CF_DIR_ENTRIES => {
+            opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(8));
+            opts.set_block_based_table_factory(&block_opts_with_bloom());
+            opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        }
+        CF_DELTA_ENTRIES => {
+            opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(8));
+            opts.set_block_based_table_factory(&block_opts_with_bloom());
+        }
+        CF_SYSTEM => {
+            opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        }
+        _ => {}
+    }
+    opts
+}
+
 /// Open (or create) a RocksDB database with the required column families.
 ///
 /// This is a shared helper so that both `RocksMetadataStore` and
@@ -51,7 +89,7 @@ pub fn open_rocks_db(path: impl AsRef<Path>) -> FsResult<Arc<TransactionDB>> {
 
     let cf_descriptors: Vec<ColumnFamilyDescriptor> = ALL_CFS
         .iter()
-        .map(|name| ColumnFamilyDescriptor::new(*name, Options::default()))
+        .map(|name| ColumnFamilyDescriptor::new(*name, cf_options(name)))
         .collect();
 
     let db = TransactionDB::open_cf_descriptors(&db_opts, &txn_db_opts, path.as_ref(), cf_descriptors)

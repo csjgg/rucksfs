@@ -4,7 +4,7 @@ use fuser::{
     ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request,
 };
 #[cfg(target_os = "linux")]
-use libc::{EACCES, EAGAIN, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, EEXIST, EOPNOTSUPP};
+use libc::{EAGAIN, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, EEXIST, EOPNOTSUPP, EPERM};
 #[cfg(target_os = "linux")]
 use rucksfs_core::{FileAttr, FsError, FsResult, SetAttrRequest, VfsOps};
 #[cfg(target_os = "linux")]
@@ -109,16 +109,20 @@ where
         _req: &Request<'_>,
         ino: u64,
         _fh: u64,
-        _offset: i64,
+        offset: i64,
         mut reply: ReplyDirectory,
     ) {
         let client = self.client.clone();
         let result = futures::executor::block_on(async move { client.readdir(ino).await });
         match result {
             Ok(entries) => {
-                for (i, entry) in entries.into_iter().enumerate() {
+                // Skip entries before offset (FUSE pagination).
+                for (i, entry) in entries.into_iter().enumerate().skip(offset as usize) {
                     let kind = dir_entry_kind_to_file_type(entry.kind);
-                    let _ = reply.add(entry.inode, (i + 1) as i64, kind, entry.name);
+                    // reply.add returns true when the buffer is full.
+                    if reply.add(entry.inode, (i + 1) as i64, kind, entry.name) {
+                        break;
+                    }
                 }
                 reply.ok();
             }
@@ -241,6 +245,104 @@ where
         }
     }
 
+    fn mknod(
+        &mut self,
+        req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
+        _rdev: u32,
+        reply: ReplyEntry,
+    ) {
+        // Only support regular files. Other types (block/char devices,
+        // sockets, FIFOs) are not implemented.
+        let file_type = mode & libc::S_IFMT as u32;
+        if file_type != libc::S_IFREG as u32 && file_type != 0 {
+            reply.error(EOPNOTSUPP);
+            return;
+        }
+
+        let name = name.to_string_lossy().to_string();
+        let uid = req.uid();
+        let gid = req.gid();
+        let effective_mode = mode & !umask & 0o7777;
+        let client = self.client.clone();
+        let result = futures::executor::block_on(async move {
+            client.create(parent, &name, effective_mode, uid, gid).await
+        });
+        match result {
+            Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
+            Err(e) => reply.error(fs_error_to_errno(e)),
+        }
+    }
+
+    fn fallocate(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        length: i64,
+        mode: i32,
+        reply: ReplyEmpty,
+    ) {
+        let client = self.client.clone();
+
+        // FALLOC_FL_KEEP_SIZE = 0x01, FALLOC_FL_PUNCH_HOLE = 0x02
+        let keep_size = mode & 0x01 != 0;
+        let punch_hole = mode & 0x02 != 0;
+        let unsupported_flags = mode & !(0x01 | 0x02);
+
+        if unsupported_flags != 0 {
+            reply.error(EOPNOTSUPP);
+            return;
+        }
+
+        if punch_hole {
+            // Punch hole: no-op for our sparse-like RawDisk backend.
+            reply.ok();
+            return;
+        }
+
+        if keep_size {
+            // Preallocate without changing size: no-op for our backend.
+            reply.ok();
+            return;
+        }
+
+        // Mode 0: preallocate space. Extend file size if needed.
+        let new_end = (offset + length) as u64;
+        let result = futures::executor::block_on(async move {
+            let attr = client.getattr(ino).await?;
+            if new_end > attr.size {
+                let req = rucksfs_core::SetAttrRequest {
+                    size: Some(new_end),
+                    ..Default::default()
+                };
+                client.setattr(ino, req).await?;
+            }
+            Ok::<(), rucksfs_core::FsError>(())
+        });
+        match result {
+            Ok(()) => reply.ok(),
+            Err(e) => reply.error(fs_error_to_errno(e)),
+        }
+    }
+
+    fn access(&mut self, _req: &Request<'_>, ino: u64, _mask: i32, reply: ReplyEmpty) {
+        let client = self.client.clone();
+        let result = futures::executor::block_on(async move {
+            // With default_permissions, the kernel already checks permissions.
+            // We just verify the inode exists.
+            client.getattr(ino).await
+        });
+        match result {
+            Ok(_) => reply.ok(),
+            Err(e) => reply.error(fs_error_to_errno(e)),
+        }
+    }
+
     fn mkdir(
         &mut self,
         req: &Request<'_>,
@@ -307,6 +409,74 @@ where
         }
     }
 
+    fn link(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        newparent: u64,
+        newname: &OsStr,
+        reply: ReplyEntry,
+    ) {
+        let newname = newname.to_string_lossy().to_string();
+        let client = self.client.clone();
+        let result = futures::executor::block_on(async move {
+            client.link(newparent, &newname, ino).await
+        });
+        match result {
+            Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
+            Err(e) => reply.error(fs_error_to_errno(e)),
+        }
+    }
+
+    fn symlink(
+        &mut self,
+        req: &Request<'_>,
+        parent: u64,
+        link_name: &OsStr,
+        target: &std::path::Path,
+        reply: ReplyEntry,
+    ) {
+        let link_name = link_name.to_string_lossy().to_string();
+        let target = target.to_string_lossy().to_string();
+        let uid = req.uid();
+        let gid = req.gid();
+        let client = self.client.clone();
+        let result = futures::executor::block_on(async move {
+            client.symlink(parent, &link_name, &target, uid, gid).await
+        });
+        match result {
+            Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
+            Err(e) => reply.error(fs_error_to_errno(e)),
+        }
+    }
+
+    fn readlink(&mut self, _req: &Request<'_>, ino: u64, reply: fuser::ReplyData) {
+        let client = self.client.clone();
+        let result = futures::executor::block_on(async move { client.readlink(ino).await });
+        match result {
+            Ok(target) => reply.data(target.as_bytes()),
+            Err(e) => reply.error(fs_error_to_errno(e)),
+        }
+    }
+
+    fn release(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        _flush: bool,
+        reply: ReplyEmpty,
+    ) {
+        let client = self.client.clone();
+        let result = futures::executor::block_on(async move { client.release(ino).await });
+        match result {
+            Ok(()) => reply.ok(),
+            Err(e) => reply.error(fs_error_to_errno(e)),
+        }
+    }
+
     fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
         let client = self.client.clone();
         let result = futures::executor::block_on(async move { client.statfs(1).await });
@@ -328,10 +498,11 @@ where
 
 #[cfg(target_os = "linux")]
 fn dir_entry_kind_to_file_type(kind: u32) -> FileType {
-    use libc::S_IFDIR;
     let mt = kind & libc::S_IFMT;
-    if mt == S_IFDIR {
+    if mt == libc::S_IFDIR as u32 {
         FileType::Directory
+    } else if mt == libc::S_IFLNK as u32 {
+        FileType::Symlink
     } else {
         FileType::RegularFile
     }
@@ -386,7 +557,7 @@ pub fn fs_error_to_errno(e: FsError) -> i32 {
         NotADirectory => ENOTDIR,
         IsADirectory => EISDIR,
         DirectoryNotEmpty => ENOTEMPTY,
-        PermissionDenied => EACCES,
+        PermissionDenied => EPERM,
         InvalidInput(_) => EINVAL,
         Io(_) => EIO,
         Other(_) => EIO,

@@ -51,6 +51,17 @@ All commits MUST follow the Conventional Commits specification.
 - After updating tests for new behavior
 - During long tasks: commit at natural checkpoints (every 15-30 min of work)
 
+## Proactive Commit Discipline
+
+**IMPORTANT**: Agents MUST commit proactively. Do NOT wait for the user to ask.
+
+- **After creating or modifying any file**: commit immediately once the change is logically complete. Do not accumulate uncommitted work across multiple files or steps.
+- **During multi-step tasks**: commit after each completed step, not at the end. If a task has 5 steps, there should be up to 5 commits, not 1.
+- **Before asking the user a question**: if there are uncommitted changes, commit them first. Never leave work uncommitted while waiting for user input.
+- **Before running long operations** (builds, tests, benchmarks): commit all pending changes so progress is not lost.
+- **After generating files** (scripts, configs, docs): commit immediately. Generated files are easy to forget.
+- **Rule of thumb**: if you have done work that would be painful to redo, commit it now.
+
 ## Examples
 
 ```

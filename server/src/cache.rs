@@ -3,9 +3,10 @@
 //! Keeps the most-recently-accessed inode values in memory so that
 //! `getattr` can be served without scanning delta entries from the store.
 
-use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroUsize;
 use std::sync::Mutex;
 
+use lru::LruCache;
 use rucksfs_core::Inode;
 use rucksfs_storage::encoding::InodeValue;
 
@@ -16,17 +17,7 @@ use crate::delta::DeltaOp;
 /// All public methods acquire the internal [`Mutex`].  The cache is designed
 /// to be accessed from multiple FUSE / RPC handler threads.
 pub struct InodeFoldedCache {
-    inner: Mutex<CacheInner>,
-}
-
-/// Non-threadsafe inner state.
-struct CacheInner {
-    /// inode → cached folded value.
-    map: HashMap<Inode, InodeValue>,
-    /// Access-order queue.  Most-recently-used inode is at the **back**.
-    order: VecDeque<Inode>,
-    /// Maximum number of entries before LRU eviction kicks in.
-    capacity: usize,
+    inner: Mutex<LruCache<Inode, InodeValue>>,
 }
 
 impl InodeFoldedCache {
@@ -34,11 +25,9 @@ impl InodeFoldedCache {
     pub fn new(capacity: usize) -> Self {
         assert!(capacity > 0, "cache capacity must be > 0");
         Self {
-            inner: Mutex::new(CacheInner {
-                map: HashMap::with_capacity(capacity),
-                order: VecDeque::with_capacity(capacity),
-                capacity,
-            }),
+            inner: Mutex::new(LruCache::new(
+                NonZeroUsize::new(capacity).expect("capacity must be > 0"),
+            )),
         }
     }
 
@@ -46,33 +35,16 @@ impl InodeFoldedCache {
     ///
     /// If found, the entry is promoted to most-recently-used.
     pub fn get(&self, inode: Inode) -> Option<InodeValue> {
-        let mut inner = self.inner.lock().expect("cache lock poisoned");
-        if inner.map.contains_key(&inode) {
-            // Promote to MRU by removing and re-pushing to back.
-            inner.order.retain(|&i| i != inode);
-            inner.order.push_back(inode);
-            inner.map.get(&inode).cloned()
-        } else {
-            None
-        }
+        let mut cache = self.inner.lock().expect("cache lock poisoned");
+        cache.get(&inode).cloned()
     }
 
     /// Insert (or overwrite) a folded inode value.
     ///
     /// If the cache is full, the least-recently-used entry is evicted.
     pub fn put(&self, inode: Inode, value: InodeValue) {
-        let mut inner = self.inner.lock().expect("cache lock poisoned");
-        if inner.map.contains_key(&inode) {
-            // Update existing: refresh order.
-            inner.order.retain(|&i| i != inode);
-        } else if inner.map.len() >= inner.capacity {
-            // Evict LRU (front of deque).
-            if let Some(evicted) = inner.order.pop_front() {
-                inner.map.remove(&evicted);
-            }
-        }
-        inner.map.insert(inode, value);
-        inner.order.push_back(inode);
+        let mut cache = self.inner.lock().expect("cache lock poisoned");
+        cache.put(inode, value);
     }
 
     /// Apply a single delta operation to a cached entry **in place**.
@@ -80,23 +52,17 @@ impl InodeFoldedCache {
     /// If the inode is not in the cache this is a no-op (the caller will
     /// do a full fold on the next read miss).
     pub fn apply_delta(&self, inode: Inode, delta: &DeltaOp) {
-        let mut inner = self.inner.lock().expect("cache lock poisoned");
-        if let Some(val) = inner.map.get_mut(&inode) {
+        let mut cache = self.inner.lock().expect("cache lock poisoned");
+        if let Some(val) = cache.get_mut(&inode) {
             crate::delta::fold_deltas(val, &[delta.clone()]);
-            // Promote to MRU.
-            inner.order.retain(|&i| i != inode);
-            inner.order.push_back(inode);
         }
     }
 
     /// Apply multiple delta operations to a cached entry **in place**.
     pub fn apply_deltas(&self, inode: Inode, deltas: &[DeltaOp]) {
-        let mut inner = self.inner.lock().expect("cache lock poisoned");
-        if let Some(val) = inner.map.get_mut(&inode) {
+        let mut cache = self.inner.lock().expect("cache lock poisoned");
+        if let Some(val) = cache.get_mut(&inode) {
             crate::delta::fold_deltas(val, deltas);
-            // Promote to MRU.
-            inner.order.retain(|&i| i != inode);
-            inner.order.push_back(inode);
         }
     }
 
@@ -104,15 +70,14 @@ impl InodeFoldedCache {
     ///
     /// Called after compaction so the next read re-loads the fresh base.
     pub fn invalidate(&self, inode: Inode) {
-        let mut inner = self.inner.lock().expect("cache lock poisoned");
-        inner.map.remove(&inode);
-        inner.order.retain(|&i| i != inode);
+        let mut cache = self.inner.lock().expect("cache lock poisoned");
+        cache.pop(&inode);
     }
 
     /// Return the current number of cached entries (for testing).
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.inner.lock().expect("cache lock poisoned").map.len()
+        self.inner.lock().expect("cache lock poisoned").len()
     }
 }
 

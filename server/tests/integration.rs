@@ -127,8 +127,7 @@ fn file_lifecycle() {
         let inode = attr.inode;
 
         // Open
-        let fh = client.open(inode, 0).await.unwrap();
-        assert_eq!(fh, 0);
+        let _fh = client.open(inode, 0).await.unwrap();
 
         // Write
         let data = b"Hello, RucksFS!";

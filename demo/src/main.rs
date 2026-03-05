@@ -32,6 +32,14 @@ struct Cli {
     /// Data directory for RocksDB metadata and file data (default: ~/.rucksfs).
     #[arg(long, value_name = "DIR")]
     data_dir: Option<PathBuf>,
+
+    /// Run filesystem consistency check (fsck).
+    #[arg(long)]
+    fsck: bool,
+
+    /// Maximum bytes per file in the RawDisk data store (default: 64 MiB).
+    #[arg(long, value_name = "BYTES", default_value = "67108864")]
+    max_file_size: u64,
 }
 
 /// Resolve the data directory: use `--data-dir` if provided, otherwise `~/.rucksfs`.
@@ -48,7 +56,7 @@ fn resolve_data_dir(cli: &Cli) -> PathBuf {
 }
 
 /// Build the All-in-One EmbeddedClient using RocksDB + RawDisk backends.
-fn build_client(data_dir: &Path) -> EmbeddedClient {
+fn build_client(data_dir: &Path, max_file_size: u64) -> EmbeddedClient {
     let db_path = data_dir.join("metadata.db");
     let data_path = data_dir.join("data.raw");
     std::fs::create_dir_all(data_dir).expect("failed to create data directory");
@@ -57,7 +65,7 @@ fn build_client(data_dir: &Path) -> EmbeddedClient {
     let metadata = Arc::new(RocksMetadataStore::new(Arc::clone(&db)));
     let index = Arc::new(RocksDirectoryIndex::new(Arc::clone(&db)));
     let delta_store = Arc::new(RocksDeltaStore::new(Arc::clone(&db)));
-    let data_store = RawDiskDataStore::open(&data_path, 64 * 1024 * 1024)
+    let data_store = RawDiskDataStore::open(&data_path, max_file_size)
         .expect("failed to open RawDisk data store");
 
     let data_server: Arc<dyn DataOps> = Arc::new(DataServer::new(data_store));
@@ -82,6 +90,11 @@ async fn main() {
 
     let cli = Cli::parse();
 
+    if cli.fsck {
+        run_fsck_mode(&cli);
+        return;
+    }
+
     if let Some(ref _mountpoint) = cli.mount {
         run_mount_mode(&cli).await;
     } else if cli.interactive {
@@ -103,7 +116,7 @@ async fn run_auto_demo_mode(cli: &Cli) {
 
     let data_dir = resolve_data_dir(cli);
     println!("▶ Using persistent storage at: {}", data_dir.display());
-    let client = build_client(&data_dir);
+    let client = build_client(&data_dir, cli.max_file_size);
     run_auto_demo(&client).await;
 
     println!();
@@ -229,7 +242,7 @@ async fn run_interactive_mode(cli: &Cli) {
 
     let data_dir = resolve_data_dir(cli);
     println!("▶ Using persistent storage at: {}", data_dir.display());
-    let client = build_client(&data_dir);
+    let client = build_client(&data_dir, cli.max_file_size);
     run_repl(&client).await;
 }
 
@@ -540,6 +553,43 @@ fn print_help() {
 }
 
 // ---------------------------------------------------------------------------
+// Fsck mode
+// ---------------------------------------------------------------------------
+
+fn run_fsck_mode(cli: &Cli) {
+    println!("RucksFS — Filesystem Consistency Check");
+    println!();
+
+    let data_dir = resolve_data_dir(cli);
+    let db_path = data_dir.join("metadata.db");
+
+    if !db_path.exists() {
+        eprintln!(
+            "Error: metadata database not found at {}",
+            db_path.display()
+        );
+        std::process::exit(1);
+    }
+
+    let db = open_rocks_db(&db_path).expect("failed to open RocksDB");
+    let metadata = Arc::new(RocksMetadataStore::new(Arc::clone(&db)));
+    let index = Arc::new(RocksDirectoryIndex::new(Arc::clone(&db)));
+
+    match rucksfs_server::fsck::check(metadata.as_ref(), index.as_ref()) {
+        Ok(report) => {
+            report.print_summary();
+            if !report.is_clean() {
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            eprintln!("fsck error: {}", e);
+            std::process::exit(2);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // FUSE mount mode
 // ---------------------------------------------------------------------------
 
@@ -561,7 +611,7 @@ async fn run_mount_mode(cli: &Cli) {
 
         let data_dir = resolve_data_dir(cli);
         println!("▶ Using persistent storage at: {}", data_dir.display());
-        let client = Arc::new(build_client(&data_dir));
+        let client = Arc::new(build_client(&data_dir, cli.max_file_size));
         println!("▶ Press Ctrl+C or run `fusermount -u {}` to unmount.", mountpoint);
         if let Err(e) = rucksfs_client::mount_fuse(mountpoint, client) {
             eprintln!("FUSE mount error: {}", e);

@@ -10,8 +10,7 @@
 //! For production, consider using a proper block allocator.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::sync::Mutex;
+use std::os::unix::fs::FileExt;
 
 use async_trait::async_trait;
 use rucksfs_core::{FsError, FsResult, Inode};
@@ -20,9 +19,10 @@ use crate::DataStore;
 
 /// A data store backed by a single flat file, treating it as raw disk.
 ///
-/// Thread safety is ensured by a `Mutex<File>`.
+/// Thread safety is ensured by the OS-level atomicity of `pread`/`pwrite`.
+/// No `Mutex` is needed because these syscalls do not share a file offset.
 pub struct RawDiskDataStore {
-    file: Mutex<File>,
+    file: File,
     /// Maximum bytes per inode.  Each inode's data lives in
     /// `[inode * max_file_size .. (inode + 1) * max_file_size)`.
     max_file_size: u64,
@@ -48,7 +48,7 @@ impl RawDiskDataStore {
             .map_err(|e| FsError::Io(e.to_string()))?;
 
         Ok(Self {
-            file: Mutex::new(file),
+            file,
             max_file_size,
         })
     }
@@ -79,25 +79,15 @@ impl DataStore for RawDiskDataStore {
         let remaining = self.max_file_size.saturating_sub(offset);
         let actual_size = (size as u64).min(remaining) as usize;
 
-        let mut file = self
-            .file
-            .lock()
-            .map_err(|e| FsError::Io(format!("file lock poisoned: {}", e)))?;
-
-        file.seek(SeekFrom::Start(abs))
-            .map_err(|e| FsError::Io(e.to_string()))?;
-
         let mut buf = vec![0u8; actual_size];
-        let n = file
-            .read(&mut buf)
+        // pread: atomic, does not modify the shared file offset.
+        let _n = self
+            .file
+            .read_at(&mut buf, abs)
             .map_err(|e| FsError::Io(e.to_string()))?;
 
-        // If we read fewer bytes than requested, pad with zeros (sparse semantics)
-        if n < actual_size {
-            // Already zeroed by vec![0u8; ...], just truncate read part is fine
-            // Actually buf is already correct — read fills front, rest is zero
-        }
-
+        // If we read fewer bytes than requested, the rest is already zero
+        // (sparse semantics via vec![0u8; ...]).
         Ok(buf)
     }
 
@@ -108,15 +98,9 @@ impl DataStore for RawDiskDataStore {
         let remaining = self.max_file_size.saturating_sub(offset) as usize;
         let actual_len = data.len().min(remaining);
 
-        let mut file = self
-            .file
-            .lock()
-            .map_err(|e| FsError::Io(format!("file lock poisoned: {}", e)))?;
-
-        file.seek(SeekFrom::Start(abs))
-            .map_err(|e| FsError::Io(e.to_string()))?;
-
-        file.write_all(&data[..actual_len])
+        // pwrite: atomic, does not modify the shared file offset.
+        self.file
+            .write_at(&data[..actual_len], abs)
             .map_err(|e| FsError::Io(e.to_string()))?;
 
         Ok(actual_len as u32)
@@ -138,36 +122,24 @@ impl DataStore for RawDiskDataStore {
             return Ok(());
         }
 
-        let mut file = self
-            .file
-            .lock()
-            .map_err(|e| FsError::Io(format!("file lock poisoned: {}", e)))?;
-
-        file.seek(SeekFrom::Start(abs_start))
-            .map_err(|e| FsError::Io(e.to_string()))?;
-
-        // Write zeros in 4 KiB chunks
+        // Write zeros in 4 KiB chunks using pwrite.
         let zeros = [0u8; 4096];
-        let mut remaining = zero_len;
-        while remaining > 0 {
-            let chunk = remaining.min(zeros.len());
-            file.write_all(&zeros[..chunk])
+        let mut written = 0usize;
+        while written < zero_len {
+            let chunk = (zero_len - written).min(zeros.len());
+            self.file
+                .write_at(&zeros[..chunk], abs_start + written as u64)
                 .map_err(|e| FsError::Io(e.to_string()))?;
-            remaining -= chunk;
+            written += chunk;
         }
 
         Ok(())
     }
 
     async fn flush(&self, _inode: Inode) -> FsResult<()> {
-        let file = self
-            .file
-            .lock()
-            .map_err(|e| FsError::Io(format!("file lock poisoned: {}", e)))?;
-
-        file.sync_data()
+        self.file
+            .sync_data()
             .map_err(|e| FsError::Io(e.to_string()))?;
-
         Ok(())
     }
 
@@ -323,6 +295,30 @@ mod tests {
 
             let data = store.read_at(1, 5, 5).await.unwrap();
             assert!(data.iter().all(|&b| b == 0xAA));
+        });
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn concurrent_read_write_different_inodes() {
+        use std::sync::Arc;
+
+        let (store, path) = make_store(1024);
+        let store = Arc::new(store);
+        rt().block_on(async {
+            let mut handles = vec![];
+            for i in 1u64..=8 {
+                let s = Arc::clone(&store);
+                handles.push(tokio::spawn(async move {
+                    let data = format!("data_for_inode_{}", i);
+                    s.write_at(i, 0, data.as_bytes()).await.unwrap();
+                    let read_back = s.read_at(i, 0, data.len() as u32).await.unwrap();
+                    assert_eq!(read_back, data.as_bytes());
+                }));
+            }
+            for h in handles {
+                h.await.unwrap();
+            }
         });
         fs::remove_file(path).ok();
     }
