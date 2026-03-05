@@ -1,0 +1,1196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>采用元数据键值对存储的文件操作设计与实现</title>
+<style>
+/* ========================================================================
+   Base & Reset
+   ======================================================================== */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --primary: #1a56db;
+  --primary-light: #e8effc;
+  --primary-dark: #0f3a8e;
+  --accent: #e85d26;
+  --accent-light: #fff3ee;
+  --text: #1e293b;
+  --text-secondary: #64748b;
+  --bg: #ffffff;
+  --bg-alt: #f8fafc;
+  --border: #e2e8f0;
+  --shadow: 0 1px 3px rgba(0,0,0,0.08);
+  --radius: 8px;
+  --slide-padding: 72px 90px;
+  --font-sans: -apple-system, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", "SF Mono", monospace;
+}
+
+html {
+  scroll-snap-type: y mandatory;
+  scroll-behavior: smooth;
+  font-size: 16px;
+}
+
+body {
+  font-family: var(--font-sans);
+  color: var(--text);
+  background: var(--bg);
+  line-height: 1.6;
+  overflow-x: hidden;
+}
+
+/* ========================================================================
+   Slide Layout
+   ======================================================================== */
+.slide {
+  width: 100vw;
+  min-height: 100vh;
+  scroll-snap-align: start;
+  padding: var(--slide-padding);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  position: relative;
+  border-bottom: 1px solid var(--border);
+}
+
+.slide::after {
+  content: attr(data-slide);
+  position: absolute;
+  bottom: 20px;
+  right: 36px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Title slide */
+.slide.title-slide {
+  background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 50%, #1a56db 100%);
+  color: #fff;
+  text-align: center;
+  justify-content: center;
+  align-items: center;
+}
+.slide.title-slide::after { color: rgba(255,255,255,0.3); }
+
+/* Section divider */
+.slide.section-slide {
+  background: var(--primary);
+  color: #fff;
+  text-align: center;
+  align-items: center;
+}
+.slide.section-slide::after { color: rgba(255,255,255,0.3); }
+.slide.section-slide h2 {
+  font-size: 2.4rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.slide.section-slide .section-sub {
+  font-size: 1.15rem;
+  opacity: 0.75;
+  margin-top: 10px;
+  font-weight: 400;
+}
+
+/* End slide */
+.slide.end-slide {
+  background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 50%, #1a56db 100%);
+  color: #fff;
+  text-align: center;
+  align-items: center;
+}
+.slide.end-slide::after { color: rgba(255,255,255,0.3); }
+
+/* ========================================================================
+   Typography
+   ======================================================================== */
+h1 { font-size: 2.2rem; font-weight: 700; letter-spacing: -0.02em; line-height: 1.3; }
+h2 { font-size: 1.7rem; font-weight: 700; letter-spacing: -0.01em; margin-bottom: 24px; }
+h3 { font-size: 1.05rem; font-weight: 600; margin-bottom: 10px; color: var(--primary-dark); }
+
+.slide-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 28px;
+}
+.slide-header .tag {
+  display: inline-block;
+  background: var(--primary);
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 20px;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+}
+
+ul, ol { padding-left: 1.3em; }
+li { margin-bottom: 7px; font-size: 0.98rem; }
+li::marker { color: var(--primary); }
+
+p { font-size: 0.98rem; margin-bottom: 10px; }
+
+strong { color: var(--text); font-weight: 600; }
+em { font-style: normal; color: var(--accent); font-weight: 600; }
+
+.highlight { color: var(--primary); font-weight: 700; }
+.accent { color: var(--accent); font-weight: 700; }
+.muted { color: var(--text-secondary); font-size: 0.88rem; }
+.small { font-size: 0.82rem; color: var(--text-secondary); }
+
+.source-note {
+  position: absolute;
+  bottom: 20px;
+  left: 90px;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+}
+
+/* ========================================================================
+   Layout Helpers
+   ======================================================================== */
+.columns { display: grid; grid-template-columns: 1fr 1fr; gap: 36px; align-items: start; }
+.columns-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; align-items: stretch; }
+
+/* ========================================================================
+   Cards — uniform height via flex
+   ======================================================================== */
+.card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px 22px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+}
+.card h3 { font-size: 0.95rem; margin-bottom: 8px; }
+.card p, .card li { font-size: 0.9rem; }
+
+.card-accent { border-left: 3px solid var(--primary); }
+.card-warn  { border-left: 3px solid var(--accent); background: var(--accent-light); }
+.card-highlight { background: var(--primary-light); border: 1px solid #c5d5f0; }
+.card-green { border-left: 3px solid #16a34a; background: #f0fdf4; }
+
+/* Force equal-height cards in grid */
+.columns-3 > .card,
+.columns > .card { min-height: 0; flex: 1; }
+
+/* ========================================================================
+   Tables
+   ======================================================================== */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+  margin: 10px 0;
+}
+th {
+  background: var(--primary);
+  color: #fff;
+  padding: 9px 12px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 0.82rem;
+  letter-spacing: 0.02em;
+}
+th:first-child { border-radius: var(--radius) 0 0 0; }
+th:last-child  { border-radius: 0 var(--radius) 0 0; }
+td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+tr:nth-child(even) { background: var(--bg-alt); }
+
+/* ========================================================================
+   Architecture Diagram
+   ======================================================================== */
+.arch { display: flex; flex-direction: column; gap: 6px; font-family: var(--font-mono); font-size: 0.82rem; }
+.arch-row { display: flex; gap: 6px; justify-content: center; }
+.arch-box {
+  padding: 10px 16px;
+  border-radius: 6px;
+  text-align: center;
+  font-weight: 500;
+  font-size: 0.8rem;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.arch-box.layer-app    { background: #dbeafe; color: #1e40af; border: 1px solid #93c5fd; }
+.arch-box.layer-fuse   { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+.arch-box.layer-client { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
+.arch-box.layer-engine { background: #e0e7ff; color: #3730a3; border: 1px solid #a5b4fc; }
+.arch-box.layer-store  { background: #f3e8ff; color: #6b21a8; border: 1px solid #c4b5fd; }
+.arch-arrow { text-align: center; color: var(--text-secondary); font-size: 0.78rem; line-height: 1; }
+
+/* ========================================================================
+   Timeline
+   ======================================================================== */
+.timeline {
+  display: flex;
+  align-items: flex-start;
+  padding: 16px 0;
+  position: relative;
+}
+.timeline::before {
+  content: '';
+  position: absolute;
+  top: 32px;
+  left: 0; right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--primary-dark), var(--primary), var(--accent));
+  border-radius: 2px;
+}
+.timeline-item {
+  flex: 1;
+  text-align: center;
+  position: relative;
+  padding-top: 44px;
+}
+.timeline-item .dot {
+  position: absolute;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: var(--primary);
+  border: 3px solid #fff;
+  box-shadow: 0 0 0 2px var(--primary);
+  z-index: 1;
+}
+.timeline-item .dot.accent-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent);
+}
+.timeline-item .year { font-size: 0.82rem; font-weight: 700; color: var(--primary-dark); margin-bottom: 3px; }
+.timeline-item .label { font-size: 0.75rem; color: var(--text-secondary); line-height: 1.35; }
+
+/* ========================================================================
+   Stat Grid
+   ======================================================================== */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 14px;
+  margin: 14px 0;
+}
+.stat-item {
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  text-align: center;
+}
+.stat-item .stat-val {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--primary);
+  line-height: 1.2;
+}
+.stat-item .stat-lbl {
+  font-size: 0.76rem;
+  color: var(--text-secondary);
+  margin-top: 3px;
+}
+
+/* ========================================================================
+   KV Mapping Visual
+   ======================================================================== */
+.kv-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  font-size: 0.85rem;
+}
+.kv-concept {
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fcd34d;
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-weight: 500;
+  min-width: 140px;
+  text-align: center;
+}
+.kv-arrow { color: var(--text-secondary); font-size: 1.2rem; }
+.kv-key-box {
+  background: #dbeafe;
+  color: #1e40af;
+  border: 1px solid #93c5fd;
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+.kv-val-box {
+  background: #d1fae5;
+  color: #166534;
+  border: 1px solid #6ee7b7;
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  font-weight: 500;
+  flex: 1;
+}
+
+/* ========================================================================
+   Gantt Chart
+   ======================================================================== */
+.gantt {
+  display: grid;
+  grid-template-columns: 130px repeat(5, 1fr);
+  gap: 2px;
+  font-size: 0.8rem;
+  margin: 14px 0;
+}
+.gantt-hd  { background: var(--primary); color: #fff; padding: 7px 8px; font-weight: 600; text-align: center; }
+.gantt-lbl { padding: 7px 8px; background: var(--bg-alt); border: 1px solid var(--border); font-weight: 500; }
+.gantt-cell { padding: 7px 4px; border: 1px solid var(--border); text-align: center; }
+.gantt-done   { background: #d1fae5; border: 1px solid #6ee7b7; }
+.gantt-active { background: var(--accent-light); border: 1px solid #fdb99b; }
+.gantt-plan   { background: var(--primary-light); border: 1px solid #c5d5f0; }
+
+/* ========================================================================
+   Progress Bar
+   ======================================================================== */
+#progress {
+  position: fixed;
+  top: 0; left: 0;
+  height: 3px;
+  background: var(--primary);
+  z-index: 999;
+  transition: width 0.3s ease;
+}
+
+/* Nav hint */
+.nav-hint {
+  position: fixed;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 0.72rem;
+  color: rgba(255,255,255,0.45);
+  z-index: 100;
+  pointer-events: none;
+  animation: fadeHint 4s forwards;
+}
+@keyframes fadeHint { 0%,70%{opacity:1} 100%{opacity:0} }
+
+/* ========================================================================
+   Print
+   ======================================================================== */
+@media print {
+  html { scroll-snap-type: none; }
+  .slide { page-break-after: always; min-height: auto; height: 100vh; border: none; }
+  #progress, .nav-hint { display: none; }
+}
+</style>
+</head>
+<body>
+
+<div id="progress"></div>
+
+<!-- ====================================================================
+     SLIDE 1 — Title
+     ==================================================================== -->
+<section class="slide title-slide" data-slide="1 / 16">
+  <div style="margin-bottom: 40px;">
+    <div style="font-size: 0.9rem; letter-spacing: 0.15em; opacity: 0.55; margin-bottom: 18px;">毕业设计（论文）开题报告</div>
+    <h1 style="font-size: 2.5rem; margin-bottom: 14px; line-height: 1.35;">采用元数据键值对存储的<br>文件操作设计与实现</h1>
+    <div style="width: 60px; height: 2px; background: rgba(255,255,255,0.3); margin: 20px auto;"></div>
+    <div style="font-size: 0.95rem; opacity: 0.7; line-height: 2;">
+      学&nbsp;&nbsp;&nbsp;&nbsp;生：崔顺杰<br>
+      指导教师：曹强 教授<br>
+    </div>
+    <div style="font-size: 0.85rem; opacity: 0.5; margin-top: 16px;">
+      华中科技大学 &nbsp;·&nbsp; 计算机科学与技术学院<br>
+      2026 年 3 月
+    </div>
+  </div>
+</section>
+
+<!-- ====================================================================
+     SLIDE 2 — Outline
+     ==================================================================== -->
+<section class="slide" data-slide="2 / 16" style="align-items: center;">
+  <h2 style="text-align: center; margin-bottom: 36px;">报告提纲</h2>
+  <div style="display: flex; flex-direction: column; gap: 20px; max-width: 560px; width: 100%;">
+    <div style="display: flex; align-items: center; gap: 16px;">
+      <span style="background: var(--primary); color: #fff; width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.9rem; flex-shrink: 0;">1</span>
+      <div>
+        <div style="font-weight: 600; font-size: 1.05rem;">研究背景与动机</div>
+        <div class="muted">元数据瓶颈 · KV 存储的适配性 · 学术研究脉络</div>
+      </div>
+    </div>
+    <div style="display: flex; align-items: center; gap: 16px;">
+      <span style="background: var(--primary); color: #fff; width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.9rem; flex-shrink: 0;">2</span>
+      <div>
+        <div style="font-weight: 600; font-size: 1.05rem;">系统设计</div>
+        <div class="muted">整体架构 · 命名空间 KV 映射 · 增量更新 · 并发与优化方向</div>
+      </div>
+    </div>
+    <div style="display: flex; align-items: center; gap: 16px;">
+      <span style="background: var(--primary); color: #fff; width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.9rem; flex-shrink: 0;">3</span>
+      <div>
+        <div style="font-weight: 600; font-size: 1.05rem;">验证方案</div>
+        <div class="muted">POSIX 正确性测试 · 元数据性能压测</div>
+      </div>
+    </div>
+    <div style="display: flex; align-items: center; gap: 16px;">
+      <span style="background: var(--primary); color: #fff; width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.9rem; flex-shrink: 0;">4</span>
+      <div>
+        <div style="font-weight: 600; font-size: 1.05rem;">总结与计划</div>
+        <div class="muted">当前进展 · 后续规划 · 时间安排</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================================================================
+     PART 1 — SECTION
+     ==================================================================== -->
+<section class="slide section-slide" data-slide="3 / 16">
+  <div>
+    <div style="font-size: 0.95rem; letter-spacing: 0.12em; opacity: 0.55; margin-bottom: 10px;">PART 1</div>
+    <h2>研究背景与动机</h2>
+    <div class="section-sub">为什么要用 KV 存储来管理文件元数据？</div>
+  </div>
+</section>
+
+<!-- ====================================================================
+     SLIDE 4 — The Metadata Problem
+     ==================================================================== -->
+<section class="slide" data-slide="4 / 16">
+  <div class="slide-header">
+    <span class="tag">背景</span>
+    <h2 style="margin: 0;">元数据操作：文件系统的核心瓶颈</h2>
+  </div>
+
+  <div class="columns">
+    <div class="col">
+      <div class="card card-warn" style="margin-bottom: 14px;">
+        <h3>问题有多严重？</h3>
+        <ul>
+          <li>Meta 2020 年生产集群统计：元数据操作占文件系统总 I/O 的 <em>&gt;50%</em></li>
+          <li>BFO (ACM TOS 2020)：元数据开销占小文件访问延迟的 <em>40%</em></li>
+          <li>HDFS NameNode 单机极限约 10 亿文件，已成为 Hadoop 生态已知瓶颈</li>
+        </ul>
+      </div>
+      <div class="card card-highlight">
+        <p style="font-size: 0.9rem; margin: 0;">
+          <strong>核心矛盾：</strong>文件越多、越小，元数据操作占比越大——而现代应用（AI 训练、微服务日志、容器镜像层）恰恰产生海量小文件。
+        </p>
+      </div>
+    </div>
+    <div class="col">
+      <h3>传统文件系统的结构性瓶颈</h3>
+      <table>
+        <tr><th>瓶颈</th><th>原因</th></tr>
+        <tr><td><strong>B-tree 随机写放大</strong></td><td>每次创建文件触发 B-tree 节点分裂和日志写入</td></tr>
+        <tr><td><strong>大目录性能退化</strong></td><td>ext4 htree 索引在百万文件级别 lookup 劣化</td></tr>
+        <tr><td><strong>Inode 表固定布局</strong></td><td>格式化时预分配，容量受限于初始参数</td></tr>
+        <tr><td><strong>元数据分散存储</strong></td><td>inode、目录项、位图分布在不同磁盘位置，随机 I/O 密集</td></tr>
+      </table>
+      <p class="small" style="margin-top: 10px;">
+        这些瓶颈源自文件系统诞生时"文件数量有限"的假设，与当今海量文件场景严重不匹配。
+      </p>
+    </div>
+  </div>
+  <p class="source-note">数据来源: Meta OSDI'20 Trace, Ren et al. (ACM TOS 2020)</p>
+</section>
+
+<!-- ====================================================================
+     SLIDE 5 — Why KV Storage
+     ==================================================================== -->
+<section class="slide" data-slide="5 / 16">
+  <div class="slide-header">
+    <span class="tag">思路</span>
+    <h2 style="margin: 0;">核心思路：用 LSM-tree KV 存储管理元数据</h2>
+  </div>
+
+  <div class="columns">
+    <div class="col">
+      <h3>LSM-tree 的结构性优势</h3>
+      <div class="stat-grid" style="grid-template-columns: 1fr 1fr;">
+        <div class="stat-item">
+          <div class="stat-val">3~10x</div>
+          <div class="stat-lbl">写入带宽提升<br><span class="small">随机写 → 顺序写</span></div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-val">O(1)</div>
+          <div class="stat-lbl">单条写入复杂度<br><span class="small">追加写 MemTable</span></div>
+        </div>
+      </div>
+      <div class="card" style="margin-top: 14px;">
+        <h3>为什么特别适合元数据</h3>
+        <ul style="font-size: 0.88rem;">
+          <li><strong>写密集</strong> — 创建/修改操作占比 &gt;60%</li>
+          <li><strong>记录小</strong> — inode ~100-200B，天然适合 KV</li>
+          <li><strong>前缀扫描</strong> — readdir = 按 parent_inode 前缀扫描</li>
+          <li><strong>原子批量写</strong> — WriteBatch 天然支持多键原子提交</li>
+        </ul>
+      </div>
+    </div>
+    <div class="col">
+      <h3>B-tree (ext4) vs LSM-tree (RocksDB)</h3>
+      <table>
+        <tr><th>特性</th><th>B-tree</th><th>LSM-tree</th></tr>
+        <tr><td>写入方式</td><td>原地更新 + 日志</td><td>追加写 + 后台合并</td></tr>
+        <tr><td>写放大</td><td>~2x</td><td>10~30x (可调优)</td></tr>
+        <tr><td>写入带宽</td><td>基准</td><td><em>3~10x 提升</em></td></tr>
+        <tr><td>空间利用</td><td>预分配，固定</td><td>动态增长</td></tr>
+        <tr><td>范围扫描</td><td>遍历 B-tree</td><td>SST 有序，高效</td></tr>
+        <tr><td>批量写入</td><td>逐条提交</td><td>WriteBatch 原子批量</td></tr>
+      </table>
+      <div class="card card-highlight" style="margin-top: 14px;">
+        <p style="font-size: 0.88rem; margin: 0;">
+          <strong>工业验证：</strong>JuiceFS (Redis/TiKV)、CephFS (RocksDB)、Hadoop Ozone (三级 RocksDB) 均已在生产环境采用 KV 存储管理元数据。
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================================================================
+     SLIDE 6 — Research Timeline
+     ==================================================================== -->
+<section class="slide" data-slide="6 / 16">
+  <div class="slide-header">
+    <span class="tag">调研</span>
+    <h2 style="margin: 0;">技术演进：从学术探索到工业实践</h2>
+  </div>
+
+  <div class="timeline" style="margin-bottom: 24px;">
+    <div class="timeline-item">
+      <div class="dot"></div>
+      <div class="year">2013</div>
+      <div class="label"><strong>TableFS</strong><br>ATC · CMU<br>LevelDB + FUSE</div>
+    </div>
+    <div class="timeline-item">
+      <div class="dot"></div>
+      <div class="year">2014</div>
+      <div class="label"><strong>IndexFS</strong><br>SC · CMU<br>GIGA+ 分布式</div>
+    </div>
+    <div class="timeline-item">
+      <div class="dot"></div>
+      <div class="year">2017</div>
+      <div class="label"><strong>LocoFS</strong><br>SC<br>松耦合解聚合</div>
+    </div>
+    <div class="timeline-item">
+      <div class="dot"></div>
+      <div class="year">2020</div>
+      <div class="label"><strong>BFO</strong><br>TOS<br>批量文件操作</div>
+    </div>
+    <div class="timeline-item">
+      <div class="dot accent-dot"></div>
+      <div class="year">2023</div>
+      <div class="label"><strong>SingularFS</strong><br>ATC · 阿里<br>单机极致优化</div>
+    </div>
+    <div class="timeline-item">
+      <div class="dot accent-dot"></div>
+      <div class="year">2025</div>
+      <div class="label"><strong>Mantle</strong><br>SOSP<br>Delta + 缓存</div>
+    </div>
+  </div>
+
+  <div class="columns-3">
+    <div class="card card-accent">
+      <h3>第一阶段：学术验证 (2013-2017)</h3>
+      <p style="font-size: 0.86rem; flex: 1;">
+        <strong>TableFS</strong> 首次证明 LSM-tree 管理元数据可行——100 万文件创建比 ext4 <em>快 5 倍</em>。
+        <strong>IndexFS</strong> 扩展到 128 MDS 节点，吞吐提升 50-100x。
+        <strong>LocoFS</strong> 通过目录/文件元数据解耦，将 KV 利用率从 18% 提升到 <em>93%</em>。
+      </p>
+    </div>
+    <div class="card card-accent">
+      <h3>第二阶段：工业落地 (2018-2020)</h3>
+      <p style="font-size: 0.86rem; flex: 1;">
+        <strong>JuiceFS</strong> 用 Redis/TiKV 管理元数据，在生产环境广泛验证。
+        <strong>Hadoop Ozone</strong> 用三级 RocksDB 突破 HDFS 10 亿文件限制。
+        <strong>BFO</strong> 深入分析批量操作中的元数据开销，提出预取优化。
+      </p>
+    </div>
+    <div class="card card-accent">
+      <h3>第三阶段：极致优化 (2023-2025)</h3>
+      <p style="font-size: 0.86rem; flex: 1;">
+        <strong>SingularFS</strong> 证明精心优化的<strong>单机 MDS 性能可超过多节点分布式方案</strong>。
+        <strong>Mantle</strong> 提出 Delta Record + IndexNode 缓存，避免高频读-改-写，吞吐提升 <em>115 倍</em>。
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ====================================================================
+     SLIDE 7 — Key Papers Insights
+     ==================================================================== -->
+<section class="slide" data-slide="7 / 16">
+  <div class="slide-header">
+    <span class="tag">论文</span>
+    <h2 style="margin: 0;">关键论文与设计启示</h2>
+  </div>
+
+  <table>
+    <tr>
+      <th style="width: 14%;">论文</th>
+      <th style="width: 28%;">核心贡献</th>
+      <th style="width: 18%;">关键成果</th>
+      <th style="width: 40%;">启示</th>
+    </tr>
+    <tr>
+      <td><strong>TableFS</strong><br><span class="small">ATC'13 · CMU</span></td>
+      <td>首次用 LevelDB 管理全量文件元数据；小文件内容内联存入 KV</td>
+      <td>100 万文件创建比 ext4 <em>快 5 倍</em></td>
+      <td>验证了 KV 存储替代传统 B-tree 管理元数据的可行性；LSM-tree 的顺序写特性天然适配写密集型元数据工作负载</td>
+    </tr>
+    <tr>
+      <td><strong>IndexFS</strong><br><span class="small">SC'14 · CMU</span></td>
+      <td>GIGA+ 目录哈希分裂；支持 128 MDS 水平扩展</td>
+      <td>单 MDS 达到底层 KV 引擎 <em>93%</em> 利用率</td>
+      <td>单机性能的天花板取决于对底层 KV 引擎的利用效率；应最大化每次操作中 KV 引擎的有效吞吐</td>
+    </tr>
+    <tr>
+      <td><strong>LocoFS</strong><br><span class="small">SC'17</span></td>
+      <td>目录元数据与文件元数据解耦；零序列化定长结构体</td>
+      <td>KV 利用率 18% → <em>93%</em></td>
+      <td>减少关键路径上的 KV 操作次数是性能关键；定长编码避免序列化开销</td>
+    </tr>
+    <tr>
+      <td><strong>BFO</strong><br><span class="small">TOS'20</span></td>
+      <td>分析批量文件操作中的元数据开销；提出预取策略</td>
+      <td>HDD 读性能提升 <em>22.4 倍</em></td>
+      <td>批量提交（WriteBatch）可大幅减少 WAL 同步开销；元数据操作的聚合优化空间大</td>
+    </tr>
+    <tr>
+      <td><strong>Mantle</strong><br><span class="small">SOSP'25</span></td>
+      <td>Delta Record 追加更新 + IndexNode 内存缓存层</td>
+      <td>吞吐提升 <em>115 倍</em></td>
+      <td>高频属性更新（mtime/nlink）应避免读-改-写模式；追加式增量记录 + 读时折叠是有效方案</td>
+    </tr>
+    <tr>
+      <td><strong>SingularFS</strong><br><span class="small">ATC'23 · 阿里</span></td>
+      <td>无日志元数据、层级并发控制；单机极致优化</td>
+      <td>单 MDS 达 <em>8.36M</em> IOPS</td>
+      <td>精心优化的单机方案性能可超过多节点分布式——单机深度优化的价值不应被低估</td>
+    </tr>
+  </table>
+</section>
+
+<!-- ====================================================================
+     PART 2 — SECTION
+     ==================================================================== -->
+<section class="slide section-slide" data-slide="8 / 16">
+  <div>
+    <div style="font-size: 0.95rem; letter-spacing: 0.12em; opacity: 0.55; margin-bottom: 10px;">PART 2</div>
+    <h2>系统设计</h2>
+    <div class="section-sub">RucksFS — 基于 RocksDB 的单机 FUSE 文件系统</div>
+  </div>
+</section>
+
+<!-- ====================================================================
+     SLIDE 9 — System Architecture
+     ==================================================================== -->
+<section class="slide" data-slide="9 / 16">
+  <div class="slide-header">
+    <span class="tag">架构</span>
+    <h2 style="margin: 0;">系统整体架构</h2>
+  </div>
+
+  <div class="columns">
+    <div class="col">
+      <div class="arch" style="max-width: 100%;">
+        <div class="arch-row">
+          <div class="arch-box layer-app" style="flex: 1;">用户程序 (ls, cp, cat, gcc, ...)</div>
+        </div>
+        <div class="arch-arrow">↕ &nbsp;POSIX syscall</div>
+        <div class="arch-row">
+          <div class="arch-box layer-fuse" style="flex: 1;">Linux FUSE &nbsp;(/dev/fuse)</div>
+        </div>
+        <div class="arch-arrow">↕ &nbsp;FUSE protocol</div>
+        <div class="arch-row">
+          <div class="arch-box layer-client" style="flex: 1;">FUSE 客户端 → VFS 路由层 → 嵌入式客户端</div>
+        </div>
+        <div class="arch-arrow">↕ &nbsp;trait MetadataOps / DataOps</div>
+        <div class="arch-row">
+          <div class="arch-box layer-engine" style="flex: 1;">
+            元数据引擎<br>
+            <span style="font-size: 0.72rem;">PCC 事务 · Delta 增量 · LRU 缓存 · 后台压缩</span>
+          </div>
+          <div class="arch-box layer-engine" style="flex: 0.5;">
+            数据引擎<br>
+            <span style="font-size: 0.72rem;">文件读写</span>
+          </div>
+        </div>
+        <div class="arch-arrow">↕ &nbsp;storage traits</div>
+        <div class="arch-row">
+          <div class="arch-box layer-store" style="flex: 1;">RocksDB (3 Column Family)</div>
+          <div class="arch-box layer-store" style="flex: 0.5;">RawDisk (flat file)</div>
+        </div>
+      </div>
+    </div>
+    <div class="col">
+      <h3>设计要点</h3>
+      <div class="card" style="margin-bottom: 10px;">
+        <h3>单二进制、零网络开销</h3>
+        <p style="font-size: 0.88rem; margin: 0;">
+          元数据引擎、数据引擎、FUSE 客户端运行在同一进程内。
+          类似 JuiceFS 的单 binary 架构，所有操作均为本地函数调用。
+        </p>
+      </div>
+      <div class="card" style="margin-bottom: 10px;">
+        <h3>Trait-Based 分层解耦</h3>
+        <p style="font-size: 0.88rem; margin: 0;">
+          参考 JuiceFS 的 Meta Engine 可替换设计。
+          通过 MetadataOps / DataOps / VfsOps 三层 trait 定义接口，存储后端可独立替换（内存 / RocksDB）。
+        </p>
+      </div>
+      <div class="card" style="margin-bottom: 10px;">
+        <h3>Rust 实现</h3>
+        <p style="font-size: 0.88rem; margin: 0;">
+          10,000+ 行代码。利用 Rust 所有权模型保证并发安全，无 GC 停顿。
+        </p>
+      </div>
+      <div class="card">
+        <h3>FUSE 权限委托</h3>
+        <p style="font-size: 0.88rem; margin: 0;">
+          使用 default_permissions + allow_other 挂载选项，由内核 VFS 层处理 POSIX 权限检查，减少用户态开销。
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================================================================
+     SLIDE 10 — Namespace to KV Mapping (Part 1)
+     ==================================================================== -->
+<section class="slide" data-slide="10 / 16">
+  <div class="slide-header">
+    <span class="tag">核心设计</span>
+    <h2 style="margin: 0;">文件命名空间到 KV 存储的映射</h2>
+  </div>
+
+  <div class="columns">
+    <div class="col">
+      <h3>核心问题：树形结构 → 扁平 KV？</h3>
+      <p style="font-size: 0.92rem; margin-bottom: 16px;">
+        文件系统是一棵<strong>树</strong>（目录包含子目录和文件），而 KV 存储是一张<strong>扁平的有序表</strong>。
+        需要设计映射规则，使得文件系统的每种操作都能高效地转化为 KV 操作。
+      </p>
+
+      <div class="card card-accent" style="margin-bottom: 12px;">
+        <h3>映射策略：三种 KV 对</h3>
+        <p style="font-size: 0.88rem;">将文件系统中的三类核心信息分别存储为独立的 KV 对：</p>
+        <ul style="font-size: 0.88rem;">
+          <li><strong>Inode 属性</strong> — 每个文件/目录的元信息（大小、权限、时间戳等）</li>
+          <li><strong>目录项</strong> — 父子关系（"哪个目录包含哪些文件"）</li>
+          <li><strong>增量记录</strong> — 高频变更的属性（mtime/nlink）的追加式更新</li>
+        </ul>
+      </div>
+
+      <div class="card card-highlight">
+        <h3>参考 RocksDB Column Family 隔离</h3>
+        <p style="font-size: 0.88rem; margin: 0;">
+          三种 KV 对分别存储在独立的 Column Family 中，各自拥有独立的 Bloom Filter、压缩策略和缓存配置。
+          借鉴 IndexFS 的优化思路——<strong>最大化底层 KV 引擎的利用效率</strong>。
+        </p>
+      </div>
+    </div>
+
+    <div class="col">
+      <h3>具体映射关系</h3>
+      <p class="muted" style="margin-bottom: 12px;">文件系统概念 → Key → Value</p>
+
+      <div style="margin-bottom: 14px;">
+        <h3 style="color: var(--primary); font-size: 0.92rem;">① Inode 属性（文件/目录的"身份证"）</h3>
+        <div class="kv-row">
+          <div class="kv-concept">文件的 inode</div>
+          <div class="kv-arrow">→</div>
+          <div class="kv-key-box">inode 编号</div>
+          <div class="kv-val-box">size, mode, nlink, uid, gid, timestamps</div>
+        </div>
+        <p class="small">借鉴 LocoFS：定长 57 字节结构体，零序列化开销</p>
+      </div>
+
+      <div style="margin-bottom: 14px;">
+        <h3 style="color: var(--primary); font-size: 0.92rem;">② 目录项（文件树的"枝干"）</h3>
+        <div class="kv-row">
+          <div class="kv-concept">目录中的文件</div>
+          <div class="kv-arrow">→</div>
+          <div class="kv-key-box">父inode + 文件名</div>
+          <div class="kv-val-box">子 inode + 类型</div>
+        </div>
+        <p class="small">同一父目录下的条目共享 Key 前缀 → readdir = 前缀扫描</p>
+      </div>
+
+      <div>
+        <h3 style="color: var(--primary); font-size: 0.92rem;">③ 增量记录（属性的"补丁"）</h3>
+        <div class="kv-row">
+          <div class="kv-concept">属性变更</div>
+          <div class="kv-arrow">→</div>
+          <div class="kv-key-box">inode + 序列号</div>
+          <div class="kv-val-box">DeltaOp (mtime/ctime/nlink)</div>
+        </div>
+        <p class="small">受 Mantle Delta Record 启发：追加而非覆盖，避免写热点</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================================================================
+     SLIDE 11 — Namespace Mapping: Operations
+     ==================================================================== -->
+<section class="slide" data-slide="11 / 16">
+  <div class="slide-header">
+    <span class="tag">核心设计</span>
+    <h2 style="margin: 0;">文件操作到 KV 操作的映射</h2>
+  </div>
+
+  <div class="columns">
+    <div class="col">
+      <h3>POSIX 操作 → KV 操作序列</h3>
+      <p style="font-size: 0.9rem; margin-bottom: 14px;">
+        每个 POSIX 文件操作被翻译为一组 KV 读写操作。以下是几个典型操作的映射方式：
+      </p>
+      <table style="font-size: 0.85rem;">
+        <tr><th>文件操作</th><th>KV 操作序列</th></tr>
+        <tr>
+          <td><strong>create</strong><br><span class="small">创建文件</span></td>
+          <td>① 查询目录项 CF（检查重名）<br>② 写入 inode CF（新文件属性）<br>③ 写入目录项 CF（父目录→子文件）<br>④ 追加 delta（父目录 mtime）</td>
+        </tr>
+        <tr>
+          <td><strong>lookup</strong><br><span class="small">路径解析</span></td>
+          <td>① 查询目录项 CF（父inode+名字→子inode）<br>② 读取 inode CF（获取属性）</td>
+        </tr>
+        <tr>
+          <td><strong>readdir</strong><br><span class="small">列目录</span></td>
+          <td>① 前缀扫描目录项 CF（父inode 为前缀）</td>
+        </tr>
+        <tr>
+          <td><strong>unlink</strong><br><span class="small">删除文件</span></td>
+          <td>① 删除目录项 CF 条目<br>② 更新 inode CF（nlink-1）<br>③ nlink=0 时删除 inode</td>
+        </tr>
+        <tr>
+          <td><strong>rename</strong><br><span class="small">重命名</span></td>
+          <td>① 删除源目录项 + 写入目标目录项<br>② 追加 delta（源&目标父目录 mtime）</td>
+        </tr>
+      </table>
+    </div>
+
+    <div class="col">
+      <h3>Delta 增量更新机制</h3>
+      <p style="font-size: 0.9rem; margin-bottom: 12px;">
+        受 Mantle (SOSP'25) 启发，对高频属性变更采用追加式增量更新，避免每次都读-改-写完整的 inode 记录：
+      </p>
+      <div class="card card-accent" style="margin-bottom: 12px;">
+        <h3>写入路径：追加 DeltaOp</h3>
+        <p style="font-size: 0.86rem; margin: 0;">
+          create/unlink/mkdir 等操作修改父目录 mtime/ctime/nlink 时，不更新 inode 记录本身，
+          而是追加一条轻量的 DeltaOp 到 delta CF。<strong>写入开销从 57B 降到 ~10B。</strong>
+        </p>
+      </div>
+      <div class="card card-accent" style="margin-bottom: 12px;">
+        <h3>读取路径：折叠 (Fold-on-Read)</h3>
+        <p style="font-size: 0.86rem; margin: 0;">
+          getattr 时将 base inode + 所有 pending delta 折叠为最终属性值。
+          <strong>InodeFoldedCache (LRU)</strong> 缓存折叠结果，后续命中则无需重复计算。
+        </p>
+      </div>
+      <div class="card card-accent">
+        <h3>后台压缩 (Compaction)</h3>
+        <p style="font-size: 0.86rem; margin: 0;">
+          当某 inode 的 delta 积累超过阈值（默认 32 条），后台线程自动合并为新的 base 值并清除旧 delta。
+          <strong>不阻塞前台操作。</strong>
+        </p>
+      </div>
+
+      <div class="card card-highlight" style="margin-top: 12px;">
+        <h3>并发控制与性能优化方向</h3>
+        <p style="font-size: 0.86rem; margin: 0;">
+          所有元数据变更通过 RocksDB <strong>PCC 悲观事务 + AtomicWriteBatch</strong> 保证跨 CF 原子性。
+          后续优化方向：WAL Group Commit（减少 fsync 次数）、批量操作聚合、缓存预热策略。
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================================================================
+     PART 3 — SECTION
+     ==================================================================== -->
+<section class="slide section-slide" data-slide="12 / 16">
+  <div>
+    <div style="font-size: 0.95rem; letter-spacing: 0.12em; opacity: 0.55; margin-bottom: 10px;">PART 3</div>
+    <h2>验证方案</h2>
+    <div class="section-sub">POSIX 正确性测试 · 元数据性能压测</div>
+  </div>
+</section>
+
+<!-- ====================================================================
+     SLIDE 13 — Verification Plan
+     ==================================================================== -->
+<section class="slide" data-slide="13 / 16">
+  <div class="slide-header">
+    <span class="tag">验证</span>
+    <h2 style="margin: 0;">正确性验证与性能评测方案</h2>
+  </div>
+
+  <div class="columns">
+    <div class="col">
+      <h3>一、POSIX 正确性验证</h3>
+      <div class="card card-green" style="margin-bottom: 14px;">
+        <h3>pjdfstest — 业界标准 POSIX 合规测试</h3>
+        <p style="font-size: 0.88rem;">
+          pjdfstest 是 FreeBSD/Linux 文件系统社区广泛使用的 POSIX 合规性测试套件，
+          覆盖 <strong>chmod、chown、link、mkdir、mkfifo、open、rename、rmdir、
+          symlink、truncate、unlink</strong> 等操作的正确性边界情况。
+        </p>
+        <p style="font-size: 0.88rem; margin: 0;">
+          将 RucksFS 挂载为 FUSE 文件系统后，在挂载点上运行完整测试套件。
+        </p>
+      </div>
+      <div class="card" style="margin-bottom: 14px;">
+        <h3>自定义正确性测试</h3>
+        <p style="font-size: 0.88rem; margin: 0;">
+          补充 pjdfstest 未覆盖的场景：
+          write+read 数据一致性、rename 原子性、deferred unlink（打开文件后删除仍可读写）、
+          fsck 一致性检查、fallocate 空间分配。
+        </p>
+      </div>
+      <div class="card">
+        <h3>单元/集成测试</h3>
+        <p style="font-size: 0.88rem; margin: 0;">
+          基于 Rust 测试框架，使用真实 RocksDB 后端（非 mock），覆盖每个文件操作的正常和异常路径。
+          当前已有 <em>228 个</em>自动化测试。
+        </p>
+      </div>
+    </div>
+    <div class="col">
+      <h3>二、元数据性能压测</h3>
+      <div class="card card-green" style="margin-bottom: 14px;">
+        <h3>自研 Rust 压测工具（对标 mdtest）</h3>
+        <p style="font-size: 0.88rem;">
+          mdtest 是 HPC 领域标准的元数据性能测试工具（C 实现）。
+          将实现一个 Rust 原生压测工具，通过 FUSE 挂载点直接发起 POSIX syscall，
+          避免 shell 脚本的 fork/exec 开销（实测 shell 循环在 ext4 上也仅 ~1,500 ops/s）。
+        </p>
+        <ul style="font-size: 0.86rem;">
+          <li>支持操作类型：<strong>create / stat / unlink / mkdir / readdir / 混合</strong></li>
+          <li>可配置并发度：<strong>1~N 线程</strong>同时压测</li>
+          <li>可配置规模：<strong>1K ~ 1M</strong> 文件数</li>
+          <li>输出 CSV 格式：ops/sec、延迟百分位（P50/P99）</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>测试场景设计</h3>
+        <p style="font-size: 0.88rem; margin: 0;">
+          参考 TableFS (ATC'13) 和 mdtest (IO500) 的经典测试模式：
+        </p>
+        <ul style="font-size: 0.86rem;">
+          <li><strong>单目录大量小文件创建</strong>（mdtest-hard 模式）</li>
+          <li><strong>多目录分散创建</strong>（mdtest-easy 模式）</li>
+          <li><strong>大目录 readdir + stat</strong>（ls -l 模拟）</li>
+          <li>与 ext4 对照：相同工具、相同硬件、相同操作</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================================================================
+     PART 4 — SECTION
+     ==================================================================== -->
+<section class="slide section-slide" data-slide="14 / 16">
+  <div>
+    <div style="font-size: 0.95rem; letter-spacing: 0.12em; opacity: 0.55; margin-bottom: 10px;">PART 4</div>
+    <h2>总结与计划</h2>
+    <div class="section-sub">当前进展 · 后续规划 · 时间安排</div>
+  </div>
+</section>
+
+<!-- ====================================================================
+     SLIDE 15 — Progress & Plan
+     ==================================================================== -->
+<section class="slide" data-slide="15 / 16">
+  <div class="slide-header">
+    <span class="tag">计划</span>
+    <h2 style="margin: 0;">当前进展与后续计划</h2>
+  </div>
+
+  <div class="columns">
+    <div class="col">
+      <h3>当前已完成</h3>
+      <div class="stat-grid" style="grid-template-columns: 1fr 1fr;">
+        <div class="stat-item">
+          <div class="stat-val">10,000+</div>
+          <div class="stat-lbl">Rust 代码行数</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-val">228</div>
+          <div class="stat-lbl">自动化测试</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-val">22</div>
+          <div class="stat-lbl">FUSE 操作实现</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-val">92%</div>
+          <div class="stat-lbl">POSIX 符合率</div>
+        </div>
+      </div>
+
+      <h3 style="margin-top: 16px;">主要完成内容</h3>
+      <ul style="font-size: 0.88rem;">
+        <li>文献调研与技术方案确定</li>
+        <li>5 个 Crate 的模块化架构搭建</li>
+        <li>RocksDB 3-CF 元数据存储引擎</li>
+        <li>PCC 事务 + Delta 增量更新机制</li>
+        <li>22 种 FUSE 文件操作完整实现</li>
+        <li>LRU 缓存 + 后台 Delta 压缩</li>
+        <li>fsck 一致性检查工具</li>
+        <li>POSIX 正确性测试通过 92%</li>
+      </ul>
+    </div>
+    <div class="col">
+      <h3>时间规划</h3>
+      <div class="gantt">
+        <div class="gantt-hd">阶段</div>
+        <div class="gantt-hd">1-2月</div>
+        <div class="gantt-hd">3月</div>
+        <div class="gantt-hd">4月上</div>
+        <div class="gantt-hd">4月下</div>
+        <div class="gantt-hd">5月</div>
+
+        <div class="gantt-lbl">文献调研</div>
+        <div class="gantt-done"></div>
+        <div class="gantt-cell"></div>
+        <div class="gantt-cell"></div>
+        <div class="gantt-cell"></div>
+        <div class="gantt-cell"></div>
+
+        <div class="gantt-lbl">核心功能开发</div>
+        <div class="gantt-done"></div>
+        <div class="gantt-done"></div>
+        <div class="gantt-cell"></div>
+        <div class="gantt-cell"></div>
+        <div class="gantt-cell"></div>
+
+        <div class="gantt-lbl">测试与验证</div>
+        <div class="gantt-cell"></div>
+        <div class="gantt-active"></div>
+        <div class="gantt-plan"></div>
+        <div class="gantt-cell"></div>
+        <div class="gantt-cell"></div>
+
+        <div class="gantt-lbl">性能优化</div>
+        <div class="gantt-cell"></div>
+        <div class="gantt-cell"></div>
+        <div class="gantt-plan"></div>
+        <div class="gantt-plan"></div>
+        <div class="gantt-cell"></div>
+
+        <div class="gantt-lbl">论文撰写</div>
+        <div class="gantt-cell"></div>
+        <div class="gantt-cell"></div>
+        <div class="gantt-plan"></div>
+        <div class="gantt-plan"></div>
+        <div class="gantt-plan"></div>
+      </div>
+      <div style="display: flex; gap: 14px; margin-top: 6px; font-size: 0.75rem; color: var(--text-secondary);">
+        <span style="display: flex; align-items: center; gap: 4px;"><span style="width:12px;height:12px;background:#d1fae5;border:1px solid #6ee7b7;border-radius:2px;display:inline-block;"></span> 已完成</span>
+        <span style="display: flex; align-items: center; gap: 4px;"><span style="width:12px;height:12px;background:#fff3ee;border:1px solid #fdb99b;border-radius:2px;display:inline-block;"></span> 进行中</span>
+        <span style="display: flex; align-items: center; gap: 4px;"><span style="width:12px;height:12px;background:#e8effc;border:1px solid #c5d5f0;border-radius:2px;display:inline-block;"></span> 计划中</span>
+      </div>
+
+      <h3 style="margin-top: 18px;">后续重点工作</h3>
+      <ul style="font-size: 0.88rem;">
+        <li><strong>3 月</strong>：完善 POSIX 测试覆盖，实现 Rust 性能压测工具</li>
+        <li><strong>4 月上旬</strong>：RocksDB WAL 调优、并发性能优化</li>
+        <li><strong>4 月中旬</strong>：完成整体 demo + 完整性能评测</li>
+        <li><strong>4 月下旬 ~ 5 月</strong>：论文撰写（含与 TableFS/ext4 性能对比分析）</li>
+        <li><strong>5 月中旬</strong>：论文答辩</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ====================================================================
+     SLIDE 16 — End / Q&A
+     ==================================================================== -->
+<section class="slide end-slide" data-slide="16 / 16">
+  <div>
+    <h1 style="font-size: 2.6rem; margin-bottom: 20px;">谢谢！</h1>
+    <p style="font-size: 1.1rem; opacity: 0.75; margin-bottom: 44px;">欢迎提问与讨论</p>
+
+    <div style="text-align: left; display: inline-block; font-size: 0.82rem; opacity: 0.65; line-height: 1.9;">
+      <div style="font-weight: 600; margin-bottom: 6px; font-size: 0.88rem; opacity: 1;">主要参考文献</div>
+      <div>[1] Ren & Gibson. <i>TableFS: Enhancing Metadata Efficiency in the Local File System</i>. ATC'13</div>
+      <div>[2] Ren et al. <i>IndexFS: Scaling File System Metadata Performance with Stateless Caching and Bulk Insertion</i>. SC'14</div>
+      <div>[3] Pei et al. <i>LocoFS: A Loosely-Coupled Metadata Service for Distributed File Systems</i>. SC'17</div>
+      <div>[4] Ren et al. <i>BFO: Batch-File Operations on Massive Files in Commodity Filesystems</i>. TOS'20</div>
+      <div>[5] Shen et al. <i>SingularFS: A Billion-Scale Distributed File System Using a Single Metadata Server</i>. ATC'23</div>
+      <div>[6] Zhang et al. <i>Mantle: A Programmable Metadata Load Balancer for the Ceph File System</i>. SOSP'25</div>
+    </div>
+  </div>
+</section>
+
+<div class="nav-hint">按 ↓ 或 Space 翻页</div>
+
+<!-- ====================================================================
+     JavaScript — Navigation & Progress
+     ==================================================================== -->
+<script>
+(function() {
+  const slides = document.querySelectorAll('.slide');
+  const progress = document.getElementById('progress');
+  const total = slides.length;
+
+  function updateProgress() {
+    const scrollTop = window.scrollY;
+    const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+    const pct = docHeight > 0 ? (scrollTop / docHeight) * 100 : 0;
+    progress.style.width = pct + '%';
+  }
+
+  function goToSlide(n) {
+    const idx = Math.max(0, Math.min(n, total - 1));
+    slides[idx].scrollIntoView({ behavior: 'smooth' });
+  }
+
+  function getCurrentSlide() {
+    let current = 0;
+    const mid = window.innerHeight / 2;
+    slides.forEach((s, i) => {
+      const rect = s.getBoundingClientRect();
+      if (rect.top <= mid && rect.bottom > mid) current = i;
+    });
+    return current;
+  }
+
+  document.addEventListener('keydown', function(e) {
+    const cur = getCurrentSlide();
+    switch(e.key) {
+      case 'ArrowDown': case 'ArrowRight': case ' ': case 'PageDown':
+        e.preventDefault(); goToSlide(cur + 1); break;
+      case 'ArrowUp': case 'ArrowLeft': case 'PageUp':
+        e.preventDefault(); goToSlide(cur - 1); break;
+      case 'Home': e.preventDefault(); goToSlide(0); break;
+      case 'End':  e.preventDefault(); goToSlide(total - 1); break;
+    }
+  });
+
+  window.addEventListener('scroll', updateProgress, { passive: true });
+  updateProgress();
+})();
+</script>
+
+</body>
+</html>
