@@ -986,76 +986,102 @@ tr:nth-child(even) { background: var(--bg-alt); }
     <h2 style="margin: 0;">Delta 增量更新机制</h2>
   </div>
 
-  <p class="muted" style="margin-bottom: 14px;">受 Mantle (SOSP'25) Delta Record 启发——将父 inode 高频属性更新从<strong>读-改-写</strong>转为<strong>追加写</strong>，消除热目录锁争抢</p>
-
-  <!-- Row 1: Problem vs Solution side by side -->
-  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 18px;">
-    <!-- Problem -->
-    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 18px;">
-      <h3 style="margin: 0 0 8px 0; color: var(--accent); font-size: 0.9rem;">❌ 传统读-改-写（串行瓶颈）</h3>
-      <div style="font-family: var(--font-mono); font-size: 0.76rem; line-height: 1.75;">
-        <div>Thread A: <span style="color: var(--accent);">lock(parent)</span> → read → nlink++ → write → <span style="color: var(--accent);">unlock</span></div>
-        <div>Thread B: <span style="color: var(--text-secondary);">blocked ⏳ waiting...</span></div>
-        <div>Thread C: <span style="color: var(--text-secondary);">blocked ⏳ waiting...</span></div>
+  <!-- Row 0: What is Delta — clear explanation -->
+  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 16px;">
+    <!-- Left: Problem statement with scenario -->
+    <div>
+      <h3 style="margin: 0 0 8px 0; font-size: 0.92rem; color: var(--primary);">问题场景：父目录 inode 热点写入</h3>
+      <p style="font-size: 0.82rem; line-height: 1.65; margin: 0 0 8px 0; color: var(--text-secondary);">
+        每次 <code>create</code> / <code>mkdir</code> / <code>unlink</code> / <code>rmdir</code> / <code>rename</code> 都<strong>必须更新父目录 inode</strong> 的三个属性：
+      </p>
+      <div style="display: flex; gap: 8px; margin-bottom: 10px;">
+        <span style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: 4px; padding: 3px 10px; font-family: var(--font-mono); font-size: 0.78rem;">nlink（子项计数）</span>
+        <span style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: 4px; padding: 3px 10px; font-family: var(--font-mono); font-size: 0.78rem;">mtime（修改时间）</span>
+        <span style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: 4px; padding: 3px 10px; font-family: var(--font-mono); font-size: 0.78rem;">ctime（变更时间）</span>
       </div>
-      <div style="margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); font-size: 0.82rem; color: var(--accent);">
-        每次写回 57B，N 并发被串行化 → 吞吐 = 1/N
-      </div>
+      <p style="font-size: 0.82rem; line-height: 1.65; margin: 0; color: var(--text-secondary);">
+        传统方式需要在事务中 <code>get_for_update(parent)</code> 对父 inode <strong>加行锁 → 读 57B → 反序列化 → 修改 → 序列化 → 写回</strong>。
+        同一目录下所有并发操作被<strong>串行化</strong>在这把锁上——<span style="color: var(--accent); font-weight: 600;">这是热目录的首要瓶颈</span>。
+      </p>
     </div>
 
-    <!-- Solution -->
-    <div style="background: var(--bg-alt); border: 1px solid var(--primary); border-radius: var(--radius); padding: 14px 18px;">
-      <h3 style="margin: 0 0 8px 0; color: var(--primary); font-size: 0.9rem;">✅ Delta 追加写（无锁并行）</h3>
-      <div style="font-family: var(--font-mono); font-size: 0.76rem; line-height: 1.75;">
-        <div>Thread A: append <span style="color: var(--primary);">Δ(nlink+1, mtime=T1)</span> → 5~9B</div>
-        <div>Thread B: append <span style="color: var(--primary);">Δ(nlink+1, mtime=T2)</span> → 5~9B</div>
-        <div>Thread C: append <span style="color: var(--primary);">Δ(nlink+1, mtime=T3)</span> → 5~9B</div>
+    <!-- Right: What is Delta -->
+    <div>
+      <h3 style="margin: 0 0 8px 0; font-size: 0.92rem; color: var(--primary);">解法：Delta 追加写（来自 Mantle SOSP'25）</h3>
+      <p style="font-size: 0.82rem; line-height: 1.65; margin: 0 0 10px 0; color: var(--text-secondary);">
+        <strong>不修改父 inode 本体</strong>，而是向独立的 <code>delta_entries</code> 列族追加一条<strong>增量记录</strong>（5~9 字节），描述"需要对父 inode 做什么变化"：
+      </p>
+      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; font-family: var(--font-mono); font-size: 0.76rem; line-height: 1.7; margin-bottom: 8px;">
+        <div style="color: var(--text-secondary);">// mkdir("/data/hot_dir/subA") → 追加 delta 到父目录 inode</div>
+        <div>delta_entries CF: <span style="color: var(--primary);">put</span>( key=[X|parent_ino|seq], val=<span style="color: var(--primary);">IncrNlink(+1)</span> )  <span style="color: var(--text-secondary);">// 5B</span></div>
+        <div>delta_entries CF: <span style="color: var(--primary);">put</span>( key=[X|parent_ino|seq], val=<span style="color: var(--primary);">SetMtime(now)</span> )  <span style="color: var(--text-secondary);">// 9B</span></div>
+        <div>delta_entries CF: <span style="color: var(--primary);">put</span>( key=[X|parent_ino|seq], val=<span style="color: var(--primary);">SetCtime(now)</span> )  <span style="color: var(--text-secondary);">// 9B</span></div>
       </div>
-      <div style="margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); font-size: 0.82rem; color: var(--primary);">
-        无需读取父 inode、无需加锁 → 吞吐 = N
-      </div>
+      <p style="font-size: 0.82rem; line-height: 1.65; margin: 0; color: var(--text-secondary);">
+        追加操作<strong>无需读取父 inode、无需事务行锁</strong>——N 个并发线程可以同时写入，吞吐从 1/N 变为 N。
+      </p>
     </div>
   </div>
 
-  <!-- Row 2: Three columns — Read Path / Fold Semantics / Background Compaction -->
-  <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 18px;">
-    <!-- Fold-on-Read -->
-    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px;">
-      <h3 style="margin: 0 0 8px 0; font-size: 0.86rem;">读取路径：Fold-on-Read</h3>
-      <div style="font-size: 0.82rem; line-height: 1.7;">
+  <!-- Row 1: Contrast diagram -->
+  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 16px;">
+    <div style="background: var(--bg-alt); border-left: 3px solid var(--accent); border-radius: var(--radius); padding: 12px 16px;">
+      <h3 style="margin: 0 0 6px 0; color: var(--accent); font-size: 0.84rem;">❌ 传统：读-改-写（串行瓶颈）</h3>
+      <div style="font-family: var(--font-mono); font-size: 0.74rem; line-height: 1.8;">
+        <div>Thread A: <span style="color: var(--accent);">lock(parent)</span> → read 57B → nlink++ → write 57B → <span style="color: var(--accent);">unlock</span></div>
+        <div>Thread B: <span style="color: var(--text-secondary);">blocked, waiting for lock...</span></div>
+        <div>Thread C: <span style="color: var(--text-secondary);">blocked, waiting for lock...</span></div>
+      </div>
+      <div style="margin-top: 6px; font-size: 0.78rem; color: var(--accent);">N 并发串行化 → 吞吐 = 1/N</div>
+    </div>
+
+    <div style="background: var(--bg-alt); border-left: 3px solid var(--primary); border-radius: var(--radius); padding: 12px 16px;">
+      <h3 style="margin: 0 0 6px 0; color: var(--primary); font-size: 0.84rem;">✅ Delta：追加写（无锁并行）</h3>
+      <div style="font-family: var(--font-mono); font-size: 0.74rem; line-height: 1.8;">
+        <div>Thread A: <span style="color: var(--primary);">append Δ(nlink+1, mtime=T1)</span> → 5~9B</div>
+        <div>Thread B: <span style="color: var(--primary);">append Δ(nlink+1, mtime=T2)</span> → 5~9B</div>
+        <div>Thread C: <span style="color: var(--primary);">append Δ(nlink+1, mtime=T3)</span> → 5~9B</div>
+      </div>
+      <div style="margin-top: 6px; font-size: 0.78rem; color: var(--primary);">无需读父 inode、无需加锁 → 吞吐 = N</div>
+    </div>
+  </div>
+
+  <!-- Row 2: Read path + Fold + Compaction -->
+  <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; margin-bottom: 14px;">
+    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px;">
+      <h3 style="margin: 0 0 6px 0; font-size: 0.84rem;">读取路径：Fold-on-Read</h3>
+      <div style="font-size: 0.78rem; line-height: 1.7;">
         <div>① 查 <strong>LRU 缓存</strong> → 命中 O(1) 返回</div>
-        <div>② miss → read base + scan deltas</div>
-        <div>③ fold: base + Δ₁ + ... + Δₙ → 最终值</div>
-        <div>④ 写入缓存</div>
+        <div>② miss → read base (inodes CF) + scan deltas</div>
+        <div>③ fold: base + Δ₁ + ... + Δₙ → 最终属性值</div>
+        <div>④ 写入缓存，后续直接命中</div>
       </div>
     </div>
 
-    <!-- Fold Semantics -->
-    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px;">
-      <h3 style="margin: 0 0 8px 0; font-size: 0.86rem;">Fold 语义：可交换 &amp; 可结合</h3>
-      <div style="font-size: 0.82rem; line-height: 1.7;">
-        <div><code>IncrementNlink(n)</code> — 整数加法</div>
-        <div><code>SetMtime(t)</code> / <code>SetCtime(t)</code> — 取 max</div>
+    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px;">
+      <h3 style="margin: 0 0 6px 0; font-size: 0.84rem;">Fold 语义：可交换 &amp; 可结合</h3>
+      <div style="font-size: 0.78rem; line-height: 1.7;">
+        <div><code>IncrementNlink(n)</code> — 整数加法，可结合</div>
+        <div><code>SetMtime(t)</code> / <code>SetCtime(t)</code> — 取 max，可交换</div>
       </div>
-      <p class="small" style="margin-top: 8px; margin-bottom: 0; color: var(--text-secondary);">
+      <p style="font-size: 0.76rem; margin: 6px 0 0 0; color: var(--text-secondary);">
         并发 delta 无论到达顺序如何，fold 结果都正确
       </p>
     </div>
 
-    <!-- Background Compaction -->
-    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px;">
-      <h3 style="margin: 0 0 8px 0; font-size: 0.86rem;">后台 Compaction</h3>
-      <p style="font-size: 0.82rem; line-height: 1.7; margin: 0;">
-        每 5s 扫描，delta 累积 &gt; <strong>32 条</strong>时触发：fold 进 base → 原子写回 → 清除旧 delta → 缓存失效。读放大始终有界。
+    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px;">
+      <h3 style="margin: 0 0 6px 0; font-size: 0.84rem;">后台 Compaction</h3>
+      <p style="font-size: 0.78rem; line-height: 1.7; margin: 0;">
+        每 5s 扫描，delta 累积 &gt; <strong>32 条</strong>时触发：fold 进 base → 原子写回 inodes CF → 清除旧 delta → 缓存失效。读放大始终有界。
       </p>
     </div>
   </div>
 
   <!-- Row 3: Summary -->
-  <div class="card card-highlight" style="padding: 12px 20px;">
-    <p style="font-size: 0.86rem; margin: 0;">
-      <strong>核心价值：</strong>将父 inode 更新从事务关键路径中移除——传统方案需 <code>get_for_update(parent)</code> 加行锁，同目录操作串行等待；
-      Delta 只需事务外追加 5~9B 记录，父 inode 完全不参与锁争抢。Mantle 在百度 EB 级存储验证：同目录高并发 create 吞吐提升两个数量级。
+  <div class="card card-highlight" style="padding: 10px 18px;">
+    <p style="font-size: 0.82rem; margin: 0;">
+      <strong>核心价值：</strong>将父 inode 更新从事务关键路径中移除。传统方案所有同目录操作串行等待父 inode 行锁；Delta 方案在事务外追加 5~9B 记录，
+      父 inode 完全不参与锁争抢。Mantle 论文在百度 EB 级存储验证：同目录高并发 create 吞吐提升两个数量级。
     </p>
   </div>
 </section>
