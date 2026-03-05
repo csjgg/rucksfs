@@ -1000,7 +1000,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
         <span style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: 4px; padding: 3px 10px; font-family: var(--font-mono); font-size: 0.78rem;">ctime（变更时间）</span>
       </div>
       <p style="font-size: 0.82rem; line-height: 1.65; margin: 0; color: var(--text-secondary);">
-        传统方式需要在事务中 <code>get_for_update(parent)</code> 对父 inode <strong>加行锁 → 读 57B → 反序列化 → 修改 → 序列化 → 写回</strong>。
+        传统方式需要在事务中对父 inode <strong>加行锁 → 读 57B → 反序列化 → 修改 → 序列化 → 写回</strong>。
         同一目录下所有并发操作被<strong>串行化</strong>在这把锁上——<span style="color: var(--accent); font-weight: 600;">这是热目录的首要瓶颈</span>。
       </p>
     </div>
