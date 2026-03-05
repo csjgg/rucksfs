@@ -470,10 +470,10 @@ tr:nth-child(even) { background: var(--bg-alt); }
   </div>
 
   <!-- Hero conclusion banner -->
-  <div style="background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 50%, #1a56db 100%); color: #fff; border-radius: 10px; padding: 24px 32px; margin-bottom: 24px;">
-    <div style="font-size: 1.15rem; font-weight: 700; margin-bottom: 8px; letter-spacing: -0.01em;">核心论点：每一次文件访问都必须先经过元数据操作</div>
-    <div style="font-size: 0.88rem; opacity: 0.85; line-height: 1.65;">
-      路径解析 → lookup → 权限检查 → 打开文件。文件越小、越多，元数据操作在总 I/O 中的占比越大。在海量小文件场景下，元数据管理已成为文件系统扩展性的<strong style="color: #fcd34d;">第一瓶颈</strong>。
+  <div style="background: var(--bg-alt); border: 1px solid var(--border); border-left: 3px solid var(--primary); border-radius: var(--radius); padding: 18px 24px; margin-bottom: 24px;">
+    <div style="font-size: 1.05rem; font-weight: 700; margin-bottom: 6px; color: var(--primary-dark);">核心论点：每一次文件访问都必须先经过元数据操作</div>
+    <div style="font-size: 0.88rem; color: var(--text-secondary); line-height: 1.65;">
+      路径解析 → lookup → 权限检查 → 打开文件。文件越小、越多，元数据操作在总 I/O 中的占比越大。在海量小文件场景下，元数据管理已成为文件系统扩展性的<strong style="color: var(--primary);">第一瓶颈</strong>。
     </div>
   </div>
 
@@ -497,11 +497,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
           <td><strong style="color: var(--accent); font-size: 1.05rem;">40%</strong></td>
           <td>Yang et al. <span class="small">[MSST'19]</span></td>
         </tr>
-        <tr>
-          <td>NameNode 单机上限</td>
-          <td><strong style="color: #16a34a; font-size: 1.05rem;">~10 亿</strong></td>
-          <td>HDFS Architecture Guide</td>
-        </tr>
+
         <tr>
           <td>元数据节点 QPS</td>
           <td><strong style="color: #7c3aed; font-size: 1.05rem;">数亿</strong></td>
@@ -533,7 +529,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
       </div>
     </div>
   </div>
-  <p class="source-note">数据来源: Meta OSDI'20 Trace · Yang et al. MSST'19 · Alibaba FAST'23 · HDFS Architecture Guide</p>
+  <p class="source-note">数据来源: Meta OSDI'20 Trace · Yang et al. MSST'19 · Alibaba FAST'23</p>
 </section>
 
 <!-- ====================================================================
@@ -546,10 +542,10 @@ tr:nth-child(even) { background: var(--bg-alt); }
   </div>
 
   <!-- Core insight banner -->
-  <div style="background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 50%, #1a56db 100%); color: #fff; border-radius: 10px; padding: 20px 28px; margin-bottom: 20px;">
-    <div style="font-size: 1.05rem; font-weight: 700; margin-bottom: 6px;">关键洞察：元数据操作以写为主（create/mkdir/unlink 占比 &gt;60%），而传统文件系统的写路径代价极高</div>
-    <div style="font-size: 0.84rem; opacity: 0.85; line-height: 1.55;">
-      读操作（lookup/stat）方面，ext4 的 B-tree 和 RocksDB 的 LSM-tree 都是随机点查，性能差距不大。<strong style="color: #fcd34d;">真正的性能鸿沟在写路径上</strong>——这恰好是元数据最频繁的操作。
+  <div style="background: var(--bg-alt); border: 1px solid var(--border); border-left: 3px solid var(--primary); border-radius: var(--radius); padding: 18px 24px; margin-bottom: 20px;">
+    <div style="font-size: 1.05rem; font-weight: 700; margin-bottom: 6px; color: var(--primary-dark);">关键洞察：元数据操作以写为主（create/mkdir/unlink 占比 &gt;60%），而传统文件系统的写路径代价极高</div>
+    <div style="font-size: 0.84rem; color: var(--text-secondary); line-height: 1.55;">
+      读操作（lookup/stat）方面，ext4 的 B-tree 和 RocksDB 的 LSM-tree 都是随机点查，性能差距不大。<strong style="color: var(--primary);">真正的性能鸿沟在写路径上</strong>——这恰好是元数据最频繁的操作。
     </div>
   </div>
 
@@ -557,31 +553,31 @@ tr:nth-child(even) { background: var(--bg-alt); }
   <div class="columns" style="gap: 24px; margin-bottom: 18px;">
     <!-- Left: ext4 create flow -->
     <div class="col">
-      <h3 style="color: var(--accent); margin-bottom: 10px;">ext4: create("new.txt") — 4~6 次分散随机写</h3>
-      <div style="background: var(--accent-light); border: 1px solid #fdb99b; border-radius: var(--radius); padding: 16px 18px; font-size: 0.82rem; line-height: 1.7;">
+      <h3 style="color: var(--text); margin-bottom: 10px;">ext4: create("new.txt") — 4~6 次分散随机写</h3>
+      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; font-size: 0.82rem; line-height: 1.7;">
         <!-- Disk layout diagram -->
         <div style="display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap;">
-          <div style="background: #fee2e2; border: 1px solid #fca5a5; border-radius: 5px; padding: 6px 10px; text-align: center; flex: 1; min-width: 80px;">
-            <div style="font-weight: 700; color: #991b1b; font-size: 0.78rem;">Super Block</div>
+          <div style="background: #f1f5f9; border: 1px solid var(--border); border-radius: 5px; padding: 6px 10px; text-align: center; flex: 1; min-width: 80px;">
+            <div style="font-weight: 700; color: var(--text-secondary); font-size: 0.78rem;">Super Block</div>
           </div>
-          <div style="background: #fef3c7; border: 2px solid var(--accent); border-radius: 5px; padding: 6px 10px; text-align: center; flex: 1; min-width: 80px;">
-            <div style="font-weight: 700; color: #92400e; font-size: 0.78rem;">inode 位图</div>
-            <div style="font-size: 0.7rem; color: #92400e;">写 1</div>
+          <div style="background: var(--primary-light); border: 1px solid #b4c9ee; border-radius: 5px; padding: 6px 10px; text-align: center; flex: 1; min-width: 80px;">
+            <div style="font-weight: 700; color: var(--primary-dark); font-size: 0.78rem;">inode 位图</div>
+            <div style="font-size: 0.7rem; color: var(--primary);">写 1</div>
           </div>
-          <div style="background: #fef3c7; border: 2px solid var(--accent); border-radius: 5px; padding: 6px 10px; text-align: center; flex: 1; min-width: 80px;">
-            <div style="font-weight: 700; color: #92400e; font-size: 0.78rem;">inode 表</div>
-            <div style="font-size: 0.7rem; color: #92400e;">写 2</div>
+          <div style="background: var(--primary-light); border: 1px solid #b4c9ee; border-radius: 5px; padding: 6px 10px; text-align: center; flex: 1; min-width: 80px;">
+            <div style="font-weight: 700; color: var(--primary-dark); font-size: 0.78rem;">inode 表</div>
+            <div style="font-size: 0.7rem; color: var(--primary);">写 2</div>
           </div>
-          <div style="background: #fef3c7; border: 2px solid var(--accent); border-radius: 5px; padding: 6px 10px; text-align: center; flex: 1; min-width: 80px;">
-            <div style="font-weight: 700; color: #92400e; font-size: 0.78rem;">目录 B-tree</div>
-            <div style="font-size: 0.7rem; color: #92400e;">写 3 (可能分裂)</div>
+          <div style="background: var(--primary-light); border: 1px solid #b4c9ee; border-radius: 5px; padding: 6px 10px; text-align: center; flex: 1; min-width: 80px;">
+            <div style="font-weight: 700; color: var(--primary-dark); font-size: 0.78rem;">目录 B-tree</div>
+            <div style="font-size: 0.7rem; color: var(--primary);">写 3 (可能分裂)</div>
           </div>
-          <div style="background: #fef3c7; border: 2px solid var(--accent); border-radius: 5px; padding: 6px 10px; text-align: center; flex: 1; min-width: 80px;">
-            <div style="font-weight: 700; color: #92400e; font-size: 0.78rem;">Journal</div>
-            <div style="font-size: 0.7rem; color: #92400e;">写 4 (先于数据)</div>
+          <div style="background: var(--primary-light); border: 1px solid #b4c9ee; border-radius: 5px; padding: 6px 10px; text-align: center; flex: 1; min-width: 80px;">
+            <div style="font-weight: 700; color: var(--primary-dark); font-size: 0.78rem;">Journal</div>
+            <div style="font-size: 0.7rem; color: var(--primary);">写 4 (先于数据)</div>
           </div>
         </div>
-        <div style="font-size: 0.8rem; color: #92400e; line-height: 1.6;">
+        <div style="font-size: 0.8rem; color: var(--text); line-height: 1.6;">
           <strong>问题 1 — 写放大：</strong>每次 create 需要修改 4 个不同的磁盘区域（位图 + inode + 目录 + journal），且每个位置都是<strong>随机写</strong>。B-tree 节点分裂还可能额外增加写入。<br>
           <strong>问题 2 — 容量固定：</strong>inode 数量在 <code>mkfs</code> 时确定。磁盘空间还剩很多，但 inode 用完就无法再创建文件。
         </div>
@@ -590,26 +586,26 @@ tr:nth-child(even) { background: var(--bg-alt); }
 
     <!-- Right: LSM-tree create flow -->
     <div class="col">
-      <h3 style="color: #16a34a; margin-bottom: 10px;">LSM-tree KV: create("new.txt") — 1 次顺序追加写</h3>
-      <div style="background: #f0fdf4; border: 1px solid #6ee7b7; border-radius: var(--radius); padding: 16px 18px; font-size: 0.82rem; line-height: 1.7;">
+      <h3 style="color: var(--text); margin-bottom: 10px;">LSM-tree KV: create("new.txt") — 1 次顺序追加写</h3>
+      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; font-size: 0.82rem; line-height: 1.7;">
         <!-- LSM flow diagram -->
         <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
-          <div style="background: #dcfce7; border: 2px solid #16a34a; border-radius: 5px; padding: 8px 12px; text-align: center; min-width: 100px;">
-            <div style="font-weight: 700; color: #166534; font-size: 0.78rem;">MemTable</div>
-            <div style="font-size: 0.7rem; color: #166534;">内存写入 (ns级)</div>
+          <div style="background: var(--primary-light); border: 1px solid #b4c9ee; border-radius: 5px; padding: 8px 12px; text-align: center; min-width: 100px;">
+            <div style="font-weight: 700; color: var(--primary-dark); font-size: 0.78rem;">MemTable</div>
+            <div style="font-size: 0.7rem; color: var(--primary);">内存写入 (ns级)</div>
           </div>
-          <div style="color: #16a34a; font-weight: 700;">+</div>
-          <div style="background: #dcfce7; border: 2px solid #16a34a; border-radius: 5px; padding: 8px 12px; text-align: center; min-width: 100px;">
-            <div style="font-weight: 700; color: #166534; font-size: 0.78rem;">WAL 追加</div>
-            <div style="font-size: 0.7rem; color: #166534;">1 次顺序写</div>
+          <div style="color: var(--primary); font-weight: 700;">+</div>
+          <div style="background: var(--primary-light); border: 1px solid #b4c9ee; border-radius: 5px; padding: 8px 12px; text-align: center; min-width: 100px;">
+            <div style="font-weight: 700; color: var(--primary-dark); font-size: 0.78rem;">WAL 追加</div>
+            <div style="font-size: 0.7rem; color: var(--primary);">1 次顺序写</div>
           </div>
           <div style="color: var(--text-secondary); font-size: 0.78rem; padding: 0 6px;">then async</div>
-          <div style="background: #e0e7ff; border: 1px dashed #a5b4fc; border-radius: 5px; padding: 8px 12px; text-align: center; min-width: 100px; opacity: 0.7;">
-            <div style="font-weight: 700; color: #3730a3; font-size: 0.78rem;">SST Flush</div>
-            <div style="font-size: 0.7rem; color: #3730a3;">后台批量排序写</div>
+          <div style="background: #f1f5f9; border: 1px dashed var(--border); border-radius: 5px; padding: 8px 12px; text-align: center; min-width: 100px; opacity: 0.7;">
+            <div style="font-weight: 700; color: var(--text-secondary); font-size: 0.78rem;">SST Flush</div>
+            <div style="font-size: 0.7rem; color: var(--text-secondary);">后台批量排序写</div>
           </div>
         </div>
-        <div style="font-size: 0.8rem; color: #166534; line-height: 1.6;">
+        <div style="font-size: 0.8rem; color: var(--text); line-height: 1.6;">
           <strong>优势 1 — 顺序写：</strong>所有元数据（inode + 目录项）写入内存 MemTable + WAL 顺序追加，<strong>不产生随机 I/O</strong>。后台异步 flush 为有序 SST 文件。<br>
           <strong>优势 2 — 动态扩容：</strong>无需预分配 inode，KV 存储<strong>动态增长</strong>，仅受磁盘容量限制。<br>
           <strong>优势 3 — 原子批量：</strong>WriteBatch 一次提交多个 KV 对，create 涉及的 inode + 目录项<strong>原子写入</strong>。
@@ -631,7 +627,7 @@ tr:nth-child(even) { background: var(--bg-alt); }
       </div>
     </div>
     <div class="col">
-      <div class="card card-green">
+      <div class="card card-accent">
         <h3 style="margin-bottom: 6px;">工业界已广泛验证</h3>
         <div style="font-size: 0.82rem; display: grid; grid-template-columns: 1fr 1fr; gap: 2px 16px;">
           <div><strong>JuiceFS</strong> — Redis/TiKV（千亿文件）</div>
