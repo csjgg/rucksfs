@@ -1156,52 +1156,51 @@ tr:nth-child(even) { background: var(--bg-alt); }
     <h2 style="margin: 0;">测试与评测方案</h2>
   </div>
 
-  <div class="columns">
-    <div class="col">
-      <h3>一、POSIX 正确性验证</h3>
-      <div class="card card-green" style="margin-bottom: 14px;">
-        <h3>pjdfstest — POSIX 合规测试套件</h3>
-        <p style="font-size: 0.88rem;">
-          FreeBSD/Linux 文件系统社区广泛使用的标准测试工具，
-          覆盖 chmod、chown、link、mkdir、open、rename、rmdir、
-          symlink、truncate、unlink 等操作的边界情况。
-        </p>
-        <p style="font-size: 0.88rem; margin: 0;">
-          将 RucksFS 挂载为 FUSE 文件系统后，在挂载点上运行完整测试套件。
-        </p>
-      </div>
-      <div class="card">
-        <h3>Rust 单元/集成测试</h3>
-        <p style="font-size: 0.88rem; margin: 0;">
-          基于真实 RocksDB 后端（非 mock），覆盖正常和异常路径。
-          补充 pjdfstest 未覆盖的场景：write+read 一致性、deferred unlink、fsck 一致性检查。
-          当前已有 <em>228 个</em>自动化测试。
-        </p>
-      </div>
+  <!-- Section 1: POSIX Correctness -->
+  <h3 style="margin: 0 0 10px 0; font-size: 0.94rem;">一、POSIX 正确性验证</h3>
+  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 20px;">
+    <div class="card card-accent" style="margin: 0;">
+      <div style="font-weight: 600; font-size: 0.88rem; margin-bottom: 6px;">pjdfstest — POSIX 合规测试套件</div>
+      <p style="font-size: 0.84rem; margin: 0;">
+        FreeBSD/Linux 文件系统社区标准工具，覆盖 chmod、chown、link、mkdir、open、rename、rmdir、
+        symlink、truncate、unlink 等操作的边界情况。
+        将 RucksFS 挂载为 FUSE 后，在挂载点上运行完整套件。
+      </p>
     </div>
-    <div class="col">
-      <h3>二、元数据性能评测</h3>
-      <div class="card card-green" style="margin-bottom: 14px;">
-        <h3>mdtest — HPC 业界标准元数据压测工具</h3>
-        <p style="font-size: 0.88rem;">
-          IO500 (HPC 存储排行榜) 官方指定的元数据性能测试工具。TableFS、IndexFS、LocoFS 等论文均使用 mdtest 作为评测基准。
-          C 原生 syscall 直接操作挂载点，无 shell 开销。
-        </p>
-        <ul style="font-size: 0.86rem;">
-          <li><strong>mdtest-easy</strong>：每进程独立目录，测试分散创建</li>
-          <li><strong>mdtest-hard</strong>：所有进程共享单目录，测试锁竞争</li>
-          <li>支持 create / stat / read / remove 全流程</li>
-        </ul>
-      </div>
-      <div class="card">
-        <h3>评测对比设计</h3>
-        <ul style="font-size: 0.86rem;">
-          <li><strong>对照组</strong>：相同硬件上的 ext4，同一 mdtest 参数</li>
-          <li><strong>规模</strong>：10K / 100K / 1M 文件梯度测试</li>
-          <li><strong>并发</strong>：1 / 2 / 4 / 8 进程扩展性测试</li>
-          <li><strong>指标</strong>：ops/sec（与 TableFS 论文数据直接可比）</li>
-        </ul>
-      </div>
+    <div class="card card-accent" style="margin: 0;">
+      <div style="font-weight: 600; font-size: 0.88rem; margin-bottom: 6px;">Rust 单元 / 集成测试</div>
+      <p style="font-size: 0.84rem; margin: 0;">
+        基于真实 RocksDB 后端（非 mock），覆盖正常和异常路径。
+        补充 pjdfstest 未覆盖的场景：write+read 一致性、deferred unlink、fsck 一致性检查。
+        当前已有 <strong>228</strong> 个自动化测试。
+      </p>
+    </div>
+  </div>
+
+  <!-- Section 2: Metadata Performance -->
+  <h3 style="margin: 0 0 10px 0; font-size: 0.94rem;">二、元数据性能评测</h3>
+  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 16px;">
+    <div class="card card-accent" style="margin: 0;">
+      <div style="font-weight: 600; font-size: 0.88rem; margin-bottom: 6px;">自研 Rust 单机压测工具（主要方案）</div>
+      <p style="font-size: 0.84rem; margin-bottom: 6px;">
+        使用 Rust 编写专用的元数据压测工具，直接调用 POSIX syscall 操作挂载点，
+        精确控制并发模型和测试参数，无外部依赖。
+      </p>
+      <ul style="font-size: 0.82rem; margin: 0;">
+        <li>支持 create / stat / read / remove 全流程</li>
+        <li>单目录高竞争 + 多目录分散两种模式</li>
+        <li>可定制并发线程数、文件规模、目录深度</li>
+      </ul>
+    </div>
+    <div class="card" style="margin: 0;">
+      <div style="font-weight: 600; font-size: 0.88rem; margin-bottom: 6px;">评测对比设计</div>
+      <ul style="font-size: 0.82rem; margin: 0;">
+        <li><strong>对照组</strong>：相同硬件上的 ext4，相同测试参数</li>
+        <li><strong>规模</strong>：10K / 100K / 1M 文件梯度测试</li>
+        <li><strong>并发</strong>：1 / 2 / 4 / 8 线程扩展性测试</li>
+        <li><strong>指标</strong>：ops/sec（与 TableFS 论文数据可比）</li>
+        <li style="color: var(--text-secondary);">后续考虑引入 <strong>mdtest</strong>（IO500 标准工具）作为补充评测参考</li>
+      </ul>
     </div>
   </div>
 </section>
