@@ -1272,60 +1272,68 @@ tr:nth-child(even) { background: var(--bg-alt); }
     <h2 style="margin: 0;">当前实现进展</h2>
   </div>
 
-  <div class="columns">
-    <div class="col">
-      <div class="stat-grid" style="grid-template-columns: 1fr 1fr;">
-        <div class="stat-item">
-          <div class="stat-val">10,000+</div>
-          <div class="stat-lbl">Rust 代码行数</div>
-        </div>
-        <div class="stat-item">
-          <div class="stat-val">228</div>
-          <div class="stat-lbl">自动化测试</div>
-        </div>
-        <div class="stat-item">
-          <div class="stat-val">22</div>
-          <div class="stat-lbl">FUSE 操作</div>
-        </div>
-        <div class="stat-item">
-          <div class="stat-val">5</div>
-          <div class="stat-lbl">Crate 模块</div>
-        </div>
-      </div>
-
-      <h3 style="margin-top: 14px;">已实现的 POSIX 文件操作</h3>
-      <table style="font-size: 0.82rem;">
-        <tr><th>类别</th><th>操作</th></tr>
-        <tr><td><strong>文件管理</strong></td><td>create, open, read, write, flush, fsync, release, mknod, fallocate</td></tr>
-        <tr><td><strong>属性操作</strong></td><td>getattr, setattr (chmod/chown/truncate/utimens), access, statfs</td></tr>
-        <tr><td><strong>目录操作</strong></td><td>mkdir, rmdir, readdir</td></tr>
-        <tr><td><strong>命名空间</strong></td><td>lookup, link, symlink, readlink, unlink, rename</td></tr>
-      </table>
+  <!-- ── 上半部分：当前进展 ── -->
+  <!-- Row 1: Stats -->
+  <div class="stat-grid" style="grid-template-columns: repeat(4, 1fr); margin-bottom: 16px;">
+    <div class="stat-item">
+      <div class="stat-val">10,000+</div>
+      <div class="stat-lbl">Rust 代码行数</div>
     </div>
-    <div class="col">
-      <h3>已知不足与优化方向</h3>
-      <div class="card card-warn" style="margin-bottom: 10px;">
-        <h3>并发安全问题</h3>
-        <p style="font-size: 0.84rem; margin: 0;">
-          部分操作（如 deferred unlink 的 open handle 计数）使用 Mutex 保护，
-          在高并发下存在锁竞争。多线程同目录写入时 PCC 事务冲突率较高，需要优化锁粒度。
-        </p>
-      </div>
-      <div class="card card-warn" style="margin-bottom: 10px;">
-        <h3>并发性能待优化</h3>
-        <p style="font-size: 0.84rem; margin: 0;">
-          每次事务 commit 触发 WAL fsync，严重限制写入吞吐。
-          优化方向：<strong>WAL Group Commit</strong>（聚合多次 fsync 为一次）、
-          WriteBatch 批量聚合、LRU 缓存预热。
-        </p>
-      </div>
-      <div class="card card-warn">
-        <h3>数据存储简陋</h3>
-        <p style="font-size: 0.84rem; margin: 0;">
-          RawDiskDataStore 使用 <code>inode × max_file_size + offset</code> 稀疏寻址，
-          无空间回收、无 extent 管理。后续可引入 Chunk/Slice 模型优化。
-        </p>
-      </div>
+    <div class="stat-item">
+      <div class="stat-val">228</div>
+      <div class="stat-lbl">自动化测试</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-val">22</div>
+      <div class="stat-lbl">FUSE 操作</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-val">5</div>
+      <div class="stat-lbl">Crate 模块</div>
+    </div>
+  </div>
+
+  <!-- Row 2: POSIX Operations — horizontal layout -->
+  <h3 style="margin: 0 0 8px 0; font-size: 0.9rem;">已实现的 POSIX 文件操作</h3>
+  <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px;">
+    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px;">
+      <div style="font-size: 0.78rem; font-weight: 600; color: var(--primary); margin-bottom: 4px;">文件管理</div>
+      <div style="font-size: 0.76rem; color: var(--text-secondary); line-height: 1.6;">create, open, read, write, flush, fsync, release, mknod, fallocate</div>
+    </div>
+    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px;">
+      <div style="font-size: 0.78rem; font-weight: 600; color: var(--primary); margin-bottom: 4px;">属性操作</div>
+      <div style="font-size: 0.76rem; color: var(--text-secondary); line-height: 1.6;">getattr, setattr (chmod/chown/truncate/utimens), access, statfs</div>
+    </div>
+    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px;">
+      <div style="font-size: 0.78rem; font-weight: 600; color: var(--primary); margin-bottom: 4px;">目录操作</div>
+      <div style="font-size: 0.76rem; color: var(--text-secondary); line-height: 1.6;">mkdir, rmdir, readdir</div>
+    </div>
+    <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px;">
+      <div style="font-size: 0.78rem; font-weight: 600; color: var(--primary); margin-bottom: 4px;">命名空间</div>
+      <div style="font-size: 0.76rem; color: var(--text-secondary); line-height: 1.6;">lookup, link, symlink, readlink, unlink, rename</div>
+    </div>
+  </div>
+
+  <!-- ── 下半部分：已知不足 ── -->
+  <h3 style="margin: 0 0 10px 0; font-size: 0.9rem;">已知不足</h3>
+  <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px;">
+    <div style="background: var(--bg-alt); border-left: 3px solid var(--accent); border-radius: var(--radius); padding: 12px 16px;">
+      <h4 style="margin: 0 0 4px 0; font-size: 0.84rem; color: var(--accent);">并发安全</h4>
+      <p style="font-size: 0.78rem; margin: 0; color: var(--text-secondary); line-height: 1.6;">
+        部分操作仍依赖 Mutex 粗粒度锁，高并发下存在锁竞争，需细化锁粒度与冲突重试策略
+      </p>
+    </div>
+    <div style="background: var(--bg-alt); border-left: 3px solid var(--accent); border-radius: var(--radius); padding: 12px 16px;">
+      <h4 style="margin: 0 0 4px 0; font-size: 0.84rem; color: var(--accent);">性能</h4>
+      <p style="font-size: 0.78rem; margin: 0; color: var(--text-secondary); line-height: 1.6;">
+        事务逐次 WAL fsync 限制写入吞吐，需引入 Group Commit、WriteBatch 聚合等优化
+      </p>
+    </div>
+    <div style="background: var(--bg-alt); border-left: 3px solid var(--accent); border-radius: var(--radius); padding: 12px 16px;">
+      <h4 style="margin: 0 0 4px 0; font-size: 0.84rem; color: var(--accent);">数据存储</h4>
+      <p style="font-size: 0.78rem; margin: 0; color: var(--text-secondary); line-height: 1.6;">
+        数据存储层采用简单稀疏寻址，无空间回收与 extent 管理，后续需引入 Chunk/Slice 模型
+      </p>
     </div>
   </div>
 </section>
