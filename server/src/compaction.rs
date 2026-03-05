@@ -6,7 +6,8 @@
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use rucksfs_core::{FsResult, Inode};
 use rucksfs_storage::encoding::{encode_inode_key, InodeValue};
@@ -45,7 +46,8 @@ impl Default for CompactionConfig {
 ///
 /// The worker maintains a **dirty set** of inodes that have received deltas
 /// since the last compaction round.  Writers register inodes via
-/// [`mark_dirty`].
+/// [`mark_dirty`].  A [`Condvar`] is used to wake the loop immediately
+/// when new dirty inodes are registered, avoiding unnecessary polling.
 pub struct DeltaCompactionWorker<M, DS>
 where
     M: MetadataStore,
@@ -62,6 +64,10 @@ where
     running: AtomicBool,
     /// Storage bundle for atomic writes (put merged inode + clear deltas).
     storage_bundle: Arc<dyn StorageBundle>,
+    /// Condvar for waking the compaction loop when dirty inodes are registered.
+    notify: Condvar,
+    /// Flag guarding the Condvar; set to `true` when there is work to do.
+    notify_flag: Mutex<bool>,
 }
 
 impl<M, DS> DeltaCompactionWorker<M, DS>
@@ -85,6 +91,8 @@ where
             dirty: Mutex::new(HashSet::new()),
             running: AtomicBool::new(false),
             storage_bundle,
+            notify: Condvar::new(),
+            notify_flag: Mutex::new(false),
         }
     }
 
@@ -95,11 +103,21 @@ where
         if let Ok(mut set) = self.dirty.lock() {
             set.insert(inode);
         }
+        // Wake the compaction loop.
+        if let Ok(mut flag) = self.notify_flag.lock() {
+            *flag = true;
+            self.notify.notify_one();
+        }
     }
 
     /// Signal the background loop to stop.
     pub fn stop(&self) {
         self.running.store(false, Ordering::Relaxed);
+        // Wake the loop so it can exit promptly.
+        if let Ok(mut flag) = self.notify_flag.lock() {
+            *flag = true;
+            self.notify.notify_one();
+        }
     }
 
     /// Check whether the worker loop is running.
@@ -230,14 +248,31 @@ where
 
     /// Run the compaction loop in the current thread (blocking).
     ///
-    /// Typically called via `std::thread::spawn`.  The loop runs until
-    /// [`stop`] is called.
+    /// Typically called via `std::thread::spawn`.  The loop uses a
+    /// [`Condvar`] to sleep until either new dirty inodes are registered
+    /// or the max interval elapses, whichever comes first.
     pub fn run_loop(&self) {
         self.running.store(true, Ordering::Relaxed);
-        let interval = std::time::Duration::from_millis(self.config.interval_ms);
+        let interval = Duration::from_millis(self.config.interval_ms);
 
         while self.running.load(Ordering::Relaxed) {
-            std::thread::sleep(interval);
+            // Wait until notified or timeout.
+            {
+                let mut flag = self.notify_flag.lock().expect("notify_flag lock poisoned");
+                if !*flag {
+                    let (guard, _timeout) = self
+                        .notify
+                        .wait_timeout(flag, interval)
+                        .expect("notify wait_timeout poisoned");
+                    flag = guard;
+                }
+                *flag = false;
+            }
+
+            if !self.running.load(Ordering::Relaxed) {
+                break;
+            }
+
             if let Err(e) = self.compact_dirty() {
                 tracing::error!(error = %e, "compaction round failed");
             }
@@ -476,5 +511,36 @@ mod tests {
         assert_eq!(iv.nlink, 4); // 2 + 3 - 1
         assert_eq!(iv.mtime, 5000);
         assert_eq!(iv.ctime, 5000);
+    }
+
+    #[test]
+    fn mark_dirty_wakes_compaction_loop() {
+        let (_tmp, meta, ds, _cache, worker) = make_worker(1);
+        write_base(&meta, 42, 2);
+        append_nlink_delta(&ds, 42, 1);
+
+        let worker = Arc::new(worker);
+        let w = Arc::clone(&worker);
+
+        let handle = std::thread::spawn(move || {
+            w.run_loop();
+        });
+
+        // Wait briefly for the loop to start.
+        std::thread::sleep(Duration::from_millis(50));
+
+        // mark_dirty should wake the loop immediately.
+        worker.mark_dirty(42);
+
+        // Give the loop a small window to process.
+        std::thread::sleep(Duration::from_millis(200));
+
+        worker.stop();
+        handle.join().unwrap();
+
+        // The inode should have been compacted by the loop.
+        let iv = read_base(&meta, 42);
+        assert_eq!(iv.nlink, 3);
+        assert!(ds.scan_deltas(42).unwrap().is_empty());
     }
 }
