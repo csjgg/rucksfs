@@ -550,74 +550,80 @@ tr:nth-child(even) { background: var(--bg-alt); }
   </div>
 
   <!-- Visual comparison: ext4 create vs LSM-tree create -->
-  <div class="columns" style="gap: 24px; margin-bottom: 18px;">
+  <div class="columns" style="gap: 28px; margin-bottom: 18px;">
     <!-- Left: ext4 create flow -->
     <div class="col">
-      <h3 style="color: var(--text); margin-bottom: 10px;">ext4: create("new.txt") — 4~6 次分散随机写</h3>
-      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; font-size: 0.82rem; line-height: 1.7;">
-        <!-- Disk layout diagram -->
-        <div style="display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap;">
-          <div style="background: #f1f5f9; border: 1px solid var(--border); border-radius: 5px; padding: 6px 10px; text-align: center; flex: 1; min-width: 80px;">
-            <div style="font-weight: 700; color: var(--text-secondary); font-size: 0.78rem;">Super Block</div>
-          </div>
-          <div style="background: var(--primary-light); border: 1px solid #b4c9ee; border-radius: 5px; padding: 6px 10px; text-align: center; flex: 1; min-width: 80px;">
+      <h3 style="color: var(--text); margin-bottom: 10px; font-size: 0.95rem;">ext4: create("new.txt") — 4~6 次分散随机写</h3>
+      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px;">
+        <!-- Disk layout: 2x3 grid -->
+        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 12px;">
+          <div style="background: var(--primary-light); border: 1px solid #b4c9ee; border-radius: 5px; padding: 8px 10px; text-align: center;">
             <div style="font-weight: 700; color: var(--primary-dark); font-size: 0.78rem;">inode 位图</div>
             <div style="font-size: 0.7rem; color: var(--primary);">写 1</div>
           </div>
-          <div style="background: var(--primary-light); border: 1px solid #b4c9ee; border-radius: 5px; padding: 6px 10px; text-align: center; flex: 1; min-width: 80px;">
+          <div style="background: var(--primary-light); border: 1px solid #b4c9ee; border-radius: 5px; padding: 8px 10px; text-align: center;">
             <div style="font-weight: 700; color: var(--primary-dark); font-size: 0.78rem;">inode 表</div>
             <div style="font-size: 0.7rem; color: var(--primary);">写 2</div>
           </div>
-          <div style="background: var(--primary-light); border: 1px solid #b4c9ee; border-radius: 5px; padding: 6px 10px; text-align: center; flex: 1; min-width: 80px;">
-<div style="font-weight: 700; color: var(--primary-dark); font-size: 0.78rem;">目录 HTree</div>
-            <div style="font-size: 0.7rem; color: var(--primary);">写 3 (可能分裂)</div>
+          <div style="background: var(--primary-light); border: 1px solid #b4c9ee; border-radius: 5px; padding: 8px 10px; text-align: center;">
+            <div style="font-weight: 700; color: var(--primary-dark); font-size: 0.78rem;">目录 HTree</div>
+            <div style="font-size: 0.7rem; color: var(--primary);">写 3（可能分裂）</div>
           </div>
-          <div style="background: var(--primary-light); border: 1px solid #b4c9ee; border-radius: 5px; padding: 6px 10px; text-align: center; flex: 1; min-width: 80px;">
+          <div style="background: var(--primary-light); border: 1px solid #b4c9ee; border-radius: 5px; padding: 8px 10px; text-align: center;">
             <div style="font-weight: 700; color: var(--primary-dark); font-size: 0.78rem;">Journal</div>
-            <div style="font-size: 0.7rem; color: var(--primary);">写 4 (先于数据)</div>
+            <div style="font-size: 0.7rem; color: var(--primary);">写 4（先于数据）</div>
+          </div>
+          <div style="background: #f1f5f9; border: 1px solid var(--border); border-radius: 5px; padding: 8px 10px; text-align: center;">
+            <div style="font-weight: 600; color: var(--text-secondary); font-size: 0.78rem;">Super Block</div>
+            <div style="font-size: 0.7rem; color: var(--text-secondary);">不变</div>
+          </div>
+          <div style="background: #f1f5f9; border: 1px solid var(--border); border-radius: 5px; padding: 8px 10px; text-align: center;">
+            <div style="font-weight: 600; color: var(--text-secondary); font-size: 0.78rem;">数据块</div>
+            <div style="font-size: 0.7rem; color: var(--text-secondary);">不变</div>
           </div>
         </div>
-        <div style="font-size: 0.8rem; color: var(--text); line-height: 1.6;">
-<strong>问题 1 — 写放大：</strong>每次 create 需要修改 4 个不同的磁盘区域（位图 + inode + 目录 + journal），且每个位置都是<strong>随机写</strong>。HTree 索引块分裂还可能额外增加写入。<br>
-          <strong>问题 2 — 容量固定：</strong>inode 数量在 <code>mkfs</code> 时确定。磁盘空间还剩很多，但 inode 用完就无法再创建文件。
+        <div style="font-size: 0.8rem; color: var(--text); line-height: 1.65;">
+          <strong>问题 1 — 写放大：</strong>每次 create 修改 4 个分散磁盘区域，全部是<strong>随机写</strong>。HTree 分裂还可能额外增加写入。<br>
+          <strong>问题 2 — 容量固定：</strong>inode 数量在 <code>mkfs</code> 时确定，用完即无法创建文件。
         </div>
       </div>
     </div>
 
     <!-- Right: LSM-tree create flow -->
     <div class="col">
-      <h3 style="color: var(--text); margin-bottom: 10px;">LSM-tree KV: create("new.txt") — 1 次顺序追加写</h3>
-      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; font-size: 0.82rem; line-height: 1.7;">
-        <!-- LSM flow diagram -->
-        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
-          <div style="background: var(--primary-light); border: 1px solid #b4c9ee; border-radius: 5px; padding: 8px 12px; text-align: center; min-width: 100px;">
+      <h3 style="color: var(--text); margin-bottom: 10px; font-size: 0.95rem;">LSM-tree KV: create("new.txt") — 1 次顺序追加写</h3>
+      <div style="background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px;">
+        <!-- LSM flow: same 2x3 grid -->
+        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 12px;">
+          <div style="background: var(--primary-light); border: 1px solid #b4c9ee; border-radius: 5px; padding: 8px 10px; text-align: center;">
             <div style="font-weight: 700; color: var(--primary-dark); font-size: 0.78rem;">MemTable</div>
-            <div style="font-size: 0.7rem; color: var(--primary);">内存写入 (ns级)</div>
+            <div style="font-size: 0.7rem; color: var(--primary);">内存写入（ns 级）</div>
           </div>
-          <div style="color: var(--primary); font-weight: 700;">+</div>
-          <div style="background: var(--primary-light); border: 1px solid #b4c9ee; border-radius: 5px; padding: 8px 12px; text-align: center; min-width: 100px;">
+          <div style="background: var(--primary-light); border: 1px solid #b4c9ee; border-radius: 5px; padding: 8px 10px; text-align: center;">
             <div style="font-weight: 700; color: var(--primary-dark); font-size: 0.78rem;">WAL 追加</div>
             <div style="font-size: 0.7rem; color: var(--primary);">1 次顺序写</div>
           </div>
-          <div style="color: var(--text-secondary); font-size: 0.78rem; padding: 0 6px;">then async</div>
-          <div style="background: #f1f5f9; border: 1px dashed var(--border); border-radius: 5px; padding: 8px 12px; text-align: center; min-width: 100px; opacity: 0.7;">
-            <div style="font-weight: 700; color: var(--text-secondary); font-size: 0.78rem;">SST Flush</div>
-            <div style="font-size: 0.7rem; color: var(--text-secondary);">后台批量排序写</div>
+          <div style="background: #f1f5f9; border: 1px dashed var(--border); border-radius: 5px; padding: 8px 10px; text-align: center;">
+            <div style="font-weight: 600; color: var(--text-secondary); font-size: 0.78rem;">SST Flush</div>
+            <div style="font-size: 0.7rem; color: var(--text-secondary);">后台异步</div>
           </div>
+          <div style="border: none;"></div>
+          <div style="border: none;"></div>
+          <div style="border: none;"></div>
         </div>
-        <div style="font-size: 0.8rem; color: var(--text); line-height: 1.6;">
-          <strong>优势 1 — 顺序写：</strong>所有元数据（inode + 目录项）写入内存 MemTable + WAL 顺序追加，<strong>不产生随机 I/O</strong>。后台异步 flush 为有序 SST 文件。<br>
+        <div style="font-size: 0.8rem; color: var(--text); line-height: 1.65;">
+          <strong>优势 1 — 顺序写：</strong>inode + 目录项写入 MemTable + WAL 顺序追加，<strong>不产生随机 I/O</strong>。<br>
           <strong>优势 2 — 动态扩容：</strong>无需预分配 inode，KV 存储<strong>动态增长</strong>，仅受磁盘容量限制。<br>
-          <strong>优势 3 — 原子批量：</strong>WriteBatch 一次提交多个 KV 对，create 涉及的 inode + 目录项<strong>原子写入</strong>。
+          <strong>优势 3 — 原子批量：</strong>WriteBatch 一次提交，inode + 目录项<strong>原子写入</strong>。
         </div>
       </div>
     </div>
   </div>
 
-  <!-- Bottom: Summary + Industry validation -->
-  <div class="columns" style="gap: 24px;">
+  <!-- Bottom: Summary + Industry validation — unified card style -->
+  <div class="columns" style="gap: 28px;">
     <div class="col">
-      <div class="card card-highlight">
+      <div class="card card-accent" style="height: 100%;">
         <h3 style="margin-bottom: 6px;">为什么元数据特别适合 KV 存储</h3>
         <ul style="font-size: 0.82rem; margin: 0;">
           <li><strong>写密集</strong> — create/mkdir/unlink 占比 &gt;60%，LSM-tree 写优势最大化</li>
@@ -627,14 +633,14 @@ tr:nth-child(even) { background: var(--bg-alt); }
       </div>
     </div>
     <div class="col">
-      <div class="card card-accent">
+      <div class="card card-accent" style="height: 100%;">
         <h3 style="margin-bottom: 6px;">工业界已广泛验证</h3>
-        <div style="font-size: 0.82rem; display: grid; grid-template-columns: 1fr 1fr; gap: 2px 16px;">
-          <div><strong>JuiceFS</strong> — Redis/TiKV（千亿文件）</div>
-          <div><strong>CephFS</strong> — RocksDB（EB 级）</div>
-          <div><strong>Hadoop Ozone</strong> — 三级 RocksDB</div>
-          <div><strong>CockroachDB</strong> — Pebble</div>
-        </div>
+        <ul style="font-size: 0.82rem; margin: 0;">
+          <li><strong>JuiceFS</strong> — Redis/TiKV（千亿文件级别）</li>
+          <li><strong>CephFS</strong> — RocksDB（EB 级存储）</li>
+          <li><strong>Hadoop Ozone</strong> — 三级 RocksDB 元数据</li>
+          <li><strong>CockroachDB</strong> — Pebble（LSM-tree 引擎）</li>
+        </ul>
       </div>
     </div>
   </div>
