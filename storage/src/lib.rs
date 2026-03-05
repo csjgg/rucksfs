@@ -33,6 +33,10 @@ pub trait DeltaStore: Send + Sync {
     /// Delete all deltas for `inode` (called after compaction merges them
     /// into the base inode value).
     fn clear_deltas(&self, inode: Inode) -> FsResult<()>;
+
+    /// Allocate the next sequence number for `inode`. Used by the server
+    /// layer to write delta entries inside a transaction.
+    fn next_seq(&self, inode: Inode) -> u64;
 }
 
 pub trait MetadataStore: Send + Sync {

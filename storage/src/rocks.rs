@@ -377,7 +377,7 @@ impl RocksDeltaStore {
     }
 
     /// Allocate the next sequence number for `inode`.
-    fn next_seq(&self, inode: Inode) -> u64 {
+    fn next_seq_inner(&self, inode: Inode) -> u64 {
         // Fast path: counter already exists.
         {
             let guard = self.seqs.read().expect("seqs read lock poisoned");
@@ -403,7 +403,7 @@ impl DeltaStore for RocksDeltaStore {
         let mut assigned = Vec::with_capacity(values.len());
 
         for v in values {
-            let seq = self.next_seq(inode);
+            let seq = self.next_seq_inner(inode);
             let key = encode_delta_key(inode, seq);
             batch.put_cf(&cf, &key, v);
             assigned.push(seq);
@@ -488,11 +488,11 @@ impl DeltaStore for RocksDeltaStore {
 
         Ok(())
     }
-}
 
-// ===========================================================================
-// RocksStorageBundle — atomic cross-CF write batch
-// ===========================================================================
+    fn next_seq(&self, inode: Inode) -> u64 {
+        self.next_seq_inner(inode)
+    }
+}
 
 /// A bundle of RocksDB-backed stores that supports atomic cross-CF writes.
 ///
