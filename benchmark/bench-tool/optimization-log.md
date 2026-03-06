@@ -21,3 +21,23 @@
 - `stat` is close to ext4 (854K vs 1.1M) — mostly irreducible FUSE overhead
 
 ---
+
+## Round 1 — 2026-03-06 — RocksDB Block Cache
+
+- **Target**: all operations (infrastructure-level)
+- **Bottleneck**: block_cache at default 8MB, no index/filter caching
+- **Optimization**: 256MB shared LRU block cache, pin L0 filter/index, cache_index_and_filter_blocks
+- **Branch**: opt/round-1-rocksdb-block-cache
+- **Result**:
+  - create: 17,082 → 11,042 ops/s (**-35.4%** regression)
+  - stat: 854,489 → 664,033 ops/s (**-22.3%** regression)
+  - rename: 20,904 → 15,286 ops/s (**-26.9%** regression)
+  - unlink: 31.82 → 31.41 ops/s (-1.3%)
+  - mkdir: 13,257 → 13,006 ops/s (-1.9%)
+  - readdir: 9,008 → 12,272 ops/s (+36.2% improvement)
+  - rmdir: 19,452 → 19,292 ops/s (-0.8%)
+- **Analysis**: Block cache overhead outweighs benefit at small working set (-n 100). Cache management cost (LRU bookkeeping, cache_index_and_filter) adds latency to fast operations. Readdir benefits from cached prefix scan blocks.
+- **Decision**: REVERTED
+- **Baseline updated**: no
+
+---
