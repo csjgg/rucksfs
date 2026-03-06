@@ -795,3 +795,68 @@ async fn unlink_clears_data_location() {
     let err = meta.open(file.inode, 0).await;
     assert!(err.is_err());
 }
+
+// ===========================================================================
+// VfsCore multi-DataServer routing tests (T-27)
+// ===========================================================================
+
+/// Test that VfsCore routes read/write to the correct DataServer
+/// based on the data_location returned by open().
+#[tokio::test]
+async fn vfscore_routes_to_correct_dataserver() {
+    use rucksfs_client::VfsCore;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let db = open_rocks_db(tmp.path().join("meta.db")).unwrap();
+    let metadata_store = Arc::new(RocksMetadataStore::new(Arc::clone(&db)));
+    let index = Arc::new(RocksDirectoryIndex::new(Arc::clone(&db)));
+    let delta_store = Arc::new(RocksDeltaStore::new(Arc::clone(&db)));
+    let storage_bundle = Arc::new(RocksStorageBundle::new(Arc::clone(&db)));
+
+    // Create two separate DataServers with different backing files
+    let ds_a = Arc::new(DataServer::new(
+        RawDiskDataStore::open(&tmp.path().join("data_a.raw"), 64 * 1024 * 1024).unwrap(),
+    )) as Arc<dyn DataOps>;
+    let ds_b = Arc::new(DataServer::new(
+        RawDiskDataStore::open(&tmp.path().join("data_b.raw"), 64 * 1024 * 1024).unwrap(),
+    )) as Arc<dyn DataOps>;
+
+    let server_address = "ds-a:9001";
+    let metadata_server: Arc<dyn MetadataOps> = Arc::new(MetadataServer::new(
+        metadata_store,
+        index,
+        delta_store,
+        Arc::clone(&ds_a),
+        DataLocation { address: server_address.to_string() },
+        storage_bundle,
+    ));
+
+    // Register ds_a under the address that MetadataServer will return
+    let mut servers = std::collections::HashMap::new();
+    servers.insert(server_address.to_string(), Arc::clone(&ds_a));
+    servers.insert("ds-b:9002".to_string(), Arc::clone(&ds_b));
+
+    let vfs = VfsCore::with_data_servers(
+        metadata_server,
+        Arc::clone(&ds_a),
+        servers,
+    );
+
+    // Create a file — MetadataServer assigns default_data_location "ds-a:9001"
+    let file = vfs.create(ROOT, "routed_file", 0o644, 0, 0).await.unwrap();
+    let _handle = vfs.open(file.inode, 0).await.unwrap();
+
+    // Write through VfsCore — should route to ds_a
+    vfs.write(file.inode, 0, b"routed data", 0).await.unwrap();
+
+    // Read back through VfsCore
+    let data = vfs.read(file.inode, 0, 11).await.unwrap();
+    assert_eq!(&data[..11], b"routed data");
+
+    // Verify ds_b did NOT receive the data
+    let ds_b_data = ds_b.read_data(file.inode, 0, 11).await.unwrap();
+    assert_eq!(ds_b_data, vec![0u8; 11]);
+
+    // Release
+    vfs.release(file.inode).await.unwrap();
+}
