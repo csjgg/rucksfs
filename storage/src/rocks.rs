@@ -40,9 +40,12 @@ const ALL_CFS: &[&str] = &[CF_INODES, CF_DIR_ENTRIES, CF_SYSTEM, CF_DELTA_ENTRIE
 
 /// Build per-column-family options based on access patterns.
 ///
-/// - `inodes`: point lookups → bloom filter + LZ4.
-/// - `dir_entries`: prefix scans by parent inode → prefix extractor + bloom + LZ4.
-/// - `delta_entries`: prefix scans + high churn → prefix extractor + bloom.
+/// - `inodes`: point lookups only → bloom filter + LZ4.
+/// - `dir_entries`: prefix scans by parent inode → 9-byte prefix extractor
+///   (`[b'D'][parent: u64 BE]`) + bloom + LZ4.
+/// - `delta_entries`: prefix scans by inode → 9-byte prefix extractor
+///   (`[b'X'][inode: u64 BE]`) + bloom. No compression (high-churn,
+///   short-lived data — deltas are folded and deleted by compaction).
 /// - `system`: rare access → LZ4 only.
 fn cf_options(name: &str) -> Options {
     let mut opts = Options::default();
@@ -60,12 +63,12 @@ fn cf_options(name: &str) -> Options {
             opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
         }
         CF_DIR_ENTRIES => {
-            opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(8));
+            opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(9));
             opts.set_block_based_table_factory(&block_opts_with_bloom());
             opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
         }
         CF_DELTA_ENTRIES => {
-            opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(8));
+            opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(9));
             opts.set_block_based_table_factory(&block_opts_with_bloom());
         }
         CF_SYSTEM => {
