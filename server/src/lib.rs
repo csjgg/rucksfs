@@ -638,7 +638,7 @@ where
     async fn unlink(&self, parent: Inode, name: &str) -> FsResult<()> {
         let name_owned = name.to_string();
 
-        let need_delete_data = self.execute_with_retry(|| {
+        let (need_delete_data, parent_ts) = self.execute_with_retry(|| {
             let mut batch = self.begin_write();
 
             // Read and lock the dir entry.
@@ -694,7 +694,7 @@ where
                 self.cache.put(child_inode, child_iv);
             }
 
-            Ok(result)
+            Ok((result, ts))
         })?;
 
         // Ask DataServer to clean up file data (outside transaction scope).
@@ -720,8 +720,7 @@ where
             }
         }
 
-        let ts = now_secs();
-        self.cache.apply_deltas(parent, &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)]);
+        self.cache.apply_deltas(parent, &[DeltaOp::SetMtime(parent_ts), DeltaOp::SetCtime(parent_ts)]);
         self.compaction.mark_dirty(parent);
 
         Ok(())
@@ -730,7 +729,7 @@ where
     async fn rmdir(&self, parent: Inode, name: &str) -> FsResult<()> {
         let name_owned = name.to_string();
 
-        self.execute_with_retry(|| {
+        let parent_ts = self.execute_with_retry(|| {
             let mut batch = self.begin_write();
 
             // Read and lock the dir entry.
@@ -776,14 +775,14 @@ where
             let _ = self.delta_store.clear_deltas(child_inode);
             self.cache.invalidate(child_inode);
 
-            Ok(())
+            Ok(ts)
         })?;
 
         // Update parent cache for deltas written inside the transaction.
         self.cache.apply_deltas(parent, &[
             DeltaOp::IncrementNlink(-1),
-            DeltaOp::SetMtime(now_secs()),
-            DeltaOp::SetCtime(now_secs()),
+            DeltaOp::SetMtime(parent_ts),
+            DeltaOp::SetCtime(parent_ts),
         ]);
         self.compaction.mark_dirty(parent);
 
@@ -800,12 +799,13 @@ where
         let name_owned = name.to_string();
         let new_name_owned = new_name.to_string();
 
-        /// Tracks which nlink deltas were written inside the transaction
+        /// Tracks which deltas were written inside the transaction
         /// so we can update the cache after commit.
         struct RenameResult {
             delete_inode: Option<Inode>,
             src_is_dir: bool,
             dst_was_dir: bool,
+            ts: u64,
         }
 
         let result = self.execute_with_retry(|| {
@@ -962,11 +962,12 @@ where
                 delete_inode,
                 src_is_dir,
                 dst_was_dir,
+                ts,
             })
         })?;
 
         // Update cache for deltas written inside the transaction.
-        let ts = now_secs();
+        let ts = result.ts;
         if result.dst_was_dir {
             self.cache.apply_delta(new_parent, &DeltaOp::IncrementNlink(-1));
             self.compaction.mark_dirty(new_parent);
@@ -1051,7 +1052,7 @@ where
     async fn link(&self, parent: Inode, name: &str, target_inode: Inode) -> FsResult<FileAttr> {
         let name_owned = name.to_string();
 
-        let target_iv = self.execute_with_retry(|| {
+        let (target_iv, parent_ts) = self.execute_with_retry(|| {
             let mut batch = self.begin_write();
 
             // Lock and check the target inode exists.
@@ -1115,11 +1116,11 @@ where
                 );
             }
 
-            Ok(target_iv)
+            Ok((target_iv, ts))
         })?;
 
         // Update parent cache for deltas written inside the transaction.
-        self.cache.apply_deltas(parent, &[DeltaOp::SetMtime(now_secs()), DeltaOp::SetCtime(now_secs())]);
+        self.cache.apply_deltas(parent, &[DeltaOp::SetMtime(parent_ts), DeltaOp::SetCtime(parent_ts)]);
         self.compaction.mark_dirty(parent);
 
         Ok(target_iv.to_attr())
