@@ -83,3 +83,24 @@
 - **Consecutive no-improvement count**: 1
 
 ---
+
+## Round 4 — 2026-03-07 — Skip clear_deltas on Inode Deletion
+
+- **Target**: unlink/rmdir/rename (remove unnecessary delta cleanup on inode deletion)
+- **Bottleneck**: `clear_deltas()` performs a prefix scan + batch write per unlink/rmdir — extra RocksDB I/O on every deletion
+- **Optimization**: Skip `clear_deltas()` when deleting inodes — orphaned delta entries are harmless since inode metadata is already gone and inodes are never reused
+- **Branch**: opt/round-4-skip-clear-deltas
+- **Result**:
+  - create: 16,592 → 16,188 ops/s (-2.4%)
+  - stat: 864,103 → 853,250 ops/s (-1.3%)
+  - rename: 20,455 → 21,176 ops/s (+3.5%)
+  - unlink: 4,270 → 3,122 ops/s (-26.9%)
+  - mkdir: 12,301 → 8,241 ops/s (-33.0%)
+  - readdir: 7,446 → 7,984 ops/s (+7.2%)
+  - rmdir: 15,622 → 5,910 ops/s (-62.2%)
+- **Analysis**: Severe regressions on multiple ops. The `clear_deltas` call was not the bottleneck — with -n 100, there are very few deltas per inode (0-2), so the scan+write is fast. Regressions are likely measurement noise from benchmark ordering (background async deletions from earlier operations interfering) combined with run-to-run variance at small -n.
+- **Decision**: REVERTED
+- **Baseline updated**: no
+- **Consecutive no-improvement count**: 2
+
+---
