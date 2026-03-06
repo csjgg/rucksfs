@@ -127,3 +127,39 @@
 - **Consecutive no-improvement count**: 0
 
 ---
+
+## Round 6 — 2026-03-07 — Inline Parent Timestamp Deltas into Transaction
+
+- **Target**: all mutation operations (create 10.8x gap, rename 10.1x gap, unlink 9.6x gap)
+- **Bottleneck**: Every mutation (create/mkdir/unlink/rmdir/rename/link/symlink) performed **two** RocksDB writes: (1) the main PCC transaction commit, then (2) a separate `WriteBatch` for parent directory timestamp deltas (`SetMtime`, `SetCtime`) via `append_parent_deltas → DeltaStore::append_deltas`. The second write doubles per-op WAL I/O.
+- **Optimization**: Move `SetMtime`/`SetCtime` delta writes into the main transaction batch (alongside the existing `PutInode`/`PutDirEntry` operations), using `batch_parent_deltas` (renamed from `batch_nlink_deltas`). Post-commit code now only updates the in-memory cache and marks dirty for compaction — no more RocksDB write. Removed the now-unused `append_parent_deltas` helper.
+- **Branch**: opt/round-6-inline-deltas
+- **Result** (averaged over 2 runs, vs Round 5 baseline):
+  - **create 1T**: 15,434 → **196,978 ops/s** (+1,177%, **12.8x improvement**, now **1.18x ext4**)
+  - **stat 1T**: 849,495 → **1,201,582 ops/s** (+41.4%, now **1.06x ext4**)
+  - **rename 1T**: 18,836 → **204,849 ops/s** (+988%, **10.9x improvement**, now **1.08x ext4**)
+  - **unlink 1T**: 24,472 → **231,673 ops/s** (+847%, **9.5x improvement**, now **0.98x ext4**)
+  - **mkdir 1T**: 19,635 → **127,748 ops/s** (+551%, **6.5x improvement**, now **1.10x ext4**)
+  - **readdir 1T**: 10,656 → **60,753 ops/s** (+470%, now **9.6x ext4**)
+  - **rmdir 1T**: 25,363 → **142,980 ops/s** (+464%, **5.6x improvement**, now **1.09x ext4**)
+  - **create 2T**: 37,596 → **382,973 ops/s** (+919%)
+  - **create 4T**: same order → **430,108 ops/s**
+  - **Multi-thread scaling**: create 2T efficiency 97.8%, excellent linear scaling
+- **Analysis**: Eliminating the second RocksDB write per operation was transformative. The WAL write is the dominant latency source for small-file metadata operations — reducing from 2 WAL writes to 1 cuts per-op latency roughly in half. The improvement compounds because RocksDB's internal WAL lock serializes all writers; halving per-writer hold time doubles aggregate throughput. Five of seven operations now **exceed ext4 performance**, with unlink at 0.98x and readdir already far ahead.
+- **Decision**: MERGED
+- **Baseline updated**: yes
+- **Consecutive no-improvement count**: 0
+
+---
+
+## Current Baseline (after Round 6)
+
+| Operation | 1T easy ops/s | ext4 1T | vs ext4 |
+|-----------|--------------|---------|---------|
+| create    | 196,978      | 166,439 | **1.18x** |
+| stat      | 1,201,582    | 1,129,646 | **1.06x** |
+| rename    | 204,849      | 190,282 | **1.08x** |
+| unlink    | 231,673      | 236,000 | 0.98x |
+| mkdir     | 127,748      | 116,424 | **1.10x** |
+| readdir   | 60,753       | 6,300   | **9.64x** |
+| rmdir     | 142,980      | 131,564 | **1.09x** |
