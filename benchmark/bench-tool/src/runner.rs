@@ -51,12 +51,14 @@ pub struct BenchConfig {
     pub num_files_per_thread: usize,
 }
 
+#[allow(dead_code)]
 pub struct ThreadResult {
     pub thread_id: usize,
     pub ops_completed: u64,
     pub elapsed: Duration,
 }
 
+#[allow(dead_code)]
 pub struct BenchResult {
     pub config: BenchConfig,
     pub thread_results: Vec<ThreadResult>,

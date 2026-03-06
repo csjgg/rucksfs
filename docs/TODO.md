@@ -62,4 +62,4 @@ Memory backends are for **tests only**; production uses RocksDB + RawDisk (`--pe
 
 | ID | Status | Task | Details | Affected Files |
 |----|--------|------|---------|----------------|
-| T-30 | ⬜ | Rust 性能压测工具 (rucksfs-bench) | 当前 shell 脚本 benchmark 瓶颈在 bash for+touch fork/exec（ext4 上也仅 ~1,500 ops/s），无法反映真实文件系统性能。需实现 Rust 原生压测工具，通过 FUSE 挂载点直接 syscall（open/mknod/stat/unlink），支持：(1) 可配置操作类型（create/stat/unlink/mkdir/readdir/mixed）；(2) 可配置并发度（线程数/async task 数）；(3) 可配置规模（文件数、目录数、目录深度）；(4) 精确计时（Instant 微秒级）+ 输出 CSV。与 mdtest（C 实现）对标，用于论文性能对比。POSIX 正确性测试保留现有 shell 脚本。 | 新建 `benchmark/bench-tool/`（独立 binary crate） |
+| T-30 | ✅ | Rust 性能压测工具 (rucksfs-bench) | Rust 原生元数据压测工具，对标 mdtest。支持 7 种操作（create/stat/unlink/mkdir/rmdir/readdir/rename）、easy/hard 模式、多线程并发、barrier 同步、精确 Instant 计时、CSV + 终端表格输出、scaling efficiency 分析。`all` 模式使用 chain-aware 执行避免冗余 setup/cleanup。 | `benchmark/bench-tool/` |

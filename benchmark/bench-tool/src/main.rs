@@ -5,7 +5,9 @@ mod setup;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use runner::{BenchConfig, BenchMode, BenchOp, BenchResult};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+type WorkFn = fn(&BenchConfig, usize) -> u64;
 
 #[derive(Parser)]
 #[command(name = "rucksfs-bench", about = "Metadata benchmark tool for FUSE filesystems")]
@@ -111,7 +113,6 @@ fn main() {
         // Dir chain: mkdir -> readdir -> rmdir (shared setup/cleanup)
         for mode in [BenchMode::Easy, BenchMode::Hard] {
             for &num_threads in &cli.threads {
-                // --- File chain ---
                 run_file_chain(
                     &cli.mountpoint,
                     mode,
@@ -122,7 +123,6 @@ fn main() {
                     &mut all_results,
                 );
 
-                // --- Dir chain ---
                 run_dir_chain(
                     &cli.mountpoint,
                     mode,
@@ -160,9 +160,9 @@ fn main() {
 
                 let result = runner::run_bench(
                     &config,
-                    |c| setup::setup(c),
+                    setup::setup,
                     work_fn,
-                    |c| setup::cleanup(c),
+                    setup::cleanup,
                 );
 
                 report::print_row(&result);
@@ -197,15 +197,15 @@ fn main() {
 /// stat uses files left by create. rename renames them. unlink removes renamed files.
 /// Cleanup at the end.
 fn run_file_chain(
-    mountpoint: &PathBuf,
+    mountpoint: &Path,
     mode: BenchMode,
     num_threads: usize,
     num_files: usize,
-    output: &PathBuf,
+    output: &Path,
     timestamp: &str,
     results: &mut Vec<BenchResult>,
 ) {
-    let file_ops: &[(BenchOp, fn(&BenchConfig, usize) -> u64)] = &[
+    let file_ops: &[(BenchOp, WorkFn)] = &[
         (BenchOp::Create, ops::op_create),
         (BenchOp::Stat, ops::op_stat),
         (BenchOp::Rename, ops::op_rename),
@@ -213,7 +213,7 @@ fn run_file_chain(
     ];
     for (i, (op, work_fn)) in file_ops.iter().enumerate() {
         let config = BenchConfig {
-            mountpoint: mountpoint.clone(),
+            mountpoint: mountpoint.to_path_buf(),
             op: *op,
             mode,
             num_threads,
@@ -246,22 +246,22 @@ fn run_file_chain(
 /// readdir reads them. rmdir removes them.
 /// Cleanup at the end.
 fn run_dir_chain(
-    mountpoint: &PathBuf,
+    mountpoint: &Path,
     mode: BenchMode,
     num_threads: usize,
     num_files: usize,
-    output: &PathBuf,
+    output: &Path,
     timestamp: &str,
     results: &mut Vec<BenchResult>,
 ) {
-    let dir_ops: &[(BenchOp, fn(&BenchConfig, usize) -> u64)] = &[
+    let dir_ops: &[(BenchOp, WorkFn)] = &[
         (BenchOp::Mkdir, ops::op_mkdir),
         (BenchOp::Readdir, ops::op_readdir_dirs),
         (BenchOp::Rmdir, ops::op_rmdir),
     ];
     for (i, (op, work_fn)) in dir_ops.iter().enumerate() {
         let config = BenchConfig {
-            mountpoint: mountpoint.clone(),
+            mountpoint: mountpoint.to_path_buf(),
             op: *op,
             mode,
             num_threads,
@@ -289,7 +289,7 @@ fn run_dir_chain(
     }
 }
 
-fn get_work_fn(op: BenchOp) -> fn(&BenchConfig, usize) -> u64 {
+fn get_work_fn(op: BenchOp) -> WorkFn {
     match op {
         BenchOp::Create => ops::op_create,
         BenchOp::Stat => ops::op_stat,
