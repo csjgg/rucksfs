@@ -143,9 +143,12 @@ impl DataStore for RawDiskDataStore {
         Ok(())
     }
 
-    async fn delete(&self, inode: Inode) -> FsResult<()> {
-        // Zero-fill the entire inode region to "delete" its data.
-        self.truncate(inode, 0).await
+    async fn delete(&self, _inode: Inode) -> FsResult<()> {
+        // No-op: inode numbers are monotonically increasing and never reused
+        // (InodeAllocator), so stale data regions are permanently unreachable.
+        // Skipping the 64 MB zero-fill eliminates catastrophic I/O on unlink
+        // and prevents background deletion tasks from saturating disk bandwidth.
+        Ok(())
     }
 }
 

@@ -700,9 +700,9 @@ where
         })?;
 
         // Ask DataServer to clean up file data (outside transaction scope).
-        // Spawn as a background task — metadata is already committed, so the
-        // data deletion is non-critical cleanup. This avoids blocking unlink
-        // on potentially expensive I/O (RawDisk zero-fills the entire region).
+        // Spawn as a background task — the delete is a no-op for RawDiskDataStore
+        // (inode numbers are never reused, so stale data is permanently unreachable)
+        // but may have real cleanup work in other DataOps implementations.
         if let Some(inode) = need_delete_data {
             let has_handles = {
                 let handles = self.open_handles.lock().expect("open_handles poisoned");
@@ -982,7 +982,6 @@ where
         }
 
         // Ask DataServer to clean up data (outside transaction scope).
-        // Spawn as background task to avoid blocking the rename return.
         if let Some(inode) = result.delete_inode {
             let dc = Arc::clone(&self.data_client);
             tokio::spawn(async move {

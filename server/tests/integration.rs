@@ -796,7 +796,7 @@ fn compaction_interleaved_with_writes() {
 // ===========================================================================
 
 #[test]
-fn unlink_nlink_zero_deletes_data() {
+fn unlink_nlink_zero_removes_metadata() {
     rt().block_on(async {
         let (_tmp, client) = new_client();
 
@@ -808,17 +808,13 @@ fn unlink_nlink_zero_deletes_data() {
         let data = client.read(inode, 0, 9).await.unwrap();
         assert_eq!(&data, b"some data");
 
-        // Unlink (nlink goes to 0)
+        // Unlink (nlink goes to 0) — metadata is deleted synchronously,
+        // but data deletion is a no-op (RawDiskDataStore skips zero-fill
+        // since inode numbers are never reused).
         client.unlink(ROOT, "will_delete.txt").await.unwrap();
 
-        // Data deletion is now asynchronous (fire-and-forget background task).
-        // Give the background task time to complete the zero-fill I/O.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Data should have been cleaned up by DataServer
-        // (reading the inode should return zeros since it's been deleted)
-        let data = client.read(inode, 0, 9).await.unwrap();
-        assert_eq!(data, vec![0u8; 9]);
+        // Verify metadata is gone (inode not found).
+        assert!(client.getattr(inode).await.is_err());
     });
 }
 
