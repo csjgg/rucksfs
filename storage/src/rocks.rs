@@ -677,6 +677,13 @@ impl StorageBundle for RocksStorageBundle {
         let mut txn_opts = TransactionOptions::default();
         txn_opts.set_lock_timeout(5000); // 5s lock wait timeout
         txn_opts.set_deadlock_detect(true);
+        // WAL sync policy: RocksDB default (sync = false).
+        // Writes go to WAL but are NOT fsync'd to disk on each commit.
+        // This means:
+        //   - Process crash: data is safe (WAL is in OS page cache).
+        //   - Power failure:  up to one WAL write may be lost.
+        // For production use, consider adding a `mount -o sync` option
+        // that sets `write_opts.set_sync(true)` for FUSE fsync calls.
         let write_opts = WriteOptions::default();
         let txn = self.db.transaction_opt(&write_opts, &txn_opts);
         Box::new(RocksWriteBatch {
