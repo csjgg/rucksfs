@@ -20,5 +20,5 @@ parking_lot = "0.12"
 [dev-dependencies]
 rucksfs-client = { path = "../client" }
 rucksfs-dataserver = { path = "../dataserver" }
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
 tempfile = { workspace = true }
