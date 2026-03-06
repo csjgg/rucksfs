@@ -87,3 +87,30 @@ pub fn op_rename(config: &BenchConfig, thread_id: usize) -> u64 {
     }
     count
 }
+
+/// unlink renamed files (used in file chain after rename)
+pub fn op_unlink_renamed(config: &BenchConfig, thread_id: usize) -> u64 {
+    let mut count = 0u64;
+    for i in 0..config.num_files_per_thread {
+        let mut path = config.file_path(thread_id, i);
+        path.set_extension("renamed");
+        if fs::remove_file(&path).is_ok() {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// readdir on directories created by mkdir (used in dir chain)
+/// Each iteration reads the parent thread dir which contains the created subdirs.
+pub fn op_readdir_dirs(config: &BenchConfig, thread_id: usize) -> u64 {
+    let dir = config.thread_dir(thread_id);
+    let mut count = 0u64;
+    for _ in 0..config.num_files_per_thread {
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for _ in entries {}
+            count += 1;
+        }
+    }
+    count
+}

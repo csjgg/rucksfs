@@ -99,58 +99,76 @@ fn main() {
 
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
 
-    let ops_and_modes: Vec<(BenchOp, BenchMode)> = match &cli.command {
-        Command::Create { mode } => vec![(BenchOp::Create, (*mode).into())],
-        Command::Stat { mode } => vec![(BenchOp::Stat, (*mode).into())],
-        Command::Unlink { mode } => vec![(BenchOp::Unlink, (*mode).into())],
-        Command::Mkdir { mode } => vec![(BenchOp::Mkdir, (*mode).into())],
-        Command::Rmdir { mode } => vec![(BenchOp::Rmdir, (*mode).into())],
-        Command::Readdir { mode } => vec![(BenchOp::Readdir, (*mode).into())],
-        Command::Rename { mode } => vec![(BenchOp::Rename, (*mode).into())],
-        Command::All => {
-            // File chain: create -> stat -> rename -> unlink
-            // Dir chain: mkdir -> readdir -> rmdir
-            // Run both easy and hard for each
-            let mut v = Vec::new();
-            for mode in [BenchMode::Easy, BenchMode::Hard] {
-                v.push((BenchOp::Create, mode));
-                v.push((BenchOp::Stat, mode));
-                v.push((BenchOp::Rename, mode));
-                v.push((BenchOp::Unlink, mode));
-                v.push((BenchOp::Mkdir, mode));
-                v.push((BenchOp::Readdir, mode));
-                v.push((BenchOp::Rmdir, mode));
-            }
-            v
-        }
-    };
-
     report::print_header(&cli.mountpoint, &timestamp);
 
     let mut all_results: Vec<BenchResult> = Vec::new();
 
-    for (op, mode) in &ops_and_modes {
-        for &num_threads in &cli.threads {
-            let config = BenchConfig {
-                mountpoint: cli.mountpoint.clone(),
-                op: *op,
-                mode: *mode,
-                num_threads,
-                num_files_per_thread: cli.num_files,
-            };
+    let is_all = matches!(cli.command, Command::All);
 
-            let work_fn = get_work_fn(*op);
+    if is_all {
+        // Chain-aware execution for 'all' mode:
+        // File chain: create -> stat -> rename -> unlink (shared setup/cleanup)
+        // Dir chain: mkdir -> readdir -> rmdir (shared setup/cleanup)
+        for mode in [BenchMode::Easy, BenchMode::Hard] {
+            for &num_threads in &cli.threads {
+                // --- File chain ---
+                run_file_chain(
+                    &cli.mountpoint,
+                    mode,
+                    num_threads,
+                    cli.num_files,
+                    &cli.output,
+                    &timestamp,
+                    &mut all_results,
+                );
 
-            let result = runner::run_bench(
-                &config,
-                |c| setup::setup(c),
-                work_fn,
-                |c| setup::cleanup(c),
-            );
+                // --- Dir chain ---
+                run_dir_chain(
+                    &cli.mountpoint,
+                    mode,
+                    num_threads,
+                    cli.num_files,
+                    &cli.output,
+                    &timestamp,
+                    &mut all_results,
+                );
+            }
+        }
+    } else {
+        let ops_and_modes: Vec<(BenchOp, BenchMode)> = match &cli.command {
+            Command::Create { mode } => vec![(BenchOp::Create, (*mode).into())],
+            Command::Stat { mode } => vec![(BenchOp::Stat, (*mode).into())],
+            Command::Unlink { mode } => vec![(BenchOp::Unlink, (*mode).into())],
+            Command::Mkdir { mode } => vec![(BenchOp::Mkdir, (*mode).into())],
+            Command::Rmdir { mode } => vec![(BenchOp::Rmdir, (*mode).into())],
+            Command::Readdir { mode } => vec![(BenchOp::Readdir, (*mode).into())],
+            Command::Rename { mode } => vec![(BenchOp::Rename, (*mode).into())],
+            Command::All => unreachable!(),
+        };
 
-            report::print_row(&result);
-            report::write_csv(&result, &cli.output, &timestamp);
-            all_results.push(result);
+        for (op, mode) in &ops_and_modes {
+            for &num_threads in &cli.threads {
+                let config = BenchConfig {
+                    mountpoint: cli.mountpoint.clone(),
+                    op: *op,
+                    mode: *mode,
+                    num_threads,
+                    num_files_per_thread: cli.num_files,
+                };
+
+                let work_fn = get_work_fn(*op);
+
+                let result = runner::run_bench(
+                    &config,
+                    |c| setup::setup(c),
+                    work_fn,
+                    |c| setup::cleanup(c),
+                );
+
+                report::print_row(&result);
+                report::write_csv(&result, &cli.output, &timestamp);
+                all_results.push(result);
+            }
         }
     }
 
@@ -171,6 +189,103 @@ fn main() {
                 report::print_scaling(&group);
             }
         }
+    }
+}
+
+/// File chain: create -> stat -> rename -> unlink_renamed
+/// Setup: create dirs only. create makes the files.
+/// stat uses files left by create. rename renames them. unlink removes renamed files.
+/// Cleanup at the end.
+fn run_file_chain(
+    mountpoint: &PathBuf,
+    mode: BenchMode,
+    num_threads: usize,
+    num_files: usize,
+    output: &PathBuf,
+    timestamp: &str,
+    results: &mut Vec<BenchResult>,
+) {
+    let file_ops: &[(BenchOp, fn(&BenchConfig, usize) -> u64)] = &[
+        (BenchOp::Create, ops::op_create),
+        (BenchOp::Stat, ops::op_stat),
+        (BenchOp::Rename, ops::op_rename),
+        (BenchOp::Unlink, ops::op_unlink_renamed),
+    ];
+    for (i, (op, work_fn)) in file_ops.iter().enumerate() {
+        let config = BenchConfig {
+            mountpoint: mountpoint.clone(),
+            op: *op,
+            mode,
+            num_threads,
+            num_files_per_thread: num_files,
+        };
+        let is_first = i == 0;
+        let is_last = i == file_ops.len() - 1;
+        let result = runner::run_bench(
+            &config,
+            |c| {
+                if is_first {
+                    setup::setup_dirs_only(c);
+                }
+            },
+            *work_fn,
+            |c| {
+                if is_last {
+                    setup::cleanup(c);
+                }
+            },
+        );
+        report::print_row(&result);
+        report::write_csv(&result, output, timestamp);
+        results.push(result);
+    }
+}
+
+/// Dir chain: mkdir -> readdir -> rmdir
+/// Setup: create parent dirs only. mkdir creates subdirs.
+/// readdir reads them. rmdir removes them.
+/// Cleanup at the end.
+fn run_dir_chain(
+    mountpoint: &PathBuf,
+    mode: BenchMode,
+    num_threads: usize,
+    num_files: usize,
+    output: &PathBuf,
+    timestamp: &str,
+    results: &mut Vec<BenchResult>,
+) {
+    let dir_ops: &[(BenchOp, fn(&BenchConfig, usize) -> u64)] = &[
+        (BenchOp::Mkdir, ops::op_mkdir),
+        (BenchOp::Readdir, ops::op_readdir_dirs),
+        (BenchOp::Rmdir, ops::op_rmdir),
+    ];
+    for (i, (op, work_fn)) in dir_ops.iter().enumerate() {
+        let config = BenchConfig {
+            mountpoint: mountpoint.clone(),
+            op: *op,
+            mode,
+            num_threads,
+            num_files_per_thread: num_files,
+        };
+        let is_first = i == 0;
+        let is_last = i == dir_ops.len() - 1;
+        let result = runner::run_bench(
+            &config,
+            |c| {
+                if is_first {
+                    setup::setup_dirs_only(c);
+                }
+            },
+            *work_fn,
+            |c| {
+                if is_last {
+                    setup::cleanup(c);
+                }
+            },
+        );
+        report::print_row(&result);
+        report::write_csv(&result, output, timestamp);
+        results.push(result);
     }
 }
 

@@ -33,6 +33,26 @@ pub fn setup(config: &BenchConfig) {
     }
 }
 
+/// Create only the directory structure (no file/dir population).
+/// Used by chain-aware execution in 'all' mode.
+pub fn setup_dirs_only(config: &BenchConfig) {
+    let bench_dir = config.bench_dir();
+    fs::create_dir_all(&bench_dir).expect("failed to create bench dir");
+
+    match config.mode {
+        BenchMode::Easy => {
+            for tid in 0..config.num_threads {
+                fs::create_dir_all(config.thread_dir(tid))
+                    .expect("failed to create thread dir");
+            }
+        }
+        BenchMode::Hard => {
+            fs::create_dir_all(config.thread_dir(0))
+                .expect("failed to create shared dir");
+        }
+    }
+}
+
 /// Remove the entire bench directory tree.
 pub fn cleanup(config: &BenchConfig) {
     let bench_dir = config.bench_dir();
