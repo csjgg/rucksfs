@@ -730,3 +730,68 @@ async fn fallocate_extend_preserves_existing_data() {
     let data = client.read(file.inode, 0, 8).await.unwrap();
     assert_eq!(&data, b"existing");
 }
+
+// ===========================================================================
+// Per-inode DataLocation lifecycle tests (T-27)
+// ===========================================================================
+
+/// Helper: build a MetadataServer + DataServer pair without EmbeddedClient wrapping.
+/// This allows calling MetadataOps::open() directly to inspect OpenResponse.
+fn new_metadata_and_data() -> (
+    tempfile::TempDir,
+    Arc<dyn MetadataOps>,
+    Arc<dyn DataOps>,
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = open_rocks_db(tmp.path().join("meta.db")).unwrap();
+    let metadata = Arc::new(RocksMetadataStore::new(Arc::clone(&db)));
+    let index = Arc::new(RocksDirectoryIndex::new(Arc::clone(&db)));
+    let delta_store = Arc::new(RocksDeltaStore::new(Arc::clone(&db)));
+    let data_store = RawDiskDataStore::open(
+        &tmp.path().join("data.raw"),
+        64 * 1024 * 1024,
+    ).unwrap();
+
+    let data_server: Arc<dyn DataOps> = Arc::new(DataServer::new(data_store));
+    let storage_bundle = Arc::new(RocksStorageBundle::new(Arc::clone(&db)));
+    let metadata_server: Arc<dyn MetadataOps> = Arc::new(MetadataServer::new(
+        metadata,
+        index,
+        delta_store,
+        Arc::clone(&data_server),
+        DataLocation {
+            address: "test-data-server:9001".to_string(),
+        },
+        storage_bundle,
+    ));
+
+    (tmp, metadata_server, data_server)
+}
+
+#[tokio::test]
+async fn open_returns_per_inode_data_location() {
+    let (_tmp, meta, _data) = new_metadata_and_data();
+    let file = meta.create(ROOT, "testfile", 0o644, 0, 0).await.unwrap();
+    let resp = meta.open(file.inode, 0).await.unwrap();
+    assert_eq!(resp.data_location.address, "test-data-server:9001");
+}
+
+#[tokio::test]
+async fn unlink_clears_data_location() {
+    let (_tmp, meta, _data) = new_metadata_and_data();
+
+    // Create and then hard-link so unlink won't delete the inode.
+    let file = meta.create(ROOT, "f1", 0o644, 0, 0).await.unwrap();
+    meta.link(ROOT, "f1_link", file.inode).await.unwrap();
+
+    // Unlink the original — nlink goes from 2 to 1, data_location NOT deleted.
+    meta.unlink(ROOT, "f1").await.unwrap();
+    let resp = meta.open(file.inode, 0).await.unwrap();
+    assert_eq!(resp.data_location.address, "test-data-server:9001");
+
+    // Unlink the link — nlink goes from 1 to 0, data_location IS deleted.
+    // But inode is also deleted, so open should fail.
+    meta.unlink(ROOT, "f1_link").await.unwrap();
+    let err = meta.open(file.inode, 0).await;
+    assert!(err.is_err());
+}
