@@ -99,6 +99,10 @@ pub enum BatchOp {
     DeleteDelta { key: Vec<u8> },
     /// Put a system key: CF:system (via MetadataStore, e.g. next_inode)
     PutSystem { key: Vec<u8>, value: Vec<u8> },
+    /// Put a data location entry: CF:inodes (key prefix 'L')
+    PutDataLocation { key: Vec<u8>, value: Vec<u8> },
+    /// Delete a data location entry: CF:inodes (key prefix 'L')
+    DeleteDataLocation { key: Vec<u8> },
 }
 
 /// A batch of write operations that will be committed atomically.
