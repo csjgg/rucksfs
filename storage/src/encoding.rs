@@ -221,6 +221,21 @@ pub fn delta_prefix(inode: Inode) -> [u8; 9] {
 }
 
 // ---------------------------------------------------------------------------
+// Data location key encoding helpers
+// ---------------------------------------------------------------------------
+
+/// Prefix byte for data location keys.
+const DATA_LOCATION_KEY_PREFIX: u8 = b'L';
+
+/// Encode a data location key: `[b'L'][inode: u64 BE]`.
+pub fn encode_data_location_key(inode: Inode) -> Vec<u8> {
+    let mut key = Vec::with_capacity(9);
+    key.push(DATA_LOCATION_KEY_PREFIX);
+    key.extend_from_slice(&inode.to_be_bytes());
+    key
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 #[cfg(test)]
@@ -384,5 +399,28 @@ mod tests {
         assert!(decode_delta_key(&[]).is_err());
         assert!(decode_delta_key(&[b'X'; 10]).is_err()); // too short
         assert!(decode_delta_key(&[b'I'; 17]).is_err()); // wrong prefix
+    }
+
+    // -- data location key tests -----------------------------------------------
+
+    #[test]
+    fn data_location_key_encoding() {
+        let key = encode_data_location_key(42);
+        assert_eq!(key.len(), 9);
+        assert_eq!(key[0], b'L');
+        let inode = u64::from_be_bytes(key[1..9].try_into().unwrap());
+        assert_eq!(inode, 42);
+    }
+
+    #[test]
+    fn data_location_key_no_collision() {
+        let loc_key = encode_data_location_key(1);
+        let inode_key = encode_inode_key(1);
+        let dir_key = encode_dir_entry_key(1, "x");
+        let delta_key = encode_delta_key(1, 0);
+        // All prefixes are distinct
+        assert_ne!(loc_key[0], inode_key[0]);
+        assert_ne!(loc_key[0], dir_key[0]);
+        assert_ne!(loc_key[0], delta_key[0]);
     }
 }
