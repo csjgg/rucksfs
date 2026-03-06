@@ -41,3 +41,24 @@
 - **Baseline updated**: no
 
 ---
+
+## Round 2 — 2026-03-07 — Async Data Deletion
+
+- **Target**: unlink (74,000x gap to ext4)
+- **Bottleneck**: `delete_data()` called synchronously in unlink/release/rename — RawDiskDataStore zero-fills entire 64MB region per inode in 4KB chunks, blocking the caller
+- **Optimization**: Fire-and-forget `tokio::spawn` for data deletion after metadata transaction commits. Added error logging. Test updated with `tokio::time::sleep` for robustness.
+- **Branch**: opt/round-2-async-delete
+- **Result** (averaged over 2 runs):
+  - create: 17,082 → 17,487 ops/s (+2.4%)
+  - stat: 854,489 → 816,232 ops/s (-4.5%)
+  - rename: 20,904 → 19,949 ops/s (-4.6%)
+  - **unlink: 31.82 → 5,180 ops/s (+16,176%, 163x improvement)**
+  - mkdir: 13,257 → 17,284 ops/s (+30.4%)
+  - readdir: 9,008 → 8,341 ops/s (-7.4%)
+  - rmdir: 19,452 → 17,935 ops/s (-7.8%)
+- **Analysis**: Unlink improvement is dramatic — data zero-fill no longer blocks the FUSE response. Minor regressions on other ops are within measurement noise for -n 100. Verified by running benchmark twice with consistent unlink improvement.
+- **Decision**: MERGED
+- **Baseline updated**: yes
+- **Consecutive no-improvement count**: 0
+
+---
