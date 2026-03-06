@@ -70,6 +70,10 @@ fn cf_options(name: &str) -> Options {
         CF_DELTA_ENTRIES => {
             opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(9));
             opts.set_block_based_table_factory(&block_opts_with_bloom());
+            // Deliberately no compression: delta entries are short-lived
+            // (5-9 bytes each, folded and deleted by background compaction).
+            // Skipping LZ4 avoids decode overhead on the hot read path
+            // (load_inode folds deltas on every cache miss).
         }
         CF_SYSTEM => {
             opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
