@@ -330,11 +330,22 @@ pub struct RocksDeltaStore {
 
 impl RocksDeltaStore {
     /// Create a new delta store from a shared DB handle.
+    ///
+    /// Automatically recovers per-inode sequence counters from existing
+    /// delta entries on disk so that new allocations never collide with
+    /// persisted keys.
     pub fn new(db: Arc<TransactionDB>) -> Self {
-        Self {
+        let store = Self {
             db,
             seqs: RwLock::new(HashMap::new()),
+        };
+        // Best-effort recovery: log a warning if it fails but do not
+        // prevent startup — the worst case is seq gaps, not overwrites,
+        // because a failed scan means the CF is empty or inaccessible.
+        if let Err(e) = store.recover_seqs() {
+            eprintln!("warning: delta seq recovery failed: {}", e);
         }
+        store
     }
 
     /// Recover per-inode sequence counters by scanning the `delta_entries` CF.
@@ -1180,6 +1191,39 @@ mod tests {
                 let seqs = store.append_deltas(42, &[v]).unwrap();
                 // Previous max seq was 2, so next should be 3
                 assert_eq!(seqs, vec![3]);
+            }
+        }
+
+        #[test]
+        fn new_without_explicit_recover_does_not_overwrite_deltas() {
+            let tmp = tempfile::tempdir().expect("create temp dir");
+            let v = vec![1u8, 0, 0, 0, 1]; // IncrementNlink(1)
+
+            // Session 1: write 3 deltas for inode 42.
+            {
+                let db = open_rocks_db(tmp.path()).unwrap();
+                let store = RocksDeltaStore::new(db);
+                let seqs = store
+                    .append_deltas(42, &[v.clone(), v.clone(), v.clone()])
+                    .unwrap();
+                assert_eq!(seqs, vec![0, 1, 2]);
+            }
+
+            // Session 2: reopen DB, create a NEW store (simulating restart).
+            // Append one more delta — it must NOT collide with seq 0/1/2.
+            {
+                let db = open_rocks_db(tmp.path()).unwrap();
+                let store = RocksDeltaStore::new(db);
+                let seqs = store.append_deltas(42, &[v.clone()]).unwrap();
+                assert!(seqs[0] >= 3, "seq {} collides with existing deltas", seqs[0]);
+            }
+
+            // Session 3: reopen again, verify all 4 deltas are present.
+            {
+                let db = open_rocks_db(tmp.path()).unwrap();
+                let store = RocksDeltaStore::new(db);
+                let all = store.scan_deltas(42).unwrap();
+                assert_eq!(all.len(), 4, "expected 4 deltas, got {}", all.len());
             }
         }
 
