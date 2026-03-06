@@ -15,20 +15,50 @@ use std::sync::Arc;
 /// Core VFS router that delegates to MetadataOps and DataOps.
 pub struct VfsCore {
     metadata: Arc<dyn MetadataOps>,
-    data: Arc<dyn DataOps>,
-    /// Cache of handle → DataLocation (currently unused in single-DataServer
-    /// mode, but kept for future multi-DataServer support).
-    #[allow(dead_code)]
-    handle_cache: Mutex<HashMap<u64, String>>,
+    default_data: Arc<dyn DataOps>,
+    /// Registry of DataServer addresses to their DataOps implementations.
+    /// Used for routing read/write to the correct DataServer.
+    data_servers: Mutex<HashMap<String, Arc<dyn DataOps>>>,
+    /// Maps open file handles (inode) to their DataServer address.
+    handle_map: Mutex<HashMap<u64, String>>,
 }
 
 impl VfsCore {
     pub fn new(metadata: Arc<dyn MetadataOps>, data: Arc<dyn DataOps>) -> Self {
         Self {
             metadata,
-            data,
-            handle_cache: Mutex::new(HashMap::new()),
+            default_data: data,
+            data_servers: Mutex::new(HashMap::new()),
+            handle_map: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Create a VfsCore with additional DataServer registrations.
+    pub fn with_data_servers(
+        metadata: Arc<dyn MetadataOps>,
+        default_data: Arc<dyn DataOps>,
+        data_servers: HashMap<String, Arc<dyn DataOps>>,
+    ) -> Self {
+        Self {
+            metadata,
+            default_data,
+            data_servers: Mutex::new(data_servers),
+            handle_map: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Look up the DataOps for a given inode based on its open handle mapping.
+    /// Falls back to default_data if the inode has no mapping or the address
+    /// is not in data_servers.
+    fn resolve_data(&self, inode: u64) -> Arc<dyn DataOps> {
+        let handle_map = self.handle_map.lock().expect("handle_map poisoned");
+        if let Some(address) = handle_map.get(&inode) {
+            let servers = self.data_servers.lock().expect("data_servers poisoned");
+            if let Some(ds) = servers.get(address) {
+                return Arc::clone(ds);
+            }
+        }
+        Arc::clone(&self.default_data)
     }
 }
 
@@ -91,23 +121,20 @@ impl VfsOps for VfsCore {
 
     async fn open(&self, inode: Inode, flags: u32) -> FsResult<u64> {
         let resp = self.metadata.open(inode, flags).await?;
-        // Cache the DataLocation for this handle (for future multi-DataServer).
         {
-            let mut cache = self.handle_cache.lock().expect("handle_cache poisoned");
-            cache.insert(resp.handle, resp.data_location.address);
+            let mut map = self.handle_map.lock().expect("handle_map poisoned");
+            map.insert(resp.handle, resp.data_location.address);
         }
         Ok(resp.handle)
     }
 
     async fn read(&self, inode: Inode, offset: u64, size: u32) -> FsResult<Vec<u8>> {
-        // Read directly from DataServer, bypassing MetadataServer.
-        self.data.read_data(inode, offset, size).await
+        self.resolve_data(inode).read_data(inode, offset, size).await
     }
 
     async fn write(&self, inode: Inode, offset: u64, data: &[u8], _flags: u32) -> FsResult<u32> {
-        // Write directly to DataServer.
-        let written = self.data.write_data(inode, offset, data).await?;
-        // Report the write back to MetadataServer to update size/mtime.
+        let ds = self.resolve_data(inode);
+        let written = ds.write_data(inode, offset, data).await?;
         let new_end = offset + written as u64;
         let ts = now_secs();
         self.metadata.report_write(inode, new_end, ts).await?;
@@ -115,11 +142,11 @@ impl VfsOps for VfsCore {
     }
 
     async fn flush(&self, inode: Inode) -> FsResult<()> {
-        self.data.flush(inode).await
+        self.resolve_data(inode).flush(inode).await
     }
 
     async fn fsync(&self, inode: Inode, _datasync: bool) -> FsResult<()> {
-        self.data.flush(inode).await
+        self.resolve_data(inode).flush(inode).await
     }
 
     async fn link(&self, parent: Inode, name: &str, target_inode: Inode) -> FsResult<FileAttr> {
@@ -144,6 +171,9 @@ impl VfsOps for VfsCore {
     }
 
     async fn release(&self, inode: Inode) -> FsResult<()> {
-        self.metadata.release(inode).await
+        self.metadata.release(inode).await?;
+        let mut map = self.handle_map.lock().expect("handle_map poisoned");
+        map.remove(&inode);
+        Ok(())
     }
 }
