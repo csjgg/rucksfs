@@ -62,3 +62,24 @@
 - **Consecutive no-improvement count**: 0
 
 ---
+
+## Round 3 — 2026-03-07 — Disable WAL for Delta Writes
+
+- **Target**: create/mkdir (10x/9.4x gap to ext4)
+- **Bottleneck**: Each mutation writes deltas to WAL separately — doubles per-op I/O cost
+- **Optimization**: Set `disable_wal(true)` on delta `WriteBatch` (non-critical parent timestamp updates)
+- **Branch**: opt/round-3-disable-wal-deltas
+- **Result**:
+  - create: 16,592 → 16,651 ops/s (+0.4%)
+  - stat: 864,103 → 528,480 ops/s (**-38.8%** regression)
+  - rename: 20,455 → 19,966 ops/s (-2.4%)
+  - unlink: 4,270 → 3,512 ops/s (-17.8%)
+  - mkdir: 12,301 → 12,112 ops/s (-1.5%)
+  - readdir: 7,446 → 6,229 ops/s (-16.3%)
+  - rmdir: 15,622 → 20,150 ops/s (+29.0%)
+- **Analysis**: Disabling WAL for deltas did not improve create throughput (still dominated by main transaction WAL write). Stat regression (-38.8%) likely caused by memtable flush behavior change when WAL is disabled — RocksDB may flush memtable more aggressively without WAL, causing read-path stalls.
+- **Decision**: REVERTED
+- **Baseline updated**: no
+- **Consecutive no-improvement count**: 1
+
+---
