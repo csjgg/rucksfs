@@ -119,15 +119,15 @@ mod tests {
     }
 
     #[test]
-    fn delete_data_removes_inode() {
+    fn delete_data_is_noop() {
         rt().block_on(async {
             let tmp = tempfile::tempdir().unwrap();
             let ds = DataServer::new(RawDiskDataStore::open(&tmp.path().join("data.raw"), 64 * 1024 * 1024).unwrap());
             ds.write_data(1, 0, b"some data").await.unwrap();
             ds.delete_data(1).await.unwrap();
-            // After delete, reading should return zeros
+            // delete is a no-op (inode numbers are never reused), so data persists.
             let data = ds.read_data(1, 0, 9).await.unwrap();
-            assert_eq!(data, vec![0u8; 9]);
+            assert_eq!(&data, b"some data");
         });
     }
 
