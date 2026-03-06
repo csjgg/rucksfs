@@ -340,8 +340,9 @@ impl RocksDeltaStore {
             seqs: RwLock::new(HashMap::new()),
         };
         // Best-effort recovery: log a warning if it fails but do not
-        // prevent startup — the worst case is seq gaps, not overwrites,
-        // because a failed scan means the CF is empty or inaccessible.
+        // prevent startup.  A failed scan leaves counters at 0, risking
+        // overwrites — but CF-level failures indicate a fundamentally
+        // broken database that will fail on subsequent operations anyway.
         if let Err(e) = store.recover_seqs() {
             eprintln!("warning: delta seq recovery failed: {}", e);
         }
@@ -350,7 +351,8 @@ impl RocksDeltaStore {
 
     /// Recover per-inode sequence counters by scanning the `delta_entries` CF.
     ///
-    /// Should be called once at startup before serving requests.
+    /// Called automatically by [`new()`](Self::new).  May be called again
+    /// for manual re-recovery; the operation is idempotent.
     pub fn recover_seqs(&self) -> FsResult<()> {
         let cf = self
             .db
