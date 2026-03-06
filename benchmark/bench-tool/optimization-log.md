@@ -104,3 +104,26 @@
 - **Consecutive no-improvement count**: 2
 
 ---
+
+## Round 5 — 2026-03-07 — No-op Data Delete
+
+- **Target**: unlink (46x gap), create multi-thread collapse (background I/O saturation)
+- **Bottleneck**: `RawDiskDataStore::delete` zero-fills entire 64MB inode region even for empty files. Background deletion tasks from `tokio::spawn` saturate disk I/O, collapsing throughput for all subsequent operations.
+- **Optimization**: Make `delete` a no-op — inode numbers are monotonically increasing (InodeAllocator, never reused), so stale data regions are permanently unreachable through metadata. Updated tests and stale comments per code review feedback.
+- **Branch**: opt/round-5-noop-data-delete
+- **Result** (vs original baseline):
+  - create 1T: 17,082 → 15,434 ops/s (-9.6%)
+  - **create 2T**: **4.86 → 37,596 ops/s** (+773,762%, fixed multi-thread collapse!)
+  - **create hard 1T**: **0.88 → 15,965 ops/s** (+1,814,205%, fixed hard mode!)
+  - stat: 854,489 → 849,495 ops/s (-0.6%)
+  - rename: 20,904 → 18,836 ops/s (-9.9%)
+  - **unlink**: **31.82 → 24,472 ops/s** (+76,816%, 769x improvement from original!)
+  - **mkdir**: 13,257 → **19,635 ops/s** (+48.1%)
+  - **readdir**: 9,008 → **10,656 ops/s** (+18.3%)
+  - **rmdir**: 19,452 → **25,363 ops/s** (+30.4%)
+- **Analysis**: Eliminating the 64MB zero-fill removes both the per-unlink I/O cost and the cascading background I/O that was destroying multi-thread benchmark measurements. Hard mode create 1T fixed from 114s/100 files to 0.006s/100 files — the 114s was entirely spent on background deletions from the benchmark chain.
+- **Decision**: MERGED
+- **Baseline updated**: yes
+- **Consecutive no-improvement count**: 0
+
+---
