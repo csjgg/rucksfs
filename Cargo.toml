@@ -8,6 +8,9 @@ members = [
   "demo",
   "dataserver",
 ]
+exclude = [
+  "benchmark/bench-tool",
+]
 resolver = "2"
 
 [workspace.package]
