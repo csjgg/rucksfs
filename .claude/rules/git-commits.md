@@ -35,6 +35,10 @@ All commits MUST follow the Conventional Commits specification.
 - Start with lowercase
 - No trailing period
 
+## Co-Authored-By
+
+Do NOT add `Co-Authored-By` lines to commit messages. Keep commit messages clean with only the type/scope/description.
+
 ## Commit Behavior
 
 - **Atomic**: one logical change per commit
