@@ -55,6 +55,8 @@ Memory backends are for **tests only**; production uses RocksDB + RawDisk (`--pe
 | T-24 | ✅ | FUSE mount options | Added `DefaultPermissions` + `AllowOther` to `mount_fuse()`. Kernel now enforces POSIX permission checks. Requires `user_allow_other` in `/etc/fuse.conf`. | `client/src/fuse.rs` |
 | T-25 | ⬜ | gRPC transport layer (Mode A) | Design §2.3/§2.5A: full gRPC client/server with protobuf + TLS + Bearer Token. `rpc` crate has no implementation. | `rpc/` |
 | T-26 | ⬜ | RawDiskDataStore crash recovery | Design §9.3: recovery mechanisms for the data file. No crash recovery logic exists. | `storage/src/rawdisk.rs` |
+| T-27 | 🔧 | Per-inode DataLocation + VfsCore multi-DataServer routing | InodeValue 增加 data_location 字段（持久化到 RocksDB），create 时写入，open 从 inode 读取返回。VfsCore 维护 address→DataOps 映射，read/write 根据 handle 选择对应 DataServer。为分布式多存储节点打基础。 | `storage/src/encoding.rs`, `core/src/lib.rs`, `server/src/lib.rs`, `client/src/vfs_core.rs`, `client/src/embedded.rs`, `demo/src/main.rs` |
+| T-28 | ⬜ | Full distributed deployment with gRPC DataOps | 在 T-27（per-inode DataLocation）和 T-25（gRPC transport）基础上，实现完整的分布式部署：多客户端 FUSE 节点通过 gRPC 访问独立元数据服务器（RocksDB），根据 DataLocation 路由到不同存储节点的 DataServer。包含：gRPC DataOps client/server 实现、多节点部署脚本、DataServer 注册/心跳机制。 | `rpc/`, `demo/`, deployment scripts |
 
 ### P0 — Benchmark
 
