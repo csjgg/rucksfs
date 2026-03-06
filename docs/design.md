@@ -1054,7 +1054,7 @@ The `RocksStorageBundle` implementation holds an `Arc<TransactionDB>` and create
 | `target_file_size_base` | 64 MiB | Appropriate for small-value metadata records |
 | `max_background_compactions` | 4 | Utilize multi-core for compaction parallelism |
 | `bloom_filter_bits_per_key` | 10 | ~1% false positive rate; apply to `inodes` CF for point lookups |
-| `prefix_extractor` | `FixedPrefix(8)` | For `dir_entries` CF — first 8 bytes = parent inode, enables efficient prefix scan |
+| `prefix_extractor` | `FixedPrefix(9)` | For `dir_entries`/`delta_entries` CFs — first 9 bytes = `[prefix_byte][inode: u64 BE]`, enables efficient prefix scan |
 | `block_cache_size` | 128 MiB | Cache hot inode blocks; shared across all CFs |
 | `compression` | LZ4 (L0-L1), ZSTD (L2+) | Fast compression for recent data, high ratio for cold data |
 | `enable_blob_files` | false (demo) | Not needed for small metadata values; enable if extended attributes are large |
@@ -1065,7 +1065,7 @@ The `RocksStorageBundle` implementation holds an `Arc<TransactionDB>` and create
 | CF | `bloom_filter` | `prefix_extractor` | `block_size` |
 |---|---|---|---|
 | `inodes` | 10 bits/key | None (point lookups only) | 4 KiB |
-| `dir_entries` | 10 bits/key | `FixedPrefix(8)` | 4 KiB |
+| `dir_entries` | 10 bits/key | `FixedPrefix(9)` | 4 KiB |
 | `system` | None | None | 4 KiB |
 | `delta_entries` | 10 bits/key | `FixedPrefix(9)` | 4 KiB |
 
@@ -2441,7 +2441,7 @@ The following table consolidates all recommended RocksDB parameters for the ruck
 | **Bloom Filter** | `inodes` CF | 10 bits/key | ~1% FPR; essential for point lookups |
 | | `dir_entries` CF | 10 bits/key | Helps prefix-scan skip irrelevant blocks |
 | | `system` CF | None | Too few keys to benefit |
-| **Prefix** | `dir_entries` `prefix_extractor` | `FixedPrefix(8)` | First 8 bytes = parent inode; enables efficient `list_dir` |
+| **Prefix** | `dir_entries` `prefix_extractor` | `FixedPrefix(9)` | First 9 bytes = `[prefix_byte][parent inode]`; enables efficient `list_dir` |
 | **WAL** | `wal_recovery_mode` | `TolerateCorruptedTailRecords` | Safe default for crash recovery |
 | | `manual_wal_flush` | false | Auto-flush WAL on every write for durability |
 | **Block** | `block_size` | 4 KiB | Match OS page size; good for small-value workloads |
@@ -2537,7 +2537,7 @@ The following table consolidates all recommended RocksDB parameters for the ruck
 | **Bloom Filter** | `inodes` CF | 10 bits/key | ~1% FPR; essential for point lookups |
 | | `dir_entries` CF | 10 bits/key | Helps prefix-scan skip irrelevant blocks |
 | | `system` CF | None | Too few keys to benefit |
-| **Prefix** | `dir_entries` `prefix_extractor` | `FixedPrefix(8)` | First 8 bytes = parent inode; enables efficient `list_dir` |
+| **Prefix** | `dir_entries` `prefix_extractor` | `FixedPrefix(9)` | First 9 bytes = `[prefix_byte][parent inode]`; enables efficient `list_dir` |
 | **WAL** | `wal_recovery_mode` | `TolerateCorruptedTailRecords` | Safe default for crash recovery |
 | | `manual_wal_flush` | false | Auto-flush WAL on every write for durability |
 | **Block** | `block_size` | 4 KiB | Match OS page size; good for small-value workloads |
