@@ -811,6 +811,10 @@ fn unlink_nlink_zero_deletes_data() {
         // Unlink (nlink goes to 0)
         client.unlink(ROOT, "will_delete.txt").await.unwrap();
 
+        // Data deletion is now asynchronous (fire-and-forget background task).
+        // Give the background task time to complete the zero-fill I/O.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
         // Data should have been cleaned up by DataServer
         // (reading the inode should return zeros since it's been deleted)
         let data = client.read(inode, 0, 9).await.unwrap();

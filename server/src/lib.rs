@@ -700,6 +700,9 @@ where
         })?;
 
         // Ask DataServer to clean up file data (outside transaction scope).
+        // Spawn as a background task — metadata is already committed, so the
+        // data deletion is non-critical cleanup. This avoids blocking unlink
+        // on potentially expensive I/O (RawDisk zero-fills the entire region).
         if let Some(inode) = need_delete_data {
             let has_handles = {
                 let handles = self.open_handles.lock().expect("open_handles poisoned");
@@ -710,7 +713,12 @@ where
                 let mut pending = self.pending_deletes.lock().expect("pending_deletes poisoned");
                 pending.insert(inode);
             } else {
-                self.data_client.delete_data(inode).await?;
+                let dc = Arc::clone(&self.data_client);
+                tokio::spawn(async move {
+                    if let Err(e) = dc.delete_data(inode).await {
+                        eprintln!("background delete_data for inode {} failed: {}", inode, e);
+                    }
+                });
             }
         }
 
@@ -974,8 +982,14 @@ where
         }
 
         // Ask DataServer to clean up data (outside transaction scope).
+        // Spawn as background task to avoid blocking the rename return.
         if let Some(inode) = result.delete_inode {
-            self.data_client.delete_data(inode).await?;
+            let dc = Arc::clone(&self.data_client);
+            tokio::spawn(async move {
+                if let Err(e) = dc.delete_data(inode).await {
+                    eprintln!("background delete_data for inode {} failed: {}", inode, e);
+                }
+            });
         }
 
         Ok(())
@@ -1195,7 +1209,12 @@ where
 
     async fn release(&self, inode: Inode) -> FsResult<()> {
         if self.check_and_clear_deferred_delete(inode) {
-            self.data_client.delete_data(inode).await?;
+            let dc = Arc::clone(&self.data_client);
+            tokio::spawn(async move {
+                if let Err(e) = dc.delete_data(inode).await {
+                    eprintln!("background delete_data for inode {} failed: {}", inode, e);
+                }
+            });
         }
         Ok(())
     }
