@@ -18,7 +18,7 @@ use rucksfs_core::{
     OpenResponse, SetAttrRequest, StatFs,
 };
 use rucksfs_storage::allocator::{InodeAllocator, ROOT_INODE};
-use rucksfs_storage::encoding::{encode_delta_key, encode_dir_entry_key, encode_inode_key, InodeValue};
+use rucksfs_storage::encoding::{encode_data_location_key, encode_delta_key, encode_dir_entry_key, encode_inode_key, InodeValue};
 use rucksfs_storage::{
     AtomicWriteBatch, BatchOp, DeltaStore, DirectoryIndex, MetadataStore, StorageBundle,
 };
@@ -65,7 +65,7 @@ where
     /// setattr size change or unlink with nlink=0).
     pub data_client: Arc<dyn DataOps>,
     /// DataServer endpoint info returned in OpenResponse.
-    pub data_location: DataLocation,
+    pub default_data_location: DataLocation,
     /// LRU cache of folded inode values.
     pub cache: Arc<InodeFoldedCache>,
     /// Background compaction worker (shared with the MetadataServer).
@@ -94,7 +94,7 @@ where
         index: Arc<I>,
         delta_store: Arc<DS>,
         data_client: Arc<dyn DataOps>,
-        data_location: DataLocation,
+        default_data_location: DataLocation,
         storage_bundle: Arc<dyn StorageBundle>,
     ) -> Self {
         let allocator = InodeAllocator::load(metadata.as_ref())
@@ -114,7 +114,7 @@ where
             index,
             delta_store,
             data_client,
-            data_location,
+            default_data_location,
             cache,
             compaction,
             allocator,
@@ -136,7 +136,7 @@ where
         index: Arc<I>,
         delta_store: Arc<DS>,
         data_client: Arc<dyn DataOps>,
-        data_location: DataLocation,
+        default_data_location: DataLocation,
         cache_capacity: usize,
         compaction_config: CompactionConfig,
         storage_bundle: Arc<dyn StorageBundle>,
@@ -158,7 +158,7 @@ where
             index,
             delta_store,
             data_client,
-            data_location,
+            default_data_location,
             cache,
             compaction,
             allocator,
@@ -289,6 +289,29 @@ where
     ) {
         batch.push(BatchOp::DeleteDirEntry {
             key: encode_dir_entry_key(parent, name),
+        });
+    }
+
+    /// Add a "put data location" operation to the batch.
+    fn batch_put_data_location(
+        batch: &mut dyn AtomicWriteBatch,
+        inode: Inode,
+        address: &str,
+    ) {
+        let key = encode_data_location_key(inode);
+        batch.push(BatchOp::PutDataLocation {
+            key,
+            value: address.as_bytes().to_vec(),
+        });
+    }
+
+    /// Add a "delete data location" operation to the batch.
+    fn batch_delete_data_location(
+        batch: &mut dyn AtomicWriteBatch,
+        inode: Inode,
+    ) {
+        batch.push(BatchOp::DeleteDataLocation {
+            key: encode_data_location_key(inode),
         });
     }
 
@@ -525,6 +548,11 @@ where
 
             Self::batch_put_inode(batch.as_mut(), new_inode, &iv);
             Self::batch_put_dir_entry(batch.as_mut(), parent, &name_owned, new_inode, iv.mode);
+            Self::batch_put_data_location(
+                batch.as_mut(),
+                new_inode,
+                &self.default_data_location.address,
+            );
             batch.commit()?;
 
             Ok((iv, new_inode))
@@ -963,7 +991,7 @@ where
         }
         Ok(OpenResponse {
             handle: inode, // Use inode as handle for simplicity.
-            data_location: self.data_location.clone(),
+            data_location: self.default_data_location.clone(),
         })
     }
 
@@ -1104,6 +1132,11 @@ where
 
             Self::batch_put_inode(batch.as_mut(), new_inode, &iv);
             Self::batch_put_dir_entry(batch.as_mut(), parent, &name_owned, new_inode, iv.mode);
+            Self::batch_put_data_location(
+                batch.as_mut(),
+                new_inode,
+                &self.default_data_location.address,
+            );
             batch.commit()?;
 
             Ok((iv, new_inode))
