@@ -315,10 +315,10 @@ where
         });
     }
 
-    /// Write nlink delta operations for a parent directory inside the
-    /// transaction batch.  Each delta is stored as a `PutDelta` operation
-    /// using the shared `delta_store`'s sequence allocator.
-    fn batch_nlink_deltas(
+    /// Write delta operations for a parent directory inside the transaction
+    /// batch.  Each delta is stored as a `PutDelta` operation using the
+    /// shared `delta_store`'s sequence allocator.
+    fn batch_parent_deltas(
         batch: &mut dyn AtomicWriteBatch,
         delta_store: &dyn DeltaStore,
         parent: Inode,
@@ -335,17 +335,6 @@ where
     }
 
     // -- helper: delta append -----------------------------------------------
-
-    /// Append delta operations for a parent directory and update the cache.
-    fn append_parent_deltas(&self, parent: Inode, deltas: &[DeltaOp]) -> FsResult<()> {
-        let serialized: Vec<Vec<u8>> = deltas.iter().map(|d| d.serialize()).collect();
-        self.delta_store.append_deltas(parent, &serialized)?;
-
-        self.cache.apply_deltas(parent, deltas);
-        self.compaction.mark_dirty(parent);
-
-        Ok(())
-    }
 
     /// Helper: check whether a mode represents a directory.
     fn is_dir(mode: u32) -> bool {
@@ -553,6 +542,13 @@ where
                 new_inode,
                 &self.default_data_location.address,
             );
+            // Parent timestamp deltas inside transaction — single WAL write.
+            Self::batch_parent_deltas(
+                batch.as_mut(),
+                self.delta_store.as_ref(),
+                parent,
+                &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
+            );
             batch.commit()?;
 
             Ok((iv, new_inode))
@@ -569,12 +565,9 @@ where
                 .insert_child(parent, &name_owned, new_inode, iv.to_attr());
         }
 
-        // Delta append outside transaction — losing it on crash only affects parent mtime/ctime.
-        let ts = now_secs();
-        let _ = self.append_parent_deltas(
-            parent,
-            &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
-        );
+        // Update parent cache and mark dirty for compaction.
+        self.cache.apply_deltas(parent, &[DeltaOp::SetMtime(iv.mtime), DeltaOp::SetCtime(iv.ctime)]);
+        self.compaction.mark_dirty(parent);
 
         Ok(iv.to_attr())
     }
@@ -609,12 +602,12 @@ where
             Self::batch_put_inode(batch.as_mut(), new_inode, &iv);
             Self::batch_put_dir_entry(batch.as_mut(), parent, &name_owned, new_inode, iv.mode);
 
-            // Nlink delta inside transaction for correctness.
-            Self::batch_nlink_deltas(
+            // Nlink and timestamp deltas inside transaction — single WAL write.
+            Self::batch_parent_deltas(
                 batch.as_mut(),
                 self.delta_store.as_ref(),
                 parent,
-                &[DeltaOp::IncrementNlink(1)],
+                &[DeltaOp::IncrementNlink(1), DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
             );
 
             batch.commit()?;
@@ -627,20 +620,17 @@ where
 
         // Update in-memory state.
         self.cache.put(new_inode, iv.clone());
-        self.cache.apply_delta(parent, &DeltaOp::IncrementNlink(1));
+        self.cache.apply_deltas(parent, &[
+            DeltaOp::IncrementNlink(1),
+            DeltaOp::SetMtime(iv.mtime),
+            DeltaOp::SetCtime(iv.ctime),
+        ]);
         self.compaction.mark_dirty(parent);
         if !self.index.shares_batch_storage() {
             let _ = self
                 .index
                 .insert_child(parent, &name_owned, new_inode, iv.to_attr());
         }
-
-        // Timestamp deltas remain outside transaction.
-        let ts = now_secs();
-        let _ = self.append_parent_deltas(
-            parent,
-            &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
-        );
 
         Ok(iv.to_attr())
     }
@@ -683,6 +673,14 @@ where
                 Self::batch_put_inode(batch.as_mut(), child_inode, &child_iv);
                 None
             };
+            // Parent timestamp deltas inside transaction — single WAL write.
+            let ts = now_secs();
+            Self::batch_parent_deltas(
+                batch.as_mut(),
+                self.delta_store.as_ref(),
+                parent,
+                &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
+            );
             batch.commit()?;
 
             // Update in-memory state after commit.
@@ -723,10 +721,8 @@ where
         }
 
         let ts = now_secs();
-        let _ = self.append_parent_deltas(
-            parent,
-            &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
-        );
+        self.cache.apply_deltas(parent, &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)]);
+        self.compaction.mark_dirty(parent);
 
         Ok(())
     }
@@ -762,12 +758,13 @@ where
             Self::batch_delete_dir_entry(batch.as_mut(), parent, &name_owned);
             Self::batch_delete_inode(batch.as_mut(), child_inode);
 
-            // Nlink delta inside transaction for correctness.
-            Self::batch_nlink_deltas(
+            // Nlink and timestamp deltas inside transaction — single WAL write.
+            let ts = now_secs();
+            Self::batch_parent_deltas(
                 batch.as_mut(),
                 self.delta_store.as_ref(),
                 parent,
-                &[DeltaOp::IncrementNlink(-1)],
+                &[DeltaOp::IncrementNlink(-1), DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
             );
 
             batch.commit()?;
@@ -782,16 +779,13 @@ where
             Ok(())
         })?;
 
-        // Update cache for the nlink delta written inside the transaction.
-        self.cache.apply_delta(parent, &DeltaOp::IncrementNlink(-1));
+        // Update parent cache for deltas written inside the transaction.
+        self.cache.apply_deltas(parent, &[
+            DeltaOp::IncrementNlink(-1),
+            DeltaOp::SetMtime(now_secs()),
+            DeltaOp::SetCtime(now_secs()),
+        ]);
         self.compaction.mark_dirty(parent);
-
-        // Timestamp deltas remain outside transaction.
-        let ts = now_secs();
-        let _ = self.append_parent_deltas(
-            parent,
-            &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
-        );
 
         Ok(())
     }
@@ -908,7 +902,7 @@ where
 
             // Nlink deltas inside transaction for correctness.
             if dst_was_dir {
-                Self::batch_nlink_deltas(
+                Self::batch_parent_deltas(
                     batch.as_mut(),
                     self.delta_store.as_ref(),
                     new_parent,
@@ -916,17 +910,32 @@ where
                 );
             }
             if src_is_dir && parent != new_parent {
-                Self::batch_nlink_deltas(
+                Self::batch_parent_deltas(
                     batch.as_mut(),
                     self.delta_store.as_ref(),
                     parent,
                     &[DeltaOp::IncrementNlink(-1)],
                 );
-                Self::batch_nlink_deltas(
+                Self::batch_parent_deltas(
                     batch.as_mut(),
                     self.delta_store.as_ref(),
                     new_parent,
                     &[DeltaOp::IncrementNlink(1)],
+                );
+            }
+            // Timestamp deltas inside transaction — single WAL write.
+            Self::batch_parent_deltas(
+                batch.as_mut(),
+                self.delta_store.as_ref(),
+                parent,
+                &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
+            );
+            if parent != new_parent {
+                Self::batch_parent_deltas(
+                    batch.as_mut(),
+                    self.delta_store.as_ref(),
+                    new_parent,
+                    &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
                 );
             }
 
@@ -956,7 +965,7 @@ where
             })
         })?;
 
-        // Update cache for nlink deltas written inside the transaction.
+        // Update cache for deltas written inside the transaction.
         let ts = now_secs();
         if result.dst_was_dir {
             self.cache.apply_delta(new_parent, &DeltaOp::IncrementNlink(-1));
@@ -968,17 +977,11 @@ where
             self.cache.apply_delta(new_parent, &DeltaOp::IncrementNlink(1));
             self.compaction.mark_dirty(new_parent);
         }
-
-        // Timestamp deltas remain outside transaction.
-        let _ = self.append_parent_deltas(
-            parent,
-            &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
-        );
+        self.cache.apply_deltas(parent, &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)]);
+        self.compaction.mark_dirty(parent);
         if parent != new_parent {
-            let _ = self.append_parent_deltas(
-                new_parent,
-                &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
-            );
+            self.cache.apply_deltas(new_parent, &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)]);
+            self.compaction.mark_dirty(new_parent);
         }
 
         // Ask DataServer to clean up data (outside transaction scope).
@@ -1091,6 +1094,14 @@ where
                 target_inode,
                 target_iv.mode,
             );
+            // Parent timestamp deltas inside transaction — single WAL write.
+            let ts = now_secs();
+            Self::batch_parent_deltas(
+                batch.as_mut(),
+                self.delta_store.as_ref(),
+                parent,
+                &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
+            );
             batch.commit()?;
 
             // Update in-memory state after commit.
@@ -1107,12 +1118,9 @@ where
             Ok(target_iv)
         })?;
 
-        // Update parent dir timestamps via delta.
-        let ts = now_secs();
-        let _ = self.append_parent_deltas(
-            parent,
-            &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
-        );
+        // Update parent cache for deltas written inside the transaction.
+        self.cache.apply_deltas(parent, &[DeltaOp::SetMtime(now_secs()), DeltaOp::SetCtime(now_secs())]);
+        self.compaction.mark_dirty(parent);
 
         Ok(target_iv.to_attr())
     }
@@ -1159,6 +1167,13 @@ where
                 new_inode,
                 &self.default_data_location.address,
             );
+            // Parent timestamp deltas inside transaction — single WAL write.
+            Self::batch_parent_deltas(
+                batch.as_mut(),
+                self.delta_store.as_ref(),
+                parent,
+                &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
+            );
             batch.commit()?;
 
             Ok((iv, new_inode))
@@ -1180,12 +1195,9 @@ where
                 .insert_child(parent, &name_owned, new_inode, iv.to_attr());
         }
 
-        // Update parent dir timestamps via delta.
-        let ts = now_secs();
-        let _ = self.append_parent_deltas(
-            parent,
-            &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
-        );
+        // Update parent cache for deltas written inside the transaction.
+        self.cache.apply_deltas(parent, &[DeltaOp::SetMtime(iv.mtime), DeltaOp::SetCtime(iv.ctime)]);
+        self.compaction.mark_dirty(parent);
 
         Ok(iv.to_attr())
     }
