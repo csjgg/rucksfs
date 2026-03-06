@@ -675,6 +675,7 @@ where
 
             let result = if child_iv.nlink == 0 {
                 Self::batch_delete_inode(batch.as_mut(), child_inode);
+                Self::batch_delete_data_location(batch.as_mut(), child_inode);
                 Some(child_inode)
             } else {
                 let ts = now_secs();
@@ -881,6 +882,7 @@ where
             if let Some((dst_inode, _)) = dst_inode_opt {
                 Self::batch_delete_dir_entry(batch.as_mut(), new_parent, &new_name_owned);
                 Self::batch_delete_inode(batch.as_mut(), dst_inode);
+                Self::batch_delete_data_location(batch.as_mut(), dst_inode);
             }
 
             Self::batch_delete_dir_entry(batch.as_mut(), parent, &name_owned);
@@ -989,9 +991,16 @@ where
             let mut handles = self.open_handles.lock().expect("open_handles poisoned");
             *handles.entry(inode).or_insert(0) += 1;
         }
+        // Read per-inode data location; fall back to default if not found.
+        let loc_key = encode_data_location_key(inode);
+        let address = match self.metadata.get(&loc_key)? {
+            Some(bytes) => String::from_utf8(bytes)
+                .unwrap_or_else(|_| self.default_data_location.address.clone()),
+            None => self.default_data_location.address.clone(),
+        };
         Ok(OpenResponse {
             handle: inode, // Use inode as handle for simplicity.
-            data_location: self.default_data_location.clone(),
+            data_location: DataLocation { address },
         })
     }
 
