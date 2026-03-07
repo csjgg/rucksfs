@@ -5,7 +5,7 @@
 
 ## Overview
 
-Over 6 optimization rounds (3 merged, 3 reverted), RucksFS metadata throughput improved
+Over 11 optimization rounds (6 merged, 5 reverted), RucksFS metadata throughput improved
 from **significantly below ext4** to **matching or exceeding ext4** on 6 of 7 POSIX
 metadata operations.
 
@@ -23,7 +23,7 @@ Benchmark: `-t 1 -n 100`, single-thread, easy mode, 100 files per operation.
 
 ---
 
-## Merged Optimizations
+## Merged Optimizations (High Impact)
 
 ### 1. Async Data Deletion (Round 2)
 
@@ -101,6 +101,50 @@ Removed the now-unused `append_parent_deltas` helper.
 
 ---
 
+## Merged Optimizations (Micro / Code Quality)
+
+### 4. Reduce mark_dirty Condvar Notifications (Round 7)
+
+**Problem**: `mark_dirty()` acquires two `std::sync::Mutex` and calls
+`Condvar::notify_one()` on every mutation, even when unnecessary.
+
+**Solution**: Only wake the compaction loop when the dirty set transitions from
+empty to non-empty.
+
+**Files changed**: `server/src/compaction.rs` — `mark_dirty()` method
+
+**Result**: No measurable impact at -n 100, but eliminates redundant syscalls.
+
+---
+
+### 5. Disable RocksDB Deadlock Detection (Round 8)
+
+**Problem**: `set_deadlock_detect(true)` traverses the deadlock-detection graph
+on every `get_for_update` call.
+
+**Solution**: `set_deadlock_detect(false)` — our lock ordering (inode-ID sorted
+in rename) prevents deadlocks by design.
+
+**Files changed**: `storage/src/rocks.rs` — `begin_write()` method
+
+**Result**: No measurable impact at -n 100, but eliminates unnecessary CPU work.
+
+---
+
+### 6. Stack Buffer for Serialization (Round 11)
+
+**Problem**: `InodeValue::serialize()` uses `Vec::with_capacity(57)` + 9x
+`extend_from_slice` with per-call bounds checks.
+
+**Solution**: Assemble into `[u8; 57]` stack buffer with `copy_from_slice`,
+then `.to_vec()`. Eliminates per-field bounds check overhead.
+
+**Files changed**: `storage/src/encoding.rs` — `serialize()` method
+
+**Result**: No measurable impact at -n 100, improved code clarity.
+
+---
+
 ## Reverted Optimizations (Lessons Learned)
 
 ### Round 1 — RocksDB Block Cache (REVERTED)
@@ -121,12 +165,41 @@ flushing memtable more aggressively without WAL protection.
 
 ### Round 4 — Skip clear_deltas on Inode Deletion (REVERTED)
 
-Skipped `clear_deltas()` when deleting inodes. With -n 100, there are only 0-2 deltas
-per inode, so the scan+write is already fast. Multiple severe regressions were observed,
-likely caused by benchmark measurement noise at small -n.
+Skipped `clear_deltas()` when deleting inodes. Multiple severe regressions, likely
+benchmark noise at small -n.
 
-**Lesson**: At small -n, benchmark noise can mask or invent small effects. Only trust
-large (>2x) improvements.
+**Lesson**: At small -n, only trust large (>2x) improvements.
+
+### Round 9 — Manual WAL Flush (REVERTED)
+
+`set_manual_wal_flush(true)` to batch WAL writes. No improvement — `write()` syscall
+is already fast when `sync=false`.
+
+**Lesson**: WAL write overhead is not the bottleneck when `fsync` is not required.
+
+### Round 10 — Increase Allocator PERSIST_INTERVAL (REVERTED)
+
+Increased from 64 to 1024. No impact — at -n 100, the persist triggers only once.
+
+**Lesson**: Optimization must match benchmark scale to be measurable.
+
+---
+
+## Round Summary
+
+| Round | Optimization | Decision | Impact |
+|-------|-------------|----------|--------|
+| 1 | RocksDB block cache | REVERTED | -22% to -35% regression |
+| 2 | Async data deletion | **MERGED** | unlink **163x** |
+| 3 | Disable WAL for deltas | REVERTED | stat -39% regression |
+| 4 | Skip clear_deltas | REVERTED | multiple regressions |
+| 5 | No-op data delete | **MERGED** | unlink **4.7x**, fixed multi-thread |
+| 6 | Inline timestamp deltas | **MERGED** | all ops **5-13x** |
+| 7 | Reduce mark_dirty notifications | **MERGED** | code quality |
+| 8 | Disable deadlock detection | **MERGED** | code quality |
+| 9 | Manual WAL flush | REVERTED | no benefit |
+| 10 | Increase allocator interval | REVERTED | no benefit |
+| 11 | Stack buffer serialization | **MERGED** | code quality |
 
 ---
 
