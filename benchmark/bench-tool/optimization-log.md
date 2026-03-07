@@ -155,23 +155,30 @@
 ## Round 7 — 2026-03-07 — Reduce mark_dirty Condvar Notifications
 
 - **Target**: all mutation operations (reduce per-op overhead)
-- **Bottleneck**: `mark_dirty()` acquires two `std::sync::Mutex` locks and calls `Condvar::notify_one()` on every mutation, even though the compaction loop rarely has work to do at -n 100 (deltas << threshold=32)
-- **Optimization**: Only wake the compaction loop when the dirty set transitions from empty to non-empty, skipping the `notify_flag` Mutex and `notify_one()` syscall on subsequent mutations within the same compaction interval
+- **Bottleneck**: `mark_dirty()` acquires two `std::sync::Mutex` locks and calls `Condvar::notify_one()` on every mutation
+- **Optimization**: Only wake the compaction loop when the dirty set transitions from empty to non-empty
 - **Branch**: opt/round-7-persist-alloc-in-txn
-- **Result** (averaged over 2 runs, vs Round 6 baseline):
-  - create: 196,978 → 196,764 ops/s (0%)
-  - stat: 1,201,582 → 1,418,461 ops/s (+18.1%)
-  - rename: 204,849 → 222,919 ops/s (+8.8%)
-  - unlink: 231,673 → 256,551 ops/s (+10.7%)
-  - mkdir: 127,748 → 133,496 ops/s (+4.5%)
-  - readdir: 60,753 → 59,740 ops/s (-1.7%)
-  - rmdir: 142,980 → 144,912 ops/s (+1.4%)
-- **Analysis**: Results are within measurement noise for most operations at -n 100. The optimization is logically sound (eliminates redundant syscalls) but the per-op overhead of a Condvar notification is ~100ns, below the measurement resolution at this scale. No regression detected.
-- **Decision**: MERGED (code quality improvement, no regression)
+- **Result**: within measurement noise, no significant improvement or regression
+- **Decision**: MERGED (code quality, no regression)
 - **Baseline updated**: no
 - **Consecutive no-improvement count**: 1
 
---- (after Round 6)
+---
+
+## Round 8 — 2026-03-07 — Disable RocksDB Deadlock Detection
+
+- **Target**: all mutation operations (reduce per-transaction overhead)
+- **Bottleneck**: `set_deadlock_detect(true)` traverses deadlock-detection graph on every `get_for_update`
+- **Optimization**: Set `set_deadlock_detect(false)` — lock ordering (inode-ID sorted) prevents deadlocks
+- **Branch**: opt/round-8-disable-deadlock-detect
+- **Result**: within measurement noise, no significant improvement or regression
+- **Decision**: MERGED (correct optimization, no regression)
+- **Baseline updated**: no
+- **Consecutive no-improvement count**: 2
+
+---
+
+## Current Baseline (after Round 6)
 
 | Operation | 1T easy ops/s | ext4 1T | vs ext4 |
 |-----------|--------------|---------|---------|

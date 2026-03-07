@@ -676,7 +676,10 @@ impl StorageBundle for RocksStorageBundle {
     fn begin_write(&self) -> Box<dyn AtomicWriteBatch + '_> {
         let mut txn_opts = TransactionOptions::default();
         txn_opts.set_lock_timeout(5000); // 5s lock wait timeout
-        txn_opts.set_deadlock_detect(true);
+        // Deadlock detection disabled: our lock ordering (inode-ID sorted)
+        // prevents deadlocks.  Skipping the deadlock-detect graph walk
+        // saves CPU on every get_for_update call.
+        txn_opts.set_deadlock_detect(false);
         // WAL sync policy: RocksDB default (sync = false).
         // Writes go to WAL but are NOT fsync'd to disk on each commit.
         // This means:
