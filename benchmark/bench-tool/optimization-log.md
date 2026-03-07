@@ -190,6 +190,32 @@
 - **Baseline updated**: no
 - **Consecutive no-improvement count**: 3
 
+---
+
+## Round 10 — 2026-03-07 — Increase Allocator PERSIST_INTERVAL
+
+- **Target**: create/symlink (reduce allocator persist writes)
+- **Bottleneck**: `maybe_persist` writes to RocksDB every 64 allocations
+- **Optimization**: Increase PERSIST_INTERVAL from 64 to 1024 (16x fewer writes)
+- **Branch**: opt/round-10-alloc-interval
+- **Result**: within noise — at -n 100, the old interval triggers only once (at inode 64)
+- **Decision**: REVERTED (no measurable benefit at benchmark scale)
+- **Baseline updated**: no
+- **Consecutive no-improvement count**: 4
+
+---
+
+## Round 11 — 2026-03-07 — Stack Buffer for Serialization
+
+- **Target**: all mutation operations (reduce heap allocations)
+- **Bottleneck**: `InodeValue::serialize()` uses `Vec::with_capacity(57)` + 9x `extend_from_slice` with per-call bounds checks
+- **Optimization**: Assemble into `[u8; 57]` stack buffer with `copy_from_slice`, then `.to_vec()` for final allocation. Eliminates per-field bounds checking overhead.
+- **Branch**: opt/round-11-stack-serialize
+- **Result**: within noise at -n 100
+- **Decision**: MERGED (code quality, no regression)
+- **Baseline updated**: no
+- **Consecutive no-improvement count**: 5
+
 --- (after Round 6)
 
 | Operation | 1T easy ops/s | ext4 1T | vs ext4 |
