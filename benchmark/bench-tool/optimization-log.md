@@ -178,7 +178,19 @@
 
 ---
 
-## Current Baseline (after Round 6)
+## Round 9 — 2026-03-07 — Manual WAL Flush
+
+- **Target**: all mutation operations (reduce per-commit syscalls)
+- **Bottleneck**: RocksDB flushes WAL to OS on every commit by default
+- **Optimization**: `set_manual_wal_flush(true)` to batch WAL writes in OS buffer
+- **Branch**: opt/round-9-manual-wal-flush
+- **Result**: within measurement noise, no improvement
+- **Analysis**: WAL `write()` syscall is already fast since `sync=false` (default). Manual flush only defers the `write()` call, not the `fsync`. At -n 100, the working set is too small for this to matter.
+- **Decision**: REVERTED (no benefit, adds durability risk)
+- **Baseline updated**: no
+- **Consecutive no-improvement count**: 3
+
+--- (after Round 6)
 
 | Operation | 1T easy ops/s | ext4 1T | vs ext4 |
 |-----------|--------------|---------|---------|
