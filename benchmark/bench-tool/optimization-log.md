@@ -152,6 +152,32 @@
 
 ---
 
+## Round 7 — 2026-03-07 — Reduce mark_dirty Condvar Notifications
+
+- **Target**: all mutation operations (reduce per-op overhead)
+- **Bottleneck**: `mark_dirty()` acquires two `std::sync::Mutex` locks and calls `Condvar::notify_one()` on every mutation
+- **Optimization**: Only wake the compaction loop when the dirty set transitions from empty to non-empty
+- **Branch**: opt/round-7-persist-alloc-in-txn
+- **Result**: within measurement noise, no significant improvement or regression
+- **Decision**: MERGED (code quality, no regression)
+- **Baseline updated**: no
+- **Consecutive no-improvement count**: 1
+
+---
+
+## Round 8 — 2026-03-07 — Disable RocksDB Deadlock Detection
+
+- **Target**: all mutation operations (reduce per-transaction overhead)
+- **Bottleneck**: `set_deadlock_detect(true)` traverses deadlock-detection graph on every `get_for_update`
+- **Optimization**: Set `set_deadlock_detect(false)` — lock ordering (inode-ID sorted) prevents deadlocks
+- **Branch**: opt/round-8-disable-deadlock-detect
+- **Result**: within measurement noise, no significant improvement or regression
+- **Decision**: MERGED (correct optimization, no regression)
+- **Baseline updated**: no
+- **Consecutive no-improvement count**: 2
+
+---
+
 ## Current Baseline (after Round 6)
 
 | Operation | 1T easy ops/s | ext4 1T | vs ext4 |
