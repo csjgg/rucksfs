@@ -68,20 +68,32 @@ impl InodeValue {
     }
 
     /// Serialize to a compact binary blob.
+    ///
+    /// Uses a stack buffer to assemble the result, avoiding per-field
+    /// bounds checks from `extend_from_slice`.
     pub fn serialize(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(SERIALIZED_SIZE);
-        buf.push(self.version);
-        buf.extend_from_slice(&self.inode.to_be_bytes());
-        buf.extend_from_slice(&self.size.to_be_bytes());
-        buf.extend_from_slice(&self.mode.to_be_bytes());
-        buf.extend_from_slice(&self.nlink.to_be_bytes());
-        buf.extend_from_slice(&self.uid.to_be_bytes());
-        buf.extend_from_slice(&self.gid.to_be_bytes());
-        buf.extend_from_slice(&self.atime.to_be_bytes());
-        buf.extend_from_slice(&self.mtime.to_be_bytes());
-        buf.extend_from_slice(&self.ctime.to_be_bytes());
-        debug_assert_eq!(buf.len(), SERIALIZED_SIZE);
-        buf
+        let mut buf = [0u8; SERIALIZED_SIZE];
+        let mut off = 0;
+        buf[off] = self.version;
+        off += 1;
+        buf[off..off + 8].copy_from_slice(&self.inode.to_be_bytes());
+        off += 8;
+        buf[off..off + 8].copy_from_slice(&self.size.to_be_bytes());
+        off += 8;
+        buf[off..off + 4].copy_from_slice(&self.mode.to_be_bytes());
+        off += 4;
+        buf[off..off + 4].copy_from_slice(&self.nlink.to_be_bytes());
+        off += 4;
+        buf[off..off + 4].copy_from_slice(&self.uid.to_be_bytes());
+        off += 4;
+        buf[off..off + 4].copy_from_slice(&self.gid.to_be_bytes());
+        off += 4;
+        buf[off..off + 8].copy_from_slice(&self.atime.to_be_bytes());
+        off += 8;
+        buf[off..off + 8].copy_from_slice(&self.mtime.to_be_bytes());
+        off += 8;
+        buf[off..off + 8].copy_from_slice(&self.ctime.to_be_bytes());
+        buf.to_vec()
     }
 
     /// Deserialize from a binary blob.
