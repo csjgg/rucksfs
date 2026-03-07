@@ -99,14 +99,23 @@ where
     /// Mark an inode as dirty (has pending deltas that may need compaction).
     ///
     /// This is called by the write path after appending deltas.
+    /// Only wakes the compaction loop when the dirty set transitions from
+    /// empty to non-empty, avoiding redundant `Condvar::notify_one` syscalls
+    /// on every mutation.
     pub fn mark_dirty(&self, inode: Inode) {
-        if let Ok(mut set) = self.dirty.lock() {
+        let was_empty = if let Ok(mut set) = self.dirty.lock() {
+            let was = set.is_empty();
             set.insert(inode);
-        }
-        // Wake the compaction loop.
-        if let Ok(mut flag) = self.notify_flag.lock() {
-            *flag = true;
-            self.notify.notify_one();
+            was
+        } else {
+            return;
+        };
+        // Only wake the compaction loop when the dirty set just became non-empty.
+        if was_empty {
+            if let Ok(mut flag) = self.notify_flag.lock() {
+                *flag = true;
+                self.notify.notify_one();
+            }
         }
     }
 
