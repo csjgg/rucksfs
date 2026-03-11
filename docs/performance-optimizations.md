@@ -1,214 +1,209 @@
-# RucksFS Performance Optimizations
+# RucksFS 性能优化记录
 
-> Summary of all performance optimizations applied to RucksFS, with before/after metrics.
-> Detailed per-round logs: `benchmark/bench-tool/optimization-log.md`
+> 本文档记录了 RucksFS 所有性能优化的详细过程、前后指标对比及经验教训。
+> 逐轮详细日志见：`benchmark/bench-tool/optimization-log.md`
 
-## Overview
+## 总览
 
-Over 11 optimization rounds (6 merged, 5 reverted), RucksFS metadata throughput improved
-from **significantly below ext4** to **matching or exceeding ext4** on 6 of 7 POSIX
-metadata operations.
+经过 11 轮优化（6 轮合并、5 轮回退），RucksFS 元数据吞吐量从**远低于 ext4** 提升至
+**在 7 个 POSIX 元数据操作中有 6 个达到或超越 ext4**。
 
-| Operation | Original | Final | Improvement | vs ext4 |
-|-----------|----------|-------|-------------|---------|
-| create    | 17,082   | 196,978 | **11.5x** | **1.18x** |
-| stat      | 854,489  | 1,201,582 | **1.4x** | **1.06x** |
-| unlink    | 31.82    | 231,673 | **7,280x** | 0.98x |
-| mkdir     | 13,257   | 127,748 | **9.6x** | **1.10x** |
-| rmdir     | 19,452   | 142,980 | **7.4x** | **1.09x** |
-| readdir   | 9,008    | 60,753  | **6.7x** | **9.64x** |
-| rename    | 20,904   | 204,849 | **9.8x** | **1.08x** |
+| 操作 | 优化前 (ops/s) | 优化后 (ops/s) | 提升倍数 | 与 ext4 对比 |
+|------|---------------|---------------|---------|-------------|
+| create | 17,082 | 196,978 | **11.5x** | **1.18x ext4** |
+| stat | 854,489 | 1,201,582 | **1.4x** | **1.06x ext4** |
+| unlink | 31.82 | 231,673 | **7,280x** | 0.98x ext4 |
+| mkdir | 13,257 | 127,748 | **9.6x** | **1.10x ext4** |
+| rmdir | 19,452 | 142,980 | **7.4x** | **1.09x ext4** |
+| readdir | 9,008 | 60,753 | **6.7x** | **9.64x ext4** |
+| rename | 20,904 | 204,849 | **9.8x** | **1.08x ext4** |
 
-Benchmark: `-t 1 -n 100`, single-thread, easy mode, 100 files per operation.
-
----
-
-## Merged Optimizations (High Impact)
-
-### 1. Async Data Deletion (Round 2)
-
-**Problem**: `unlink` called `delete_data()` synchronously. `RawDiskDataStore::delete`
-zero-fills a 64 MB region per inode in 4 KB chunks, blocking the FUSE response for
-~30 ms per file.
-
-**Solution**: Fire-and-forget `tokio::spawn` for data deletion after the metadata
-transaction commits. The FUSE response returns immediately once metadata is committed.
-
-**Files changed**:
-- `server/src/lib.rs` — `unlink()`, `release()`, `rename()`: replaced synchronous
-  `delete_data().await` with `tokio::spawn` + error logging
-- `server/Cargo.toml` — added `"time"` to tokio dev-dependencies
-
-**Key result**: unlink 31.82 → 5,180 ops/s (**163x improvement**)
+测试条件：`-t 1 -n 100`，单线程，easy 模式，每个操作 100 个文件。
 
 ---
 
-### 2. No-op Data Delete (Round 5)
+## 已合并的高影响优化
 
-**Problem**: Even with async deletion from Round 2, background `tokio::spawn` tasks
-still zero-fill 64 MB per inode. Under multi-thread benchmarks, these background tasks
-saturate disk I/O, collapsing throughput for all operations. This caused:
-- create 2T: 17K → 5 ops/s (catastrophic)
-- create hard 1T: 0.88 ops/s (114 seconds for 100 files)
+### 优化 1：异步数据删除（Round 2）
 
-**Solution**: Make `RawDiskDataStore::delete` a no-op. Inode numbers are monotonically
-increasing via `InodeAllocator` (atomic `fetch_add`) and never reused. Stale data
-regions are permanently unreachable through metadata, so zero-filling is unnecessary.
+**问题**：`unlink` 同步调用 `delete_data()`。底层 `RawDiskDataStore::delete` 以 4 KB
+为单位对每个 inode 的 64 MB 地址空间进行零填充，阻塞 FUSE 响应约 30 ms/文件。
 
-**Files changed**:
-- `storage/src/rawdisk.rs` — `delete()` method: replaced zero-fill loop with `Ok(())`
-- `dataserver/src/lib.rs` — updated `delete_data_is_noop` test
-- `server/tests/integration.rs` — renamed and updated `unlink_nlink_zero_removes_metadata` test
-- `server/src/lib.rs` — updated stale comments referencing zero-fill
+**方案**：在元数据事务提交后，使用 `tokio::spawn` 进行 fire-and-forget 异步删除。
+FUSE 响应在元数据提交后立即返回，不再等待数据清除。
 
-**Key results**:
-- unlink: 5,180 → 24,472 ops/s (**4.7x over Round 2**)
-- create 2T: 5 → 37,596 ops/s (**fixed multi-thread collapse**)
-- create hard 1T: 0.88 → 15,965 ops/s (**fixed hard mode**)
+**改动文件**：
+- `server/src/lib.rs` — `unlink()`、`release()`、`rename()`：将同步
+  `delete_data().await` 替换为 `tokio::spawn` + 错误日志
+- `server/Cargo.toml` — tokio dev-dependencies 增加 `"time"` feature
+
+**关键结果**：unlink 31.82 → 5,180 ops/s（**163 倍提升**）
 
 ---
 
-### 3. Inline Parent Timestamp Deltas (Round 6)
+### 优化 2：No-op 数据删除（Round 5）
 
-**Problem**: Every mutation operation (create, mkdir, unlink, rmdir, rename, link,
-symlink) performed **two separate RocksDB writes**:
-1. Main PCC transaction commit (inode + dir_entry + data_location)
-2. Separate `WriteBatch` for parent directory timestamp deltas (SetMtime, SetCtime)
-   via `append_parent_deltas → DeltaStore::append_deltas`
+**问题**：即使 Round 2 改为异步删除，后台 `tokio::spawn` 任务仍然对每个 inode
+零填充 64 MB。多线程基准测试下，这些后台任务会饱和磁盘 I/O，导致所有操作吞吐量
+崩溃。具体表现：
+- create 2 线程：17K → 5 ops/s（灾难性下降）
+- create hard 1 线程：0.88 ops/s（100 个文件需要 114 秒）
 
-The second write doubles per-op WAL I/O. Since RocksDB's WAL lock serializes all
-writers, this halves aggregate throughput.
+**方案**：将 `RawDiskDataStore::delete` 改为 no-op。inode 编号由
+`InodeAllocator`（原子 `fetch_add`）单调递增且永不复用，旧数据区域在元数据层面
+已永久不可达，零填充没有必要。
 
-**Solution**: Move `SetMtime`/`SetCtime` delta writes into the main transaction batch
-using `batch_parent_deltas` (generalized from `batch_nlink_deltas`). Post-commit code
-now only updates the in-memory cache and marks dirty for background compaction.
-Removed the now-unused `append_parent_deltas` helper.
+**改动文件**：
+- `storage/src/rawdisk.rs` — `delete()` 方法：零填充循环替换为 `Ok(())`
+- `dataserver/src/lib.rs` — 更新测试 `delete_data_is_noop`
+- `server/tests/integration.rs` — 重命名并更新测试 `unlink_nlink_zero_removes_metadata`
+- `server/src/lib.rs` — 更新引用零填充的过时注释
 
-**Files changed**:
-- `server/src/lib.rs`:
-  - Renamed `batch_nlink_deltas` → `batch_parent_deltas`
-  - All 7 mutation methods: moved timestamp deltas into transaction, replaced
-    post-commit `append_parent_deltas` with `cache.apply_deltas` + `compaction.mark_dirty`
-  - Removed `append_parent_deltas` helper
-  - Fixed timestamp drift: unlink/rmdir/rename/link now return the transaction
-    timestamp and reuse it for cache updates
-
-**Key results** (vs Round 5 baseline):
-- create: 15,434 → 196,978 ops/s (**12.8x**, now 1.18x ext4)
-- rename: 18,836 → 204,849 ops/s (**10.9x**, now 1.08x ext4)
-- unlink: 24,472 → 231,673 ops/s (**9.5x**, now 0.98x ext4)
-- mkdir: 19,635 → 127,748 ops/s (**6.5x**, now 1.10x ext4)
+**关键结果**：
+- unlink：5,180 → 24,472 ops/s（**相比 Round 2 再提升 4.7 倍**）
+- create 2 线程：5 → 37,596 ops/s（**修复多线程崩溃**）
+- create hard 1 线程：0.88 → 15,965 ops/s（**修复 hard 模式**）
 
 ---
 
-## Merged Optimizations (Micro / Code Quality)
+### 优化 3：将父目录时间戳 Delta 内联到事务中（Round 6）
 
-### 4. Reduce mark_dirty Condvar Notifications (Round 7)
+**问题**：每次 mutation 操作（create、mkdir、unlink、rmdir、rename、link、symlink）
+执行**两次独立的 RocksDB 写入**：
+1. 主 PCC 事务提交（inode + dir_entry + data_location）
+2. 单独的 `WriteBatch` 写入父目录时间戳 delta（SetMtime、SetCtime），
+   经由 `append_parent_deltas → DeltaStore::append_deltas`
 
-**Problem**: `mark_dirty()` acquires two `std::sync::Mutex` and calls
-`Condvar::notify_one()` on every mutation, even when unnecessary.
+第二次写入使每次操作的 WAL I/O 翻倍。由于 RocksDB 的 WAL 锁会串行化所有写入者，
+这实际上将聚合吞吐量减半。
 
-**Solution**: Only wake the compaction loop when the dirty set transitions from
-empty to non-empty.
+**方案**：将 `SetMtime`/`SetCtime` delta 写入合并到主事务批量操作中，使用
+`batch_parent_deltas`（从 `batch_nlink_deltas` 泛化而来）。事务提交后只更新
+内存缓存和标记脏页用于后台 compaction。移除了不再需要的 `append_parent_deltas` 辅助函数。
 
-**Files changed**: `server/src/compaction.rs` — `mark_dirty()` method
+**改动文件**：
+- `server/src/lib.rs`：
+  - 重命名 `batch_nlink_deltas` → `batch_parent_deltas`
+  - 全部 7 个 mutation 方法：将时间戳 delta 移入事务，事务外的
+    `append_parent_deltas` 替换为 `cache.apply_deltas` + `compaction.mark_dirty`
+  - 删除 `append_parent_deltas` 辅助函数
+  - 修复时间戳漂移：unlink/rmdir/rename/link 现在返回事务内的时间戳并复用于缓存更新
 
-**Result**: No measurable impact at -n 100, but eliminates redundant syscalls.
-
----
-
-### 5. Disable RocksDB Deadlock Detection (Round 8)
-
-**Problem**: `set_deadlock_detect(true)` traverses the deadlock-detection graph
-on every `get_for_update` call.
-
-**Solution**: `set_deadlock_detect(false)` — our lock ordering (inode-ID sorted
-in rename) prevents deadlocks by design.
-
-**Files changed**: `storage/src/rocks.rs` — `begin_write()` method
-
-**Result**: No measurable impact at -n 100, but eliminates unnecessary CPU work.
-
----
-
-### 6. Stack Buffer for Serialization (Round 11)
-
-**Problem**: `InodeValue::serialize()` uses `Vec::with_capacity(57)` + 9x
-`extend_from_slice` with per-call bounds checks.
-
-**Solution**: Assemble into `[u8; 57]` stack buffer with `copy_from_slice`,
-then `.to_vec()`. Eliminates per-field bounds check overhead.
-
-**Files changed**: `storage/src/encoding.rs` — `serialize()` method
-
-**Result**: No measurable impact at -n 100, improved code clarity.
+**关键结果**（相比 Round 5 基线）：
+- create：15,434 → 196,978 ops/s（**12.8 倍**，达到 ext4 的 1.18 倍）
+- rename：18,836 → 204,849 ops/s（**10.9 倍**，达到 ext4 的 1.08 倍）
+- unlink：24,472 → 231,673 ops/s（**9.5 倍**，达到 ext4 的 0.98 倍）
+- mkdir：19,635 → 127,748 ops/s（**6.5 倍**，达到 ext4 的 1.10 倍）
 
 ---
 
-## Reverted Optimizations (Lessons Learned)
+## 已合并的微优化 / 代码质量改进
 
-### Round 1 — RocksDB Block Cache (REVERTED)
+### 优化 4：减少 mark_dirty 的 Condvar 通知（Round 7）
 
-256 MB shared LRU block cache with pinned L0 filters. At small working sets (-n 100),
-cache management overhead (LRU bookkeeping) outweighed any benefit. Most operations
-regressed 20-35%.
+**问题**：`mark_dirty()` 每次 mutation 都获取两个 `std::sync::Mutex` 并调用
+`Condvar::notify_one()`，即使 compaction 工作线程没有工作可做。
 
-**Lesson**: Block cache helps large working sets; at small scale, the overhead dominates.
+**方案**：仅在 dirty set 从空变为非空时才唤醒 compaction 循环。
 
-### Round 3 — Disable WAL for Delta Writes (REVERTED)
+**改动文件**：`server/src/compaction.rs` — `mark_dirty()` 方法
 
-Set `disable_wal(true)` on delta `WriteBatch`. Did not improve create throughput (still
-dominated by main transaction WAL write). Stat regressed -38.8%, likely due to RocksDB
-flushing memtable more aggressively without WAL protection.
-
-**Lesson**: Disabling WAL has non-obvious side effects on read path via memtable flush behavior.
-
-### Round 4 — Skip clear_deltas on Inode Deletion (REVERTED)
-
-Skipped `clear_deltas()` when deleting inodes. Multiple severe regressions, likely
-benchmark noise at small -n.
-
-**Lesson**: At small -n, only trust large (>2x) improvements.
-
-### Round 9 — Manual WAL Flush (REVERTED)
-
-`set_manual_wal_flush(true)` to batch WAL writes. No improvement — `write()` syscall
-is already fast when `sync=false`.
-
-**Lesson**: WAL write overhead is not the bottleneck when `fsync` is not required.
-
-### Round 10 — Increase Allocator PERSIST_INTERVAL (REVERTED)
-
-Increased from 64 to 1024. No impact — at -n 100, the persist triggers only once.
-
-**Lesson**: Optimization must match benchmark scale to be measurable.
+**结果**：在 -n 100 下无可测量影响，但消除了冗余系统调用。
 
 ---
 
-## Round Summary
+### 优化 5：禁用 RocksDB 死锁检测（Round 8）
 
-| Round | Optimization | Decision | Impact |
-|-------|-------------|----------|--------|
-| 1 | RocksDB block cache | REVERTED | -22% to -35% regression |
-| 2 | Async data deletion | **MERGED** | unlink **163x** |
-| 3 | Disable WAL for deltas | REVERTED | stat -39% regression |
-| 4 | Skip clear_deltas | REVERTED | multiple regressions |
-| 5 | No-op data delete | **MERGED** | unlink **4.7x**, fixed multi-thread |
-| 6 | Inline timestamp deltas | **MERGED** | all ops **5-13x** |
-| 7 | Reduce mark_dirty notifications | **MERGED** | code quality |
-| 8 | Disable deadlock detection | **MERGED** | code quality |
-| 9 | Manual WAL flush | REVERTED | no benefit |
-| 10 | Increase allocator interval | REVERTED | no benefit |
-| 11 | Stack buffer serialization | **MERGED** | code quality |
+**问题**：`set_deadlock_detect(true)` 导致 RocksDB 在每次 `get_for_update`
+调用时遍历死锁检测图。
+
+**方案**：设置 `set_deadlock_detect(false)` — 我们的锁排序策略（rename 中按
+inode-ID 排序获取锁）已从设计上防止死锁。
+
+**改动文件**：`storage/src/rocks.rs` — `begin_write()` 方法
+
+**结果**：在 -n 100 下无可测量影响，但消除了不必要的 CPU 开销。
 
 ---
 
-## Measurement Methodology
+### 优化 6：栈缓冲区序列化（Round 11）
 
-- **Tool**: `rucksfs-bench` (custom Rust benchmark in `benchmark/bench-tool/`)
-- **Modes**: easy (separate directories per thread), hard (shared directory)
-- **Protocol**: file chain (create→stat→rename→unlink) + dir chain (mkdir→readdir→rmdir)
-- **Parameters**: `-t 1,2,4 -n 100`
-- **Verification**: Each round runs benchmark 2x to confirm consistency
-- **Decision criteria**: ≥10% improvement on any op with no >5% regression on others
-- **ext4 baselines**: measured on same hardware with identical parameters
+**问题**：`InodeValue::serialize()` 使用 `Vec::with_capacity(57)` + 9 次
+`extend_from_slice`，每次都有边界检查开销。
+
+**方案**：先在 `[u8; 57]` 栈缓冲区上用 `copy_from_slice` 组装，最后调用
+`.to_vec()`。消除了逐字段的边界检查开销。
+
+**改动文件**：`storage/src/encoding.rs` — `serialize()` 方法
+
+**结果**：在 -n 100 下无可测量影响，代码更清晰。
+
+---
+
+## 已回退的优化（经验教训）
+
+### Round 1 — RocksDB Block Cache（已回退）
+
+尝试添加 256 MB 共享 LRU block cache 并固定 L0 过滤器。在小工作集（-n 100）下，
+缓存管理开销（LRU 记账）反而超过收益。大部分操作回退 20-35%。
+
+**教训**：Block cache 对大工作集有效；在小规模下管理开销占主导。
+
+### Round 3 — 禁用 Delta 写入的 WAL（已回退）
+
+对 delta `WriteBatch` 设置 `disable_wal(true)`。并未改善 create 吞吐量（仍被
+主事务 WAL 写入主导）。stat 回退 -38.8%，可能是因为 RocksDB 在无 WAL 保护时
+更积极地刷新 memtable。
+
+**教训**：禁用 WAL 对读路径有非直觉的副作用（影响 memtable flush 行为）。
+
+### Round 4 — 删除 inode 时跳过 clear_deltas（已回退）
+
+在删除 inode 时跳过 `clear_deltas()` 调用。出现多项严重回退，可能是 -n 100
+下基准测试噪声导致的假性回退。
+
+**教训**：在小 -n 下，只能信任大幅（>2x）的改善结果。
+
+### Round 9 — 手动 WAL Flush（已回退）
+
+设置 `set_manual_wal_flush(true)` 将 WAL 写入批量化到 OS 缓冲区。无改善 —
+`sync=false` 时 `write()` 系统调用本身已经很快。
+
+**教训**：不需要 `fsync` 时，WAL 写入开销不是瓶颈。
+
+### Round 10 — 增大分配器持久化间隔（已回退）
+
+将 `PERSIST_INTERVAL` 从 64 增大到 1024。无影响 — 在 -n 100 下旧间隔也只触发
+一次持久化。
+
+**教训**：优化必须匹配基准测试规模才能被观测到。
+
+---
+
+## 全部轮次汇总
+
+| 轮次 | 优化内容 | 决策 | 影响 |
+|------|---------|------|------|
+| 1 | RocksDB block cache | 回退 | -22% 至 -35% 回退 |
+| 2 | 异步数据删除 | **合并** | unlink **163 倍** |
+| 3 | 禁用 delta WAL | 回退 | stat -39% 回退 |
+| 4 | 跳过 clear_deltas | 回退 | 多项回退 |
+| 5 | No-op 数据删除 | **合并** | unlink **4.7 倍**，修复多线程 |
+| 6 | 内联时间戳 delta | **合并** | 全部操作 **5-13 倍** |
+| 7 | 减少 mark_dirty 通知 | **合并** | 代码质量 |
+| 8 | 禁用死锁检测 | **合并** | 代码质量 |
+| 9 | 手动 WAL flush | 回退 | 无收益 |
+| 10 | 增大分配器间隔 | 回退 | 无收益 |
+| 11 | 栈缓冲区序列化 | **合并** | 代码质量 |
+
+---
+
+## 测量方法
+
+- **工具**：`rucksfs-bench`（自研 Rust 基准测试工具，位于 `benchmark/bench-tool/`）
+- **模式**：easy（每线程独立目录）、hard（共享目录竞争）
+- **测试链**：文件链（create→stat→rename→unlink）+ 目录链（mkdir→readdir→rmdir）
+- **参数**：`-t 1,2,4 -n 100`
+- **验证**：每轮跑两次基准测试确认结果一致性
+- **决策标准**：任一操作 ≥10% 提升且无其他操作 >5% 回退
+- **ext4 基线**：在同一硬件上用相同参数测量
