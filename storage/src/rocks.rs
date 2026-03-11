@@ -14,7 +14,9 @@ use rocksdb::{
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use dashmap::DashMap;
 
 use rucksfs_core::{DirEntry, FileAttr, FsError, FsResult, Inode};
 
@@ -332,7 +334,11 @@ pub struct RocksDeltaStore {
     db: Arc<TransactionDB>,
     /// Per-inode next sequence number.  Lazily populated on first access
     /// or recovered from disk on `recover_seq`.
-    seqs: RwLock<HashMap<Inode, AtomicU64>>,
+    ///
+    /// Uses `DashMap` for fine-grained per-key locking instead of a global
+    /// `RwLock`, eliminating contention when multiple threads allocate
+    /// sequences for the same parent inode concurrently.
+    seqs: DashMap<Inode, AtomicU64>,
 }
 
 impl RocksDeltaStore {
@@ -344,7 +350,7 @@ impl RocksDeltaStore {
     pub fn new(db: Arc<TransactionDB>) -> Self {
         let store = Self {
             db,
-            seqs: RwLock::new(HashMap::new()),
+            seqs: DashMap::new(),
         };
         // Best-effort recovery: log a warning if it fails but do not
         // prevent startup.  A failed scan leaves counters at 0, risking
@@ -387,28 +393,23 @@ impl RocksDeltaStore {
             }
         }
 
-        let mut guard = self.seqs.write().map_err(|e| {
-            FsError::Io(format!("RocksDeltaStore seqs lock poisoned: {}", e))
-        })?;
         for (inode, max_seq) in max_seqs {
-            guard.insert(inode, AtomicU64::new(max_seq + 1));
+            self.seqs.insert(inode, AtomicU64::new(max_seq + 1));
         }
         Ok(())
     }
 
     /// Allocate the next sequence number for `inode`.
     fn next_seq_inner(&self, inode: Inode) -> u64 {
-        // Fast path: counter already exists.
-        {
-            let guard = self.seqs.read().expect("seqs read lock poisoned");
-            if let Some(counter) = guard.get(&inode) {
-                return counter.fetch_add(1, Ordering::Relaxed);
-            }
+        // Fast path: counter already exists — only locks the DashMap shard.
+        if let Some(counter) = self.seqs.get(&inode) {
+            return counter.fetch_add(1, Ordering::Relaxed);
         }
-        // Slow path: create the counter.
-        let mut guard = self.seqs.write().expect("seqs write lock poisoned");
-        let counter = guard.entry(inode).or_insert_with(|| AtomicU64::new(0));
-        counter.fetch_add(1, Ordering::Relaxed)
+        // Slow path: insert with entry API — locks only the target shard.
+        self.seqs
+            .entry(inode)
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(1, Ordering::Relaxed)
     }
 }
 
@@ -500,10 +501,8 @@ impl DeltaStore for RocksDeltaStore {
             .map_err(|e| FsError::Io(format!("RocksDB write batch: {}", e)))?;
 
         // Reset in-memory sequence counter.
-        if let Ok(mut guard) = self.seqs.write() {
-            if let Some(counter) = guard.get_mut(&inode) {
-                counter.store(0, Ordering::Relaxed);
-            }
+        if let Some(counter) = self.seqs.get(&inode) {
+            counter.store(0, Ordering::Relaxed);
         }
 
         Ok(())
