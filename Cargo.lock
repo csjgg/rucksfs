@@ -1296,10 +1296,12 @@ dependencies = [
  "rucksfs-client",
  "rucksfs-core",
  "rucksfs-dataserver",
+ "rucksfs-rpc",
  "rucksfs-server",
  "rucksfs-storage",
  "tempfile",
  "tokio",
+ "tonic",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1314,6 +1316,7 @@ dependencies = [
  "libc",
  "rucksfs-core",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

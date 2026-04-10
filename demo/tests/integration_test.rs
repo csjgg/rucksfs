@@ -30,9 +30,8 @@ fn new_client() -> (tempfile::TempDir, EmbeddedClient) {
         metadata,
         index,
         delta_store,
-        Arc::clone(&data_server),
         DataLocation {
-            address: "embedded".to_string(),
+            server_id: "default".to_string(),
         },
         storage_bundle,
     ));
@@ -345,9 +344,8 @@ mod rocksdb_tests {
             metadata,
             index,
             delta_store,
-            Arc::clone(&data_server),
             DataLocation {
-                address: "embedded".to_string(),
+                server_id: "default".to_string(),
             },
             storage_bundle,
         ));
@@ -758,9 +756,8 @@ fn new_metadata_and_data() -> (
         metadata,
         index,
         delta_store,
-        Arc::clone(&data_server),
         DataLocation {
-            address: "test-data-server:9001".to_string(),
+            server_id: "test-ds:9001".to_string(),
         },
         storage_bundle,
     ));
@@ -773,7 +770,7 @@ async fn open_returns_per_inode_data_location() {
     let (_tmp, meta, _data) = new_metadata_and_data();
     let file = meta.create(ROOT, "testfile", 0o644, 0, 0).await.unwrap();
     let resp = meta.open(file.inode, 0).await.unwrap();
-    assert_eq!(resp.data_location.address, "test-data-server:9001");
+    assert_eq!(resp.data_location.server_id, "test-ds:9001");
 }
 
 #[tokio::test]
@@ -787,7 +784,7 @@ async fn unlink_clears_data_location() {
     // Unlink the original — nlink goes from 2 to 1, data_location NOT deleted.
     meta.unlink(ROOT, "f1").await.unwrap();
     let resp = meta.open(file.inode, 0).await.unwrap();
-    assert_eq!(resp.data_location.address, "test-data-server:9001");
+    assert_eq!(resp.data_location.server_id, "test-ds:9001");
 
     // Unlink the link — nlink goes from 1 to 0, data_location IS deleted.
     // But inode is also deleted, so open should fail.
@@ -821,20 +818,19 @@ async fn vfscore_routes_to_correct_dataserver() {
         RawDiskDataStore::open(&tmp.path().join("data_b.raw"), 64 * 1024 * 1024).unwrap(),
     )) as Arc<dyn DataOps>;
 
-    let server_address = "ds-a:9001";
+    let server_id = "ds-a";
     let metadata_server: Arc<dyn MetadataOps> = Arc::new(MetadataServer::new(
         metadata_store,
         index,
         delta_store,
-        Arc::clone(&ds_a),
-        DataLocation { address: server_address.to_string() },
+        DataLocation { server_id: server_id.to_string() },
         storage_bundle,
     ));
 
-    // Register ds_a under the address that MetadataServer will return
+    // Register ds_a under the server_id that MetadataServer will return
     let mut servers = std::collections::HashMap::new();
-    servers.insert(server_address.to_string(), Arc::clone(&ds_a));
-    servers.insert("ds-b:9002".to_string(), Arc::clone(&ds_b));
+    servers.insert(server_id.to_string(), Arc::clone(&ds_a));
+    servers.insert("ds-b".to_string(), Arc::clone(&ds_b));
 
     let vfs = VfsCore::with_data_servers(
         metadata_server,

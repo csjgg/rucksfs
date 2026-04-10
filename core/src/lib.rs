@@ -48,11 +48,16 @@ pub struct SetAttrRequest {
     pub mtime: Option<u64>,
 }
 
-/// DataServer endpoint information returned by MetadataServer on `open`.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// Identifies which DataServer holds an inode's data.
+///
+/// This is a logical identifier, not a transport descriptor. How the client
+/// connects to this DataServer (in-process, gRPC, etc.) is determined by
+/// VfsCore's connection configuration at startup.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DataLocation {
-    /// Network address of the DataServer, e.g. "127.0.0.1:9001".
-    pub address: String,
+    /// Logical identifier for the DataServer instance.
+    /// Examples: "default", "ds-1", "ds-2"
+    pub server_id: String,
 }
 
 /// Response from `MetadataOps::open`, containing a file handle and the
@@ -61,6 +66,36 @@ pub struct DataLocation {
 pub struct OpenResponse {
     pub handle: u64,
     pub data_location: DataLocation,
+}
+
+/// Response from `MetadataOps::setattr`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SetAttrResponse {
+    pub attr: FileAttr,
+    /// If `Some(size)`, the client should call `DataOps::truncate(inode, size)`
+    /// to synchronize the data store after a size reduction.
+    pub needs_truncate: Option<u64>,
+}
+
+/// Response from `MetadataOps::unlink`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct UnlinkResponse {
+    /// Inodes whose data should be deleted (nlink reached 0, no open handles).
+    pub purged_inodes: Vec<Inode>,
+}
+
+/// Response from `MetadataOps::rename`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RenameResponse {
+    /// Inodes whose data should be deleted (overwritten destination with nlink=0).
+    pub purged_inodes: Vec<Inode>,
+}
+
+/// Response from `MetadataOps::release`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ReleaseResponse {
+    /// Inodes whose deferred deletion should now proceed (last handle closed).
+    pub purged_inodes: Vec<Inode>,
 }
 
 #[derive(Error, Debug, Serialize, Deserialize)]
@@ -96,6 +131,10 @@ pub type FsResult<T> = Result<T, FsError>;
 /// Does NOT include data I/O methods (read/write/flush/fsync).
 /// When a client needs to read/write file data, it calls `open` first to get
 /// a `DataLocation`, then talks to the DataServer directly.
+///
+/// The MetadataServer never touches DataOps. All data-side effects (truncate,
+/// delete) are communicated back to the client via response structs, and the
+/// client (VfsCore) is responsible for coordinating with the DataServer.
 #[async_trait]
 pub trait MetadataOps: Send + Sync {
     async fn lookup(&self, parent: Inode, name: &str) -> FsResult<FileAttr>;
@@ -103,7 +142,7 @@ pub trait MetadataOps: Send + Sync {
     async fn readdir(&self, inode: Inode) -> FsResult<Vec<DirEntry>>;
     async fn create(&self, parent: Inode, name: &str, mode: u32, uid: u32, gid: u32) -> FsResult<FileAttr>;
     async fn mkdir(&self, parent: Inode, name: &str, mode: u32, uid: u32, gid: u32) -> FsResult<FileAttr>;
-    async fn unlink(&self, parent: Inode, name: &str) -> FsResult<()>;
+    async fn unlink(&self, parent: Inode, name: &str) -> FsResult<UnlinkResponse>;
     async fn rmdir(&self, parent: Inode, name: &str) -> FsResult<()>;
     async fn rename(
         &self,
@@ -111,8 +150,8 @@ pub trait MetadataOps: Send + Sync {
         name: &str,
         new_parent: Inode,
         new_name: &str,
-    ) -> FsResult<()>;
-    async fn setattr(&self, inode: Inode, req: SetAttrRequest) -> FsResult<FileAttr>;
+    ) -> FsResult<RenameResponse>;
+    async fn setattr(&self, inode: Inode, req: SetAttrRequest) -> FsResult<SetAttrResponse>;
     async fn statfs(&self, inode: Inode) -> FsResult<StatFs>;
     /// Open a file and return a handle + DataServer location.
     async fn open(&self, inode: Inode, flags: u32) -> FsResult<OpenResponse>;
@@ -128,7 +167,7 @@ pub trait MetadataOps: Send + Sync {
     /// points to the existing `target_inode`. Returns the target's FileAttr.
     async fn link(&self, parent: Inode, name: &str, target_inode: Inode) -> FsResult<FileAttr>;
     /// Create a symbolic link: add a new S_IFLNK inode under `parent` with
-    /// directory entry `name`, storing `link_target` as the symlink target.
+    /// directory entry `name`, storing `link_target` in the metadata store.
     async fn symlink(
         &self,
         parent: Inode,
@@ -137,11 +176,11 @@ pub trait MetadataOps: Send + Sync {
         uid: u32,
         gid: u32,
     ) -> FsResult<FileAttr>;
-    /// Read the target path of a symbolic link.
+    /// Read the target path of a symbolic link from the metadata store.
     async fn readlink(&self, inode: Inode) -> FsResult<String>;
     /// Notify that a file handle has been closed. Decrements open handle
     /// count and triggers deferred deletion if nlink=0 and no handles remain.
-    async fn release(&self, inode: Inode) -> FsResult<()>;
+    async fn release(&self, inode: Inode) -> FsResult<ReleaseResponse>;
 }
 
 /// Pure data I/O operations. Implemented by DataServer.
@@ -157,6 +196,10 @@ pub trait DataOps: Send + Sync {
 /// Full POSIX VFS interface. Implemented by the fat client (EmbeddedClient /
 /// RucksClient) which routes metadata ops to MetadataServer and data ops to
 /// DataServer.
+///
+/// Unlike `MetadataOps`, `VfsOps` presents a simple POSIX-like interface —
+/// response details (purged_inodes, needs_truncate) are handled internally
+/// by the VfsCore implementation.
 #[async_trait]
 pub trait VfsOps: Send + Sync {
     async fn lookup(&self, parent: Inode, name: &str) -> FsResult<FileAttr>;

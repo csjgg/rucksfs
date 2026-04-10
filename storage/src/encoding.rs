@@ -248,6 +248,23 @@ pub fn encode_data_location_key(inode: Inode) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// Symlink target key encoding helpers
+// ---------------------------------------------------------------------------
+
+/// Prefix byte for symlink target keys.
+const SYMLINK_KEY_PREFIX: u8 = b'S';
+
+/// Encode a symlink target key: `[b'S'][inode: u64 BE]`.
+///
+/// The value is the symlink target path stored as UTF-8 bytes.
+pub fn encode_symlink_key(inode: Inode) -> Vec<u8> {
+    let mut key = Vec::with_capacity(9);
+    key.push(SYMLINK_KEY_PREFIX);
+    key.extend_from_slice(&inode.to_be_bytes());
+    key
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 #[cfg(test)]
@@ -434,5 +451,29 @@ mod tests {
         assert_ne!(loc_key[0], inode_key[0]);
         assert_ne!(loc_key[0], dir_key[0]);
         assert_ne!(loc_key[0], delta_key[0]);
+    }
+
+    // -- symlink key tests -----------------------------------------------
+
+    #[test]
+    fn symlink_key_encoding() {
+        let key = encode_symlink_key(42);
+        assert_eq!(key.len(), 9);
+        assert_eq!(key[0], b'S');
+        let inode = u64::from_be_bytes(key[1..9].try_into().unwrap());
+        assert_eq!(inode, 42);
+    }
+
+    #[test]
+    fn symlink_key_no_collision() {
+        let sym_key = encode_symlink_key(1);
+        let inode_key = encode_inode_key(1);
+        let dir_key = encode_dir_entry_key(1, "x");
+        let delta_key = encode_delta_key(1, 0);
+        let loc_key = encode_data_location_key(1);
+        assert_ne!(sym_key[0], inode_key[0]);
+        assert_ne!(sym_key[0], dir_key[0]);
+        assert_ne!(sym_key[0], delta_key[0]);
+        assert_ne!(sym_key[0], loc_key[0]);
     }
 }

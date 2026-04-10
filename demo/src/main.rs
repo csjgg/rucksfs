@@ -74,9 +74,8 @@ fn build_client(data_dir: &Path, max_file_size: u64) -> EmbeddedClient {
         metadata,
         index,
         delta_store,
-        Arc::clone(&data_server),
         DataLocation {
-            address: "embedded".to_string(),
+            server_id: "default".to_string(),
         },
         storage_bundle,
     ));

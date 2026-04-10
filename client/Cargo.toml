@@ -9,6 +9,7 @@ authors = { workspace = true }
 [dependencies]
 rucksfs-core = { path = "../core" }
 async-trait = { workspace = true }
+tracing = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "signal"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

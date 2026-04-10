@@ -2,6 +2,11 @@
 //!
 //! Data I/O (read/write/flush/fsync) is NOT handled here; instead,
 //! clients talk to a separate DataServer directly.
+//!
+//! The MetadataServer never touches DataOps. All data-side effects
+//! (truncate, delete) are communicated back to the client via response
+//! structs (`SetAttrResponse`, `UnlinkResponse`, etc.), and the client
+//! (VfsCore) is responsible for coordinating with the DataServer.
 
 pub mod cache;
 pub mod compaction;
@@ -14,11 +19,15 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rucksfs_core::{
-    DataLocation, DataOps, DirEntry, FileAttr, FsError, FsResult, Inode, MetadataOps,
-    OpenResponse, SetAttrRequest, StatFs,
+    DataLocation, DirEntry, FileAttr, FsError, FsResult, Inode, MetadataOps,
+    OpenResponse, ReleaseResponse, RenameResponse, SetAttrRequest, SetAttrResponse,
+    StatFs, UnlinkResponse,
 };
 use rucksfs_storage::allocator::{InodeAllocator, ROOT_INODE};
-use rucksfs_storage::encoding::{encode_data_location_key, encode_delta_key, encode_dir_entry_key, encode_inode_key, InodeValue};
+use rucksfs_storage::encoding::{
+    encode_data_location_key, encode_delta_key, encode_dir_entry_key, encode_inode_key,
+    encode_symlink_key, InodeValue,
+};
 use rucksfs_storage::{
     AtomicWriteBatch, BatchOp, DeltaStore, DirectoryIndex, MetadataStore, StorageBundle,
 };
@@ -50,8 +59,10 @@ const DEFAULT_CACHE_CAPACITY: usize = 10_000;
 /// [`DirectoryIndex`], and [`DeltaStore`] to implement metadata-only
 /// POSIX file-system operations.
 ///
-/// Data I/O is delegated to a separate DataServer via the
-/// `data_client: Arc<dyn DataOps>` field.
+/// The MetadataServer does NOT hold any reference to DataOps. All data
+/// side-effects (truncate on setattr, delete on unlink) are communicated
+/// back to the caller via response structs, and the client layer (VfsCore)
+/// is responsible for coordinating with the appropriate DataServer.
 pub struct MetadataServer<M, I, DS>
 where
     M: MetadataStore,
@@ -61,10 +72,7 @@ where
     pub metadata: Arc<M>,
     pub index: Arc<I>,
     pub delta_store: Arc<DS>,
-    /// Client for talking to the DataServer (for truncate/delete on
-    /// setattr size change or unlink with nlink=0).
-    pub data_client: Arc<dyn DataOps>,
-    /// DataServer endpoint info returned in OpenResponse.
+    /// Default DataServer identifier for newly created files.
     pub default_data_location: DataLocation,
     /// LRU cache of folded inode values.
     pub cache: Arc<InodeFoldedCache>,
@@ -93,7 +101,6 @@ where
         metadata: Arc<M>,
         index: Arc<I>,
         delta_store: Arc<DS>,
-        data_client: Arc<dyn DataOps>,
         default_data_location: DataLocation,
         storage_bundle: Arc<dyn StorageBundle>,
     ) -> Self {
@@ -113,7 +120,6 @@ where
             metadata,
             index,
             delta_store,
-            data_client,
             default_data_location,
             cache,
             compaction,
@@ -135,7 +141,6 @@ where
         metadata: Arc<M>,
         index: Arc<I>,
         delta_store: Arc<DS>,
-        data_client: Arc<dyn DataOps>,
         default_data_location: DataLocation,
         cache_capacity: usize,
         compaction_config: CompactionConfig,
@@ -157,7 +162,6 @@ where
             metadata,
             index,
             delta_store,
-            data_client,
             default_data_location,
             cache,
             compaction,
@@ -296,12 +300,12 @@ where
     fn batch_put_data_location(
         batch: &mut dyn AtomicWriteBatch,
         inode: Inode,
-        address: &str,
+        server_id: &str,
     ) {
         let key = encode_data_location_key(inode);
         batch.push(BatchOp::PutDataLocation {
             key,
-            value: address.as_bytes().to_vec(),
+            value: server_id.as_bytes().to_vec(),
         });
     }
 
@@ -312,6 +316,30 @@ where
     ) {
         batch.push(BatchOp::DeleteDataLocation {
             key: encode_data_location_key(inode),
+        });
+    }
+
+    /// Add a "put symlink target" operation to the batch.
+    fn batch_put_symlink(
+        batch: &mut dyn AtomicWriteBatch,
+        inode: Inode,
+        target: &str,
+    ) {
+        let key = encode_symlink_key(inode);
+        batch.push(BatchOp::PutSymlink {
+            key,
+            value: target.as_bytes().to_vec(),
+        });
+    }
+
+    /// Add a "delete symlink target" operation to the batch.
+    #[allow(dead_code)]
+    fn batch_delete_symlink(
+        batch: &mut dyn AtomicWriteBatch,
+        inode: Inode,
+    ) {
+        batch.push(BatchOp::DeleteSymlink {
+            key: encode_symlink_key(inode),
         });
     }
 
@@ -428,8 +456,7 @@ where
         Ok(iv.to_attr())
     }
 
-    async fn setattr(&self, inode: Inode, req: SetAttrRequest) -> FsResult<FileAttr> {
-        // Handle size change outside transaction — delegate truncate to DataServer.
+    async fn setattr(&self, inode: Inode, req: SetAttrRequest) -> FsResult<SetAttrResponse> {
         let truncate_size = req.size;
 
         let (attr, needs_truncate) = self.execute_with_retry(|| {
@@ -478,14 +505,16 @@ where
             Ok((iv.to_attr(), do_truncate))
         })?;
 
-        // Perform the actual truncate after transaction commit.
-        if needs_truncate {
-            if let Some(new_size) = truncate_size {
-                self.data_client.truncate(inode, new_size).await?;
-            }
-        }
+        let truncate_needed = if needs_truncate {
+            truncate_size
+        } else {
+            None
+        };
 
-        Ok(attr)
+        Ok(SetAttrResponse {
+            attr,
+            needs_truncate: truncate_needed,
+        })
     }
 
     async fn statfs(&self, _inode: Inode) -> FsResult<StatFs> {
@@ -540,7 +569,7 @@ where
             Self::batch_put_data_location(
                 batch.as_mut(),
                 new_inode,
-                &self.default_data_location.address,
+                &self.default_data_location.server_id,
             );
             // Parent timestamp deltas inside transaction — single WAL write.
             Self::batch_parent_deltas(
@@ -635,7 +664,7 @@ where
         Ok(iv.to_attr())
     }
 
-    async fn unlink(&self, parent: Inode, name: &str) -> FsResult<()> {
+    async fn unlink(&self, parent: Inode, name: &str) -> FsResult<UnlinkResponse> {
         let name_owned = name.to_string();
 
         let (need_delete_data, parent_ts) = self.execute_with_retry(|| {
@@ -697,10 +726,8 @@ where
             Ok((result, ts))
         })?;
 
-        // Ask DataServer to clean up file data (outside transaction scope).
-        // Spawn as a background task — the delete is a no-op for RawDiskDataStore
-        // (inode numbers are never reused, so stale data is permanently unreachable)
-        // but may have real cleanup work in other DataOps implementations.
+        // Determine which inodes need data deletion.
+        let mut purged_inodes = Vec::new();
         if let Some(inode) = need_delete_data {
             let has_handles = {
                 let handles = self.open_handles.lock().expect("open_handles poisoned");
@@ -711,19 +738,14 @@ where
                 let mut pending = self.pending_deletes.lock().expect("pending_deletes poisoned");
                 pending.insert(inode);
             } else {
-                let dc = Arc::clone(&self.data_client);
-                tokio::spawn(async move {
-                    if let Err(e) = dc.delete_data(inode).await {
-                        eprintln!("background delete_data for inode {} failed: {}", inode, e);
-                    }
-                });
+                purged_inodes.push(inode);
             }
         }
 
         self.cache.apply_deltas(parent, &[DeltaOp::SetMtime(parent_ts), DeltaOp::SetCtime(parent_ts)]);
         self.compaction.mark_dirty(parent);
 
-        Ok(())
+        Ok(UnlinkResponse { purged_inodes })
     }
 
     async fn rmdir(&self, parent: Inode, name: &str) -> FsResult<()> {
@@ -795,7 +817,7 @@ where
         name: &str,
         new_parent: Inode,
         new_name: &str,
-    ) -> FsResult<()> {
+    ) -> FsResult<RenameResponse> {
         let name_owned = name.to_string();
         let new_name_owned = new_name.to_string();
 
@@ -985,17 +1007,10 @@ where
             self.compaction.mark_dirty(new_parent);
         }
 
-        // Ask DataServer to clean up data (outside transaction scope).
-        if let Some(inode) = result.delete_inode {
-            let dc = Arc::clone(&self.data_client);
-            tokio::spawn(async move {
-                if let Err(e) = dc.delete_data(inode).await {
-                    eprintln!("background delete_data for inode {} failed: {}", inode, e);
-                }
-            });
-        }
+        // Collect inodes whose data the client should delete.
+        let purged_inodes = result.delete_inode.into_iter().collect();
 
-        Ok(())
+        Ok(RenameResponse { purged_inodes })
     }
 
     async fn open(&self, inode: Inode, _flags: u32) -> FsResult<OpenResponse> {
@@ -1010,14 +1025,14 @@ where
         }
         // Read per-inode data location; fall back to default if not found.
         let loc_key = encode_data_location_key(inode);
-        let address = match self.metadata.get(&loc_key)? {
+        let server_id = match self.metadata.get(&loc_key)? {
             Some(bytes) => String::from_utf8(bytes)
-                .unwrap_or_else(|_| self.default_data_location.address.clone()),
-            None => self.default_data_location.address.clone(),
+                .unwrap_or_else(|_| self.default_data_location.server_id.clone()),
+            None => self.default_data_location.server_id.clone(),
         };
         Ok(OpenResponse {
             handle: inode, // Use inode as handle for simplicity.
-            data_location: DataLocation { address },
+            data_location: DataLocation { server_id },
         })
     }
 
@@ -1137,7 +1152,7 @@ where
         let name_owned = name.to_string();
         let target_owned = link_target.to_string();
 
-        let (iv, new_inode) = self.execute_with_retry(|| {
+        let (iv, _new_inode) = self.execute_with_retry(|| {
             let mut batch = self.begin_write();
 
             // Check if the name already exists (with row lock).
@@ -1163,11 +1178,8 @@ where
 
             Self::batch_put_inode(batch.as_mut(), new_inode, &iv);
             Self::batch_put_dir_entry(batch.as_mut(), parent, &name_owned, new_inode, iv.mode);
-            Self::batch_put_data_location(
-                batch.as_mut(),
-                new_inode,
-                &self.default_data_location.address,
-            );
+            // Store symlink target in metadata (like ext4 fast symlink).
+            Self::batch_put_symlink(batch.as_mut(), new_inode, &target_owned);
             // Parent timestamp deltas inside transaction — single WAL write.
             Self::batch_parent_deltas(
                 batch.as_mut(),
@@ -1183,17 +1195,12 @@ where
         // Persist allocator counter outside the transaction.
         self.allocator.maybe_persist(self.metadata.as_ref())?;
 
-        // Store the symlink target as file data.
-        self.data_client
-            .write_data(new_inode, 0, target_owned.as_bytes())
-            .await?;
-
         // Update in-memory state.
-        self.cache.put(new_inode, iv.clone());
+        self.cache.put(iv.inode, iv.clone());
         if !self.index.shares_batch_storage() {
             let _ = self
                 .index
-                .insert_child(parent, &name_owned, new_inode, iv.to_attr());
+                .insert_child(parent, &name_owned, iv.inode, iv.to_attr());
         }
 
         // Update parent cache for deltas written inside the transaction.
@@ -1211,23 +1218,19 @@ where
             return Err(FsError::InvalidInput("not a symbolic link".into()));
         }
 
-        let data = self
-            .data_client
-            .read_data(inode, 0, iv.size as u32)
-            .await?;
+        // Read symlink target from metadata store (key prefix 'S').
+        let sym_key = encode_symlink_key(inode);
+        let data = self.metadata.get(&sym_key)?
+            .ok_or_else(|| FsError::Io(format!("symlink target not found for inode {}", inode)))?;
 
         String::from_utf8(data).map_err(|e| FsError::Io(format!("invalid symlink target: {}", e)))
     }
 
-    async fn release(&self, inode: Inode) -> FsResult<()> {
+    async fn release(&self, inode: Inode) -> FsResult<ReleaseResponse> {
+        let mut purged_inodes = Vec::new();
         if self.check_and_clear_deferred_delete(inode) {
-            let dc = Arc::clone(&self.data_client);
-            tokio::spawn(async move {
-                if let Err(e) = dc.delete_data(inode).await {
-                    eprintln!("background delete_data for inode {} failed: {}", inode, e);
-                }
-            });
+            purged_inodes.push(inode);
         }
-        Ok(())
+        Ok(ReleaseResponse { purged_inodes })
     }
 }

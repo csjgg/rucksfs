@@ -2,6 +2,10 @@
 //!
 //! Routes metadata requests to `MetadataOps` and data requests to `DataOps`.
 //! Shared by both `EmbeddedClient` and `RucksClient`.
+//!
+//! VfsCore is the coordination layer: it handles data-side effects returned
+//! by MetadataOps (purged_inodes for deletion, needs_truncate for setattr)
+//! by calling the appropriate DataOps backend.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -16,10 +20,10 @@ use std::sync::Arc;
 pub struct VfsCore {
     metadata: Arc<dyn MetadataOps>,
     default_data: Arc<dyn DataOps>,
-    /// Registry of DataServer addresses to their DataOps implementations.
+    /// Registry of DataServer identifiers to their DataOps implementations.
     /// Used for routing read/write to the correct DataServer.
     data_servers: Mutex<HashMap<String, Arc<dyn DataOps>>>,
-    /// Maps open file handles (inode) to their DataServer address.
+    /// Maps open file handles (inode) to their DataServer identifier.
     handle_map: Mutex<HashMap<u64, String>>,
 }
 
@@ -48,13 +52,13 @@ impl VfsCore {
     }
 
     /// Look up the DataOps for a given inode based on its open handle mapping.
-    /// Falls back to default_data if the inode has no mapping or the address
+    /// Falls back to default_data if the inode has no mapping or the identifier
     /// is not in data_servers.
     fn resolve_data(&self, inode: u64) -> Arc<dyn DataOps> {
         let handle_map = self.handle_map.lock().expect("handle_map poisoned");
-        if let Some(address) = handle_map.get(&inode) {
+        if let Some(server_id) = handle_map.get(&inode) {
             let servers = self.data_servers.lock().expect("data_servers poisoned");
-            if let Some(ds) = servers.get(address) {
+            if let Some(ds) = servers.get(server_id) {
                 return Arc::clone(ds);
             }
         }
@@ -92,7 +96,15 @@ impl VfsOps for VfsCore {
     }
 
     async fn unlink(&self, parent: Inode, name: &str) -> FsResult<()> {
-        self.metadata.unlink(parent, name).await
+        let resp = self.metadata.unlink(parent, name).await?;
+        // Client-side coordination: delete data for purged inodes.
+        for inode in resp.purged_inodes {
+            let ds = self.resolve_data(inode);
+            if let Err(e) = ds.delete_data(inode).await {
+                tracing::warn!("delete_data for inode {} failed: {}", inode, e);
+            }
+        }
+        Ok(())
     }
 
     async fn rmdir(&self, parent: Inode, name: &str) -> FsResult<()> {
@@ -106,13 +118,26 @@ impl VfsOps for VfsCore {
         new_parent: Inode,
         new_name: &str,
     ) -> FsResult<()> {
-        self.metadata
+        let resp = self.metadata
             .rename(parent, name, new_parent, new_name)
-            .await
+            .await?;
+        // Client-side coordination: delete data for purged inodes.
+        for inode in resp.purged_inodes {
+            let ds = self.resolve_data(inode);
+            if let Err(e) = ds.delete_data(inode).await {
+                tracing::warn!("delete_data for inode {} failed: {}", inode, e);
+            }
+        }
+        Ok(())
     }
 
     async fn setattr(&self, inode: Inode, req: SetAttrRequest) -> FsResult<FileAttr> {
-        self.metadata.setattr(inode, req).await
+        let resp = self.metadata.setattr(inode, req).await?;
+        // Client-side coordination: truncate data if needed.
+        if let Some(size) = resp.needs_truncate {
+            self.resolve_data(inode).truncate(inode, size).await?;
+        }
+        Ok(resp.attr)
     }
 
     async fn statfs(&self, inode: Inode) -> FsResult<StatFs> {
@@ -123,7 +148,7 @@ impl VfsOps for VfsCore {
         let resp = self.metadata.open(inode, flags).await?;
         {
             let mut map = self.handle_map.lock().expect("handle_map poisoned");
-            map.insert(resp.handle, resp.data_location.address);
+            map.insert(resp.handle, resp.data_location.server_id);
         }
         Ok(resp.handle)
     }
@@ -171,7 +196,14 @@ impl VfsOps for VfsCore {
     }
 
     async fn release(&self, inode: Inode) -> FsResult<()> {
-        self.metadata.release(inode).await?;
+        let resp = self.metadata.release(inode).await?;
+        // Client-side coordination: delete data for deferred-delete inodes.
+        for purged_inode in resp.purged_inodes {
+            let ds = self.resolve_data(purged_inode);
+            if let Err(e) = ds.delete_data(purged_inode).await {
+                tracing::warn!("delete_data for inode {} failed: {}", purged_inode, e);
+            }
+        }
         let mut map = self.handle_map.lock().expect("handle_map poisoned");
         map.remove(&inode);
         Ok(())

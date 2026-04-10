@@ -631,6 +631,18 @@ impl<'db> AtomicWriteBatch for RocksWriteBatch<'db> {
                 self.txn.delete_cf(&cf, &key)
                     .expect("transaction delete_cf(inodes/data_location) failed unexpectedly");
             }
+            BatchOp::PutSymlink { key, value } => {
+                let cf = self.db.cf_handle(CF_INODES)
+                    .expect("CF 'inodes' must exist — database is corrupt or misconfigured");
+                self.txn.put_cf(&cf, &key, &value)
+                    .expect("transaction put_cf(inodes/symlink) failed unexpectedly");
+            }
+            BatchOp::DeleteSymlink { key } => {
+                let cf = self.db.cf_handle(CF_INODES)
+                    .expect("CF 'inodes' must exist — database is corrupt or misconfigured");
+                self.txn.delete_cf(&cf, &key)
+                    .expect("transaction delete_cf(inodes/symlink) failed unexpectedly");
+            }
         }
     }
 

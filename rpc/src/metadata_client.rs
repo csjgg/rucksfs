@@ -8,13 +8,14 @@ use tonic::Request;
 
 use rucksfs_core::{
     DataLocation, DirEntry, FileAttr, FsError, FsResult, Inode, MetadataOps, OpenResponse,
-    SetAttrRequest, StatFs,
+    ReleaseResponse, RenameResponse, SetAttrRequest, SetAttrResponse, StatFs, UnlinkResponse,
 };
 use crate::metadata_proto::{
     metadata_service_client::MetadataServiceClient,
-    CreateRequest, GetattrRequest, LookupRequest, MkdirRequest, OpenRequest,
-    ReaddirRequest, RenameRequest, ReportWriteRequest, RmdirRequest,
-    SetAttrRequest as ProtoSetAttrRequest, StatfsRequest, UnlinkRequest,
+    CreateRequest, GetattrRequest, LinkRequest, LookupRequest, MkdirRequest, OpenRequest,
+    ReadlinkRequest, ReaddirRequest, ReleaseRequest, RenameRequest, ReportWriteRequest,
+    RmdirRequest, SetAttrRequest as ProtoSetAttrRequest, StatfsRequest, SymlinkRequest,
+    UnlinkRequest,
 };
 use crate::tls::ClientTlsConfig as TlsConfig;
 
@@ -82,6 +83,7 @@ fn map_error(err: tonic::Status) -> FsError {
         tonic::Code::Unimplemented => FsError::NotImplemented,
         tonic::Code::AlreadyExists => FsError::AlreadyExists,
         tonic::Code::FailedPrecondition => FsError::DirectoryNotEmpty,
+        tonic::Code::Aborted => FsError::TransactionConflict,
         _ => FsError::Io(err.message().to_string()),
     }
 }
@@ -152,11 +154,20 @@ impl MetadataOps for MetadataRpcClient {
             .collect())
     }
 
-    async fn create(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr> {
+    async fn create(
+        &self,
+        parent: Inode,
+        name: &str,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    ) -> FsResult<FileAttr> {
         let req = Request::new(CreateRequest {
             parent,
             name: name.to_string(),
             mode,
+            uid,
+            gid,
         });
         let mut client = self.client.lock().await;
         client
@@ -166,11 +177,20 @@ impl MetadataOps for MetadataRpcClient {
             .map_err(map_error)
     }
 
-    async fn mkdir(&self, parent: Inode, name: &str, mode: u32) -> FsResult<FileAttr> {
+    async fn mkdir(
+        &self,
+        parent: Inode,
+        name: &str,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    ) -> FsResult<FileAttr> {
         let req = Request::new(MkdirRequest {
             parent,
             name: name.to_string(),
             mode,
+            uid,
+            gid,
         });
         let mut client = self.client.lock().await;
         client
@@ -180,13 +200,16 @@ impl MetadataOps for MetadataRpcClient {
             .map_err(map_error)
     }
 
-    async fn unlink(&self, parent: Inode, name: &str) -> FsResult<()> {
+    async fn unlink(&self, parent: Inode, name: &str) -> FsResult<UnlinkResponse> {
         let req = Request::new(UnlinkRequest {
             parent,
             name: name.to_string(),
         });
         let mut client = self.client.lock().await;
-        client.unlink(req).await.map(|_| ()).map_err(map_error)
+        let resp = client.unlink(req).await.map_err(map_error)?.into_inner();
+        Ok(UnlinkResponse {
+            purged_inodes: resp.purged_inodes,
+        })
     }
 
     async fn rmdir(&self, parent: Inode, name: &str) -> FsResult<()> {
@@ -204,7 +227,7 @@ impl MetadataOps for MetadataRpcClient {
         name: &str,
         new_parent: Inode,
         new_name: &str,
-    ) -> FsResult<()> {
+    ) -> FsResult<RenameResponse> {
         let req = Request::new(RenameRequest {
             parent,
             name: name.to_string(),
@@ -212,10 +235,13 @@ impl MetadataOps for MetadataRpcClient {
             new_name: new_name.to_string(),
         });
         let mut client = self.client.lock().await;
-        client.rename(req).await.map(|_| ()).map_err(map_error)
+        let resp = client.rename(req).await.map_err(map_error)?.into_inner();
+        Ok(RenameResponse {
+            purged_inodes: resp.purged_inodes,
+        })
     }
 
-    async fn setattr(&self, inode: Inode, req: SetAttrRequest) -> FsResult<FileAttr> {
+    async fn setattr(&self, inode: Inode, req: SetAttrRequest) -> FsResult<SetAttrResponse> {
         let proto_req = Request::new(ProtoSetAttrRequest {
             inode,
             mode: req.mode,
@@ -226,11 +252,15 @@ impl MetadataOps for MetadataRpcClient {
             mtime: req.mtime,
         });
         let mut client = self.client.lock().await;
-        client
-            .setattr(proto_req)
-            .await
-            .map(|r| from_proto_attr(r.into_inner()))
-            .map_err(map_error)
+        let resp = client.setattr(proto_req).await.map_err(map_error)?.into_inner();
+        let attr = resp
+            .attr
+            .map(from_proto_attr)
+            .unwrap_or_default();
+        Ok(SetAttrResponse {
+            attr,
+            needs_truncate: resp.needs_truncate,
+        })
     }
 
     async fn statfs(&self, inode: Inode) -> FsResult<StatFs> {
@@ -250,7 +280,7 @@ impl MetadataOps for MetadataRpcClient {
         let data_location = resp
             .data_location
             .map(|dl| DataLocation {
-                address: dl.address,
+                server_id: dl.server_id,
             })
             .unwrap_or_default();
         Ok(OpenResponse {
@@ -276,5 +306,66 @@ impl MetadataOps for MetadataRpcClient {
             .await
             .map(|_| ())
             .map_err(map_error)
+    }
+
+    async fn link(
+        &self,
+        parent: Inode,
+        name: &str,
+        target_inode: Inode,
+    ) -> FsResult<FileAttr> {
+        let req = Request::new(LinkRequest {
+            parent,
+            name: name.to_string(),
+            target_inode,
+        });
+        let mut client = self.client.lock().await;
+        client
+            .link(req)
+            .await
+            .map(|r| from_proto_attr(r.into_inner()))
+            .map_err(map_error)
+    }
+
+    async fn symlink(
+        &self,
+        parent: Inode,
+        name: &str,
+        link_target: &str,
+        uid: u32,
+        gid: u32,
+    ) -> FsResult<FileAttr> {
+        let req = Request::new(SymlinkRequest {
+            parent,
+            name: name.to_string(),
+            link_target: link_target.to_string(),
+            uid,
+            gid,
+        });
+        let mut client = self.client.lock().await;
+        client
+            .symlink(req)
+            .await
+            .map(|r| from_proto_attr(r.into_inner()))
+            .map_err(map_error)
+    }
+
+    async fn readlink(&self, inode: Inode) -> FsResult<String> {
+        let req = Request::new(ReadlinkRequest { inode });
+        let mut client = self.client.lock().await;
+        client
+            .readlink(req)
+            .await
+            .map(|r| r.into_inner().target)
+            .map_err(map_error)
+    }
+
+    async fn release(&self, inode: Inode) -> FsResult<ReleaseResponse> {
+        let req = Request::new(ReleaseRequest { inode });
+        let mut client = self.client.lock().await;
+        let resp = client.release(req).await.map_err(map_error)?.into_inner();
+        Ok(ReleaseResponse {
+            purged_inodes: resp.purged_inodes,
+        })
     }
 }

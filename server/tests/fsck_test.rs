@@ -37,9 +37,8 @@ fn new_stack() -> (
         Arc::clone(&metadata),
         Arc::clone(&index),
         delta_store,
-        Arc::clone(&data_server),
         DataLocation {
-            address: "embedded".to_string(),
+            server_id: "default".to_string(),
         },
         storage_bundle,
     ));
