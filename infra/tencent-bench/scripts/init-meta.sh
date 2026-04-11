@@ -82,10 +82,11 @@ echo "MySQL ready. JuiceFS DB/user created."
 # -------------------------------------------------------
 echo "=== Installing TiKV ==="
 mkdir -p "$DATA_MNT/tikv"
+export HOME="/root"
 
 # Install tiup (TiDB's component manager)
 curl --proto '=https' --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh
-export PATH="$HOME/.tiup/bin:$PATH"
+export PATH="/root/.tiup/bin:$PATH"
 
 # Install PD and TiKV components
 tiup install pd tikv
