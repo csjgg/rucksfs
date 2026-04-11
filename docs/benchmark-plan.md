@@ -15,22 +15,33 @@
 
 ## 2. 对比对象
 
-### 必选对比项
+## 2. 对比对象与控制变量
 
-| 对比对象 | 为什么选它 | 代表什么 |
-|---------|-----------|---------|
-| **ext4 (本地)** | 单机本地文件系统的性能天花板 | 基线参照 |
-| **JuiceFS + Redis** | 同赛道的分布式元数据文件系统 | 直接竞品 |
-| **RucksFS 嵌入式模式** | 单进程，无网络开销 | 自身理论上限 |
-| **RucksFS 分布式模式** | 通过 gRPC 通信 | 实际部署性能 |
+### 对比原则
+
+不同层次的文件系统之间不能直接对比（ext4 本地裸跑 vs FUSE 网络文件系统没有意义）。
+必须控制变量，按层次分组：
+
+```
+层次 1（核心对比）: 都走网络 + 都走 FUSE → 变量只有元数据引擎
+层次 2（开销量化）: 同一系统嵌入式 vs 分布式 → 量化 gRPC 网络开销
+层次 3（参照线）:   ext4 本地 → 标注为 baseline reference，不做直接对比
+```
+
+### 正式对比矩阵
+
+| 对比组 | 对象 A | 对象 B | 控制变量 | 证明什么 |
+|--------|--------|--------|---------|---------|
+| **核心对比** | RucksFS 分布式 | JuiceFS + Redis | 都走 FUSE + 网络，变量是元数据引擎 (RocksDB vs Redis) | RucksFS 元数据引擎的竞争力 |
+| **网络开销** | RucksFS 嵌入式 | RucksFS 分布式 | 同一代码，变量是函数直调 vs gRPC | gRPC 通信开销可控 |
+| **参照线** | ext4 (本地, 无 FUSE) | — | 不参与对比 | 图表中标注为 "local ext4 reference"，让读者理解 FUSE 天花板 |
 
 ### 可选对比项（如有条件）
 
 | 对比对象 | 说明 |
 |---------|------|
-| CephFS | 分布式文件系统，元数据性能一般但知名度高 |
-| JuiceFS + TiKV | JuiceFS 的分布式元数据引擎方案 |
-| NFS (kernel nfsd + ext4) | 传统网络文件系统基线 |
+| JuiceFS + TiKV | JuiceFS 的分布式元数据引擎方案，对比分布式 KV |
+| NFS (kernel nfsd + ext4) | 传统网络文件系统，走内核态 NFS，无 FUSE |
 
 ---
 
@@ -294,10 +305,10 @@ mdtest -d /mnt/juicefs -n 10000 -F -C -T -r -u -i 3
 
 每个 target 跑同样的参数，结果放到统一格式里对比。
 
-### 单进程基准
+### 单进程基准（核心对比）
 
-| 操作 | ext4 | RucksFS-嵌入式 | RucksFS-分布式 | JuiceFS+Redis |
-|------|------|---------------|--------------|---------------|
+| 操作 | RucksFS-嵌入式 | RucksFS-分布式 | JuiceFS+Redis | ext4 (参照线) |
+|------|---------------|--------------|---------------|--------------|
 | File creation (ops/s) | | | | |
 | File stat (ops/s) | | | | |
 | File removal (ops/s) | | | | |
@@ -307,8 +318,8 @@ mdtest -d /mnt/juicefs -n 10000 -F -C -T -r -u -i 3
 
 ### 并发 scaling（文件 create ops/s）
 
-| 进程数 | ext4 | RucksFS-嵌入式 | RucksFS-分布式 | JuiceFS+Redis |
-|--------|------|---------------|--------------|---------------|
+| 进程数 | RucksFS-嵌入式 | RucksFS-分布式 | JuiceFS+Redis | ext4 (参照线) |
+|--------|---------------|--------------|---------------|--------------|
 | 1 | | | | |
 | 2 | | | | |
 | 4 | | | | |
@@ -377,10 +388,10 @@ echo "Results saved to $RESULT_DIR"
 
 | 场景 | 预期结果 |
 |------|---------|
-| ext4 vs RucksFS-嵌入式 | ext4 快 2-5x（无 FUSE 开销、无序列化） |
 | RucksFS-嵌入式 vs JuiceFS | RucksFS 可能更快（RocksDB 本地 vs Redis 网络 + S3） |
-| RucksFS-嵌入式 vs RucksFS-分布式 | 嵌入式快 2-10x（无 gRPC 网络开销） |
-| RucksFS-分布式 vs JuiceFS | 核心对比项——同是网络文件系统，看元数据引擎效率 |
+| RucksFS-分布式 vs JuiceFS | 核心对比项——同是 FUSE+网络文件系统，看元数据引擎效率 |
+| RucksFS-嵌入式 vs RucksFS-分布式 | 嵌入式快 2-10x（量化 gRPC 通信开销） |
+| ext4 参照线 | 比所有 FUSE 方案快 10-50x，仅作为天花板参照 |
 | 并发 scaling | RucksFS 的 PCC 事务在高并发下的冲突率是关键指标 |
 
 **毕设论文的核心论点**：
