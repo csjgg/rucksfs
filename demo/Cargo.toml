@@ -20,6 +20,9 @@ clap = { version = "4", features = ["derive"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+[dependencies.tempfile]
+workspace = true
+
 [dev-dependencies]
 tempfile = { workspace = true }
 
@@ -38,3 +41,7 @@ path = "src/bin/dataserver.rs"
 [[bin]]
 name = "rucksfs-remote-client"
 path = "src/bin/client.rs"
+
+[[bin]]
+name = "rucksfs-bench"
+path = "src/bin/bench.rs"
