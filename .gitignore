@@ -15,3 +15,4 @@ scripts/remote-test/test-config.toml
 CLAUDE.local.md
 benchmark/results/
 tasks/
+infra/tencent-bench/shunjiecuitest.pem
