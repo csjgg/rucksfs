@@ -1,6 +1,6 @@
 #!/bin/bash
 # cloud-init script for Machine A (Client / Test Driver)
-# Installs: mdtest, pjdfstest, FUSE, JuiceFS, NFS client, Rust, iperf3
+# Installs: OpenMPI, mdtest, FUSE, JuiceFS, NFS client
 set -euo pipefail
 exec > /var/log/bench-init.log 2>&1
 
@@ -12,7 +12,6 @@ echo "=== [$(date)] Machine A init starting ==="
 DATA_DEV="/dev/vdb"
 DATA_MNT="/data"
 
-# Wait for device
 for i in $(seq 1 30); do
   [ -b "$DATA_DEV" ] && break
   echo "Waiting for $DATA_DEV ($i/30)..."
@@ -37,7 +36,8 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y \
   build-essential git curl wget \
-  mpich automake autoconf libtool \
+  openmpi-bin libopenmpi-dev \
+  automake autoconf libtool \
   fuse3 libfuse3-dev \
   nfs-common \
   iperf3 \
@@ -50,7 +50,47 @@ grep -q "^user_allow_other" /etc/fuse.conf 2>/dev/null || \
   echo "user_allow_other" >> /etc/fuse.conf
 
 # -------------------------------------------------------
-# 3. mdtest (IOR project)
+# 3. SSH key for MPI cross-node communication
+# -------------------------------------------------------
+echo "=== Setting up SSH for MPI ==="
+UBUNTU_HOME="/home/ubuntu"
+mkdir -p "$UBUNTU_HOME/.ssh"
+
+# Generate SSH key pair (no passphrase)
+ssh-keygen -t ed25519 -f "$UBUNTU_HOME/.ssh/id_ed25519" -N "" -q
+
+# Authorize own key (for single-node mpirun too)
+cat "$UBUNTU_HOME/.ssh/id_ed25519.pub" >> "$UBUNTU_HOME/.ssh/authorized_keys"
+
+# SSH config: disable strict host checking for VPC hosts
+cat > "$UBUNTU_HOME/.ssh/config" <<'SSHCONF'
+Host 10.0.*
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+  LogLevel ERROR
+SSHCONF
+
+chmod 700 "$UBUNTU_HOME/.ssh"
+chmod 600 "$UBUNTU_HOME/.ssh/id_ed25519" "$UBUNTU_HOME/.ssh/config"
+chmod 644 "$UBUNTU_HOME/.ssh/id_ed25519.pub" "$UBUNTU_HOME/.ssh/authorized_keys"
+chown -R ubuntu:ubuntu "$UBUNTU_HOME/.ssh"
+
+# Also set up for root (mpirun often runs as root for FUSE)
+mkdir -p /root/.ssh
+cp "$UBUNTU_HOME/.ssh/id_ed25519" /root/.ssh/
+cp "$UBUNTU_HOME/.ssh/id_ed25519.pub" /root/.ssh/
+cat /root/.ssh/id_ed25519.pub >> /root/.ssh/authorized_keys
+cat > /root/.ssh/config <<'SSHCONF'
+Host 10.0.*
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+  LogLevel ERROR
+SSHCONF
+chmod 700 /root/.ssh
+chmod 600 /root/.ssh/id_ed25519 /root/.ssh/config
+
+# -------------------------------------------------------
+# 4. mdtest (IOR project, built with OpenMPI)
 # -------------------------------------------------------
 echo "=== Installing mdtest ==="
 cd /opt
@@ -63,43 +103,22 @@ make install
 echo "mdtest version: $(mdtest -V 2>&1 | head -1 || true)"
 
 # -------------------------------------------------------
-# 4. pjdfstest
-# -------------------------------------------------------
-echo "=== Installing pjdfstest ==="
-cd /opt
-git clone https://github.com/pjd/pjdfstest.git
-cd pjdfstest
-autoreconf -ifs
-./configure
-make
-ln -sf /opt/pjdfstest/pjdfstest /usr/local/bin/pjdfstest
-
-# -------------------------------------------------------
 # 5. JuiceFS client
 # -------------------------------------------------------
 echo "=== Installing JuiceFS ==="
 curl -sSL https://d.juicefs.com/install | sh -
 
 # -------------------------------------------------------
-# 6. Rust toolchain (for compiling RucksFS)
+# 6. Create mount point directories
 # -------------------------------------------------------
-echo "=== Installing Rust ==="
-su - ubuntu -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'
-
-# -------------------------------------------------------
-# 7. Create mount point directories
-# -------------------------------------------------------
-mkdir -p /mnt/rucksfs-embedded
 mkdir -p /mnt/rucksfs-dist
 mkdir -p /mnt/juicefs-mysql
-mkdir -p /mnt/juicefs-redis
+mkdir -p /mnt/juicefs-tikv
 mkdir -p /mnt/nfs
-mkdir -p "$DATA_MNT/ext4-bench"
-mkdir -p "$DATA_MNT/rucksfs-local"
 mkdir -p "$DATA_MNT/test-results"
 
 # -------------------------------------------------------
-# 8. Record environment info
+# 7. Record environment info
 # -------------------------------------------------------
 {
   echo "=== Machine A Environment ==="
@@ -110,12 +129,15 @@ mkdir -p "$DATA_MNT/test-results"
   lsblk
   df -h
   ip -4 addr show
+  echo "--- OpenMPI ---"
+  mpirun --version || true
+  echo "--- mdtest ---"
+  mdtest -V 2>&1 | head -3 || true
 } > "$DATA_MNT/env-info-client.txt"
 
 # -------------------------------------------------------
-# 9. Performance tuning
+# 8. Performance tuning
 # -------------------------------------------------------
-# Disable apt auto-updates during benchmark
 systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
 
 echo "=== [$(date)] Machine A init complete ==="

@@ -44,7 +44,7 @@ variable "instance_type_client" {
 variable "instance_type_meta" {
   description = "CVM instance type for metadata server (Machine B)"
   type        = string
-  default     = "SA3.2XLARGE16" # 8C16G
+  default     = "SA3.2XLARGE32" # 8C32G
 }
 
 variable "instance_type_data" {
