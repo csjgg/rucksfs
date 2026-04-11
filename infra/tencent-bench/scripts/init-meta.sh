@@ -108,10 +108,19 @@ REDISCNF
 
 # Redis on Ubuntu uses /etc/redis/redis.conf directly
 sed -i 's/^bind .*/bind 0.0.0.0/' /etc/redis/redis.conf
-sed -i 's|^dir .*|dir /data/redis|' /etc/redis/redis.conf
+# Keep default dir (/var/lib/redis) — systemd ReadWritePaths blocks /data/redis
+# sed -i 's|^dir .*|dir /data/redis|' /etc/redis/redis.conf
 sed -i 's/^# *appendonly .*/appendonly yes/' /etc/redis/redis.conf
 sed -i 's/^appendonly .*/appendonly yes/' /etc/redis/redis.conf
 sed -i 's/^# *appendfsync .*/appendfsync everysec/' /etc/redis/redis.conf
+
+# Add systemd override to allow writing to /data/redis if we want it later
+mkdir -p /etc/systemd/system/redis-server.service.d
+cat > /etc/systemd/system/redis-server.service.d/data-dir.conf <<'SYSOVER'
+[Service]
+ReadWritePaths=-/data/redis
+SYSOVER
+systemctl daemon-reload
 
 systemctl restart redis-server
 

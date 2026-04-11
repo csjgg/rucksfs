@@ -13,13 +13,13 @@ variable "secret_key" {
 variable "region" {
   description = "Tencent Cloud region"
   type        = string
-  default     = "ap-guangzhou"
+  default     = "ap-hongkong"
 }
 
 variable "availability_zone" {
   description = "Availability zone (must match region)"
   type        = string
-  default     = "ap-guangzhou-3"
+  default     = "ap-hongkong-2"
 }
 
 variable "ssh_key_ids" {
