@@ -1,0 +1,23 @@
+# Copy this file to terraform.tfvars and fill in your values.
+# NEVER commit terraform.tfvars (it contains secrets).
+
+secret_id  = "AKIDxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+secret_key = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+# SSH key ID — create one in Tencent Cloud console:
+# https://console.cloud.tencent.com/cvm/sshkey
+ssh_key_ids = ["skey-xxxxxxxx"]
+
+# Region & AZ (default: Guangzhou Zone 3)
+# region            = "ap-guangzhou"
+# availability_zone = "ap-guangzhou-3"
+
+# Ubuntu 22.04 image ID (varies by region, verify with:
+#   tccli cvm DescribeImages --filter '{"image-type":["PUBLIC_IMAGE"]}' --region ap-guangzhou
+# )
+# image_id = "img-487zeit5"
+
+# Instance types (defaults match benchmark-plan.md §4.2)
+# instance_type_client = "SA3.2XLARGE16"  # 8C16G
+# instance_type_meta   = "SA3.2XLARGE16"  # 8C16G
+# instance_type_data   = "SA3.XLARGE8"    # 4C8G
