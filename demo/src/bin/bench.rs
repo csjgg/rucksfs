@@ -41,6 +41,11 @@ struct Cli {
     /// Data directory for local mode (temp dir if not specified).
     #[arg(long)]
     data_dir: Option<PathBuf>,
+
+    /// Use realistic create that mimics mdtest's openat(O_CREAT):
+    /// lookup + create + open + release per file.
+    #[arg(long, default_value = "false")]
+    realistic: bool,
 }
 
 struct BenchResult {
@@ -101,16 +106,26 @@ fn build_local_server(data_dir: &std::path::Path) -> Arc<dyn MetadataOps> {
 }
 
 /// Benchmark create: create N files under root, each with a unique name.
+///
+/// When `realistic` is true, each "create" mimics what mdtest (and the kernel
+/// FUSE layer) actually does for `openat(O_CREAT)`:
+///   1. lookup(parent, name) — expect ENOENT
+///   2. create(parent, name, mode, uid, gid) — returns attr
+///   3. open(inode, O_RDWR) — returns file handle
+///   4. release(inode) — close the file handle
+///
+/// When `realistic` is false, only `create()` is called (raw metadata throughput).
 async fn bench_create(
     meta: Arc<dyn MetadataOps>,
     n_threads: usize,
     ops_per_thread: u64,
     run_id: u64,
+    realistic: bool,
 ) -> BenchResult {
     const ROOT: u64 = 1;
 
     // Create a unique parent directory for this run to avoid conflicts.
-    let dir_name = format!("bench_create_{}t_r{}", n_threads, run_id);
+    let dir_name = format!("bench_create_{}t_r{}_{}", n_threads, run_id, std::process::id());
     let run_dir = meta
         .mkdir(ROOT, &dir_name, 0o755, 0, 0)
         .await
@@ -130,7 +145,18 @@ async fn bench_create(
             for i in 0..ops_per_thread {
                 let name = format!("f_{}_{}", tid, i);
                 let t0 = Instant::now();
-                meta.create(parent, &name, 0o644, 0, 0).await.expect("create failed");
+                if realistic {
+                    // Step 1: LOOKUP (expect ENOENT for new file)
+                    let _ = meta.lookup(parent, &name).await; // ignore error
+                    // Step 2: CREATE
+                    let attr = meta.create(parent, &name, 0o644, 0, 0).await.expect("create failed");
+                    // Step 3: OPEN (O_RDWR = 2)
+                    let _ = meta.open(attr.inode, 2).await;
+                    // Step 4: RELEASE (close)
+                    let _ = meta.release(attr.inode).await;
+                } else {
+                    meta.create(parent, &name, 0o644, 0, 0).await.expect("create failed");
+                }
                 local_lats.push(t0.elapsed());
             }
             lats.lock().await.extend(local_lats);
@@ -147,8 +173,9 @@ async fn bench_create(
         .into_inner();
     latencies.sort();
 
+    let label = if realistic { "create(real)" } else { "create(raw)" };
     BenchResult {
-        op: "create".to_string(),
+        op: label.to_string(),
         threads: n_threads,
         total_ops: n_threads as u64 * ops_per_thread,
         elapsed,
@@ -257,15 +284,15 @@ async fn bench_unlink(
 
 fn print_header() {
     println!(
-        "{:<10} {:>7} {:>10} {:>12} {:>10} {:>10} {:>10}",
+        "{:<15} {:>7} {:>10} {:>12} {:>10} {:>10} {:>10}",
         "Op", "Threads", "Total", "ops/s", "Avg(us)", "P50(us)", "P99(us)"
     );
-    println!("{}", "-".repeat(75));
+    println!("{}", "-".repeat(80));
 }
 
 fn print_result(r: &BenchResult) {
     println!(
-        "{:<10} {:>7} {:>10} {:>12.0} {:>10.1} {:>10.1} {:>10.1}",
+        "{:<15} {:>7} {:>10} {:>12.0} {:>10.1} {:>10.1} {:>10.1}",
         r.op,
         r.threads,
         r.total_ops,
@@ -316,13 +343,18 @@ async fn main() {
     };
 
     println!("Ops per thread: {}", cli.ops);
+    println!("Realistic create: {}", cli.realistic);
     println!();
 
     // --- Create benchmark ---
-    println!("=== CREATE ===");
+    if cli.realistic {
+        println!("=== CREATE (realistic: lookup+create+open+release) ===");
+    } else {
+        println!("=== CREATE (raw: create only) ===");
+    }
     print_header();
     for (i, &nt) in thread_counts.iter().enumerate() {
-        let r = bench_create(meta.clone(), nt, cli.ops, i as u64).await;
+        let r = bench_create(meta.clone(), nt, cli.ops, i as u64, cli.realistic).await;
         print_result(&r);
     }
     println!();
