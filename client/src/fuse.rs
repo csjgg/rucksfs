@@ -40,20 +40,22 @@ where
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let name = name.to_string_lossy().to_string();
         let client = self.client.clone();
-        let result = self.rt.block_on(async move { client.lookup(parent, &name).await });
-        match result {
-            Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
-            Err(e) => reply.error(fs_error_to_errno(e)),
-        }
+        self.rt.spawn(async move {
+            match client.lookup(parent, &name).await {
+                Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
+                Err(e) => reply.error(fs_error_to_errno(e)),
+            }
+        });
     }
 
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
         let client = self.client.clone();
-        let result = self.rt.block_on(async move { client.getattr(ino).await });
-        match result {
-            Ok(attr) => reply.attr(&Duration::from_secs(1), &to_fuse_attr(attr)),
-            Err(e) => reply.error(fs_error_to_errno(e)),
-        }
+        self.rt.spawn(async move {
+            match client.getattr(ino).await {
+                Ok(attr) => reply.attr(&Duration::from_secs(1), &to_fuse_attr(attr)),
+                Err(e) => reply.error(fs_error_to_errno(e)),
+            }
+        });
     }
 
     fn setattr(
@@ -101,12 +103,12 @@ where
                     .as_secs(),
             }),
         };
-        let result =
-            self.rt.block_on(async move { client.setattr(ino, req).await });
-        match result {
-            Ok(attr) => reply.attr(&Duration::from_secs(1), &to_fuse_attr(attr)),
-            Err(e) => reply.error(fs_error_to_errno(e)),
-        }
+        self.rt.spawn(async move {
+            match client.setattr(ino, req).await {
+                Ok(attr) => reply.attr(&Duration::from_secs(1), &to_fuse_attr(attr)),
+                Err(e) => reply.error(fs_error_to_errno(e)),
+            }
+        });
     }
 
     fn readdir(
@@ -118,30 +120,32 @@ where
         mut reply: ReplyDirectory,
     ) {
         let client = self.client.clone();
-        let result = self.rt.block_on(async move { client.readdir(ino).await });
-        match result {
-            Ok(entries) => {
-                // Skip entries before offset (FUSE pagination).
-                for (i, entry) in entries.into_iter().enumerate().skip(offset as usize) {
-                    let kind = dir_entry_kind_to_file_type(entry.kind);
-                    // reply.add returns true when the buffer is full.
-                    if reply.add(entry.inode, (i + 1) as i64, kind, entry.name) {
-                        break;
+        self.rt.spawn(async move {
+            match client.readdir(ino).await {
+                Ok(entries) => {
+                    // Skip entries before offset (FUSE pagination).
+                    for (i, entry) in entries.into_iter().enumerate().skip(offset as usize) {
+                        let kind = dir_entry_kind_to_file_type(entry.kind);
+                        // reply.add returns true when the buffer is full.
+                        if reply.add(entry.inode, (i + 1) as i64, kind, entry.name) {
+                            break;
+                        }
                     }
+                    reply.ok();
                 }
-                reply.ok();
+                Err(e) => reply.error(fs_error_to_errno(e)),
             }
-            Err(e) => reply.error(fs_error_to_errno(e)),
-        }
+        });
     }
 
     fn open(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
         let client = self.client.clone();
-        let result = self.rt.block_on(async move { client.open(ino, flags as u32).await });
-        match result {
-            Ok(handle) => reply.opened(handle, 0),
-            Err(e) => reply.error(fs_error_to_errno(e)),
-        }
+        self.rt.spawn(async move {
+            match client.open(ino, flags as u32).await {
+                Ok(handle) => reply.opened(handle, 0),
+                Err(e) => reply.error(fs_error_to_errno(e)),
+            }
+        });
     }
 
     fn read(
@@ -156,13 +160,12 @@ where
         reply: ReplyData,
     ) {
         let client = self.client.clone();
-        let result = self.rt.block_on(async move {
-            client.read(ino, offset as u64, size).await
+        self.rt.spawn(async move {
+            match client.read(ino, offset as u64, size).await {
+                Ok(data) => reply.data(&data),
+                Err(e) => reply.error(fs_error_to_errno(e)),
+            }
         });
-        match result {
-            Ok(data) => reply.data(&data),
-            Err(e) => reply.error(fs_error_to_errno(e)),
-        }
     }
 
     fn write(
@@ -179,13 +182,12 @@ where
     ) {
         let client = self.client.clone();
         let data = data.to_vec();
-        let result = self.rt.block_on(async move {
-            client.write(ino, offset as u64, &data, flags as u32).await
+        self.rt.spawn(async move {
+            match client.write(ino, offset as u64, &data, flags as u32).await {
+                Ok(written) => reply.written(written),
+                Err(e) => reply.error(fs_error_to_errno(e)),
+            }
         });
-        match result {
-            Ok(written) => reply.written(written),
-            Err(e) => reply.error(fs_error_to_errno(e)),
-        }
     }
 
     fn flush(
@@ -197,11 +199,12 @@ where
         reply: ReplyEmpty,
     ) {
         let client = self.client.clone();
-        let result = self.rt.block_on(async move { client.flush(ino).await });
-        match result {
-            Ok(()) => reply.ok(),
-            Err(e) => reply.error(fs_error_to_errno(e)),
-        }
+        self.rt.spawn(async move {
+            match client.flush(ino).await {
+                Ok(()) => reply.ok(),
+                Err(e) => reply.error(fs_error_to_errno(e)),
+            }
+        });
     }
 
     fn fsync(
@@ -213,12 +216,12 @@ where
         reply: ReplyEmpty,
     ) {
         let client = self.client.clone();
-        let result =
-            self.rt.block_on(async move { client.fsync(ino, datasync).await });
-        match result {
-            Ok(()) => reply.ok(),
-            Err(e) => reply.error(fs_error_to_errno(e)),
-        }
+        self.rt.spawn(async move {
+            match client.fsync(ino, datasync).await {
+                Ok(()) => reply.ok(),
+                Err(e) => reply.error(fs_error_to_errno(e)),
+            }
+        });
     }
 
     fn create(
@@ -237,17 +240,16 @@ where
         // Apply umask: strip bits that umask disallows, keep file-type bits.
         let effective_mode = mode & !umask & 0o7777;
         let client = self.client.clone();
-        let result = self.rt.block_on(async move {
-            client.create(parent, &name, effective_mode, uid, gid).await
-        });
-        match result {
-            Ok(attr) => {
-                let ino = attr.inode;
-                let fuse_attr = to_fuse_attr(attr);
-                reply.created(&Duration::from_secs(1), &fuse_attr, 0, ino, 0);
+        self.rt.spawn(async move {
+            match client.create(parent, &name, effective_mode, uid, gid).await {
+                Ok(attr) => {
+                    let ino = attr.inode;
+                    let fuse_attr = to_fuse_attr(attr);
+                    reply.created(&Duration::from_secs(1), &fuse_attr, 0, ino, 0);
+                }
+                Err(e) => reply.error(fs_error_to_errno(e)),
             }
-            Err(e) => reply.error(fs_error_to_errno(e)),
-        }
+        });
     }
 
     fn mknod(
@@ -273,13 +275,12 @@ where
         let gid = req.gid();
         let effective_mode = mode & !umask & 0o7777;
         let client = self.client.clone();
-        let result = self.rt.block_on(async move {
-            client.create(parent, &name, effective_mode, uid, gid).await
+        self.rt.spawn(async move {
+            match client.create(parent, &name, effective_mode, uid, gid).await {
+                Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
+                Err(e) => reply.error(fs_error_to_errno(e)),
+            }
         });
-        match result {
-            Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
-            Err(e) => reply.error(fs_error_to_errno(e)),
-        }
     }
 
     fn fallocate(
@@ -318,34 +319,33 @@ where
 
         // Mode 0: preallocate space. Extend file size if needed.
         let new_end = (offset + length) as u64;
-        let result = self.rt.block_on(async move {
-            let attr = client.getattr(ino).await?;
-            if new_end > attr.size {
-                let req = rucksfs_core::SetAttrRequest {
-                    size: Some(new_end),
-                    ..Default::default()
-                };
-                client.setattr(ino, req).await?;
+        self.rt.spawn(async move {
+            let result = async {
+                let attr = client.getattr(ino).await?;
+                if new_end > attr.size {
+                    let req = rucksfs_core::SetAttrRequest {
+                        size: Some(new_end),
+                        ..Default::default()
+                    };
+                    client.setattr(ino, req).await?;
+                }
+                Ok::<(), rucksfs_core::FsError>(())
+            }.await;
+            match result {
+                Ok(()) => reply.ok(),
+                Err(e) => reply.error(fs_error_to_errno(e)),
             }
-            Ok::<(), rucksfs_core::FsError>(())
         });
-        match result {
-            Ok(()) => reply.ok(),
-            Err(e) => reply.error(fs_error_to_errno(e)),
-        }
     }
 
     fn access(&mut self, _req: &Request<'_>, ino: u64, _mask: i32, reply: ReplyEmpty) {
         let client = self.client.clone();
-        let result = self.rt.block_on(async move {
-            // With default_permissions, the kernel already checks permissions.
-            // We just verify the inode exists.
-            client.getattr(ino).await
+        self.rt.spawn(async move {
+            match client.getattr(ino).await {
+                Ok(_) => reply.ok(),
+                Err(e) => reply.error(fs_error_to_errno(e)),
+            }
         });
-        match result {
-            Ok(_) => reply.ok(),
-            Err(e) => reply.error(fs_error_to_errno(e)),
-        }
     }
 
     fn mkdir(
@@ -363,33 +363,34 @@ where
         // Apply umask: strip bits that umask disallows, keep file-type bits.
         let effective_mode = mode & !umask & 0o7777;
         let client = self.client.clone();
-        let result = self.rt.block_on(async move {
-            client.mkdir(parent, &name, effective_mode, uid, gid).await
+        self.rt.spawn(async move {
+            match client.mkdir(parent, &name, effective_mode, uid, gid).await {
+                Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
+                Err(e) => reply.error(fs_error_to_errno(e)),
+            }
         });
-        match result {
-            Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
-            Err(e) => reply.error(fs_error_to_errno(e)),
-        }
     }
 
     fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         let name = name.to_string_lossy().to_string();
         let client = self.client.clone();
-        let result = self.rt.block_on(async move { client.unlink(parent, &name).await });
-        match result {
-            Ok(()) => reply.ok(),
-            Err(e) => reply.error(fs_error_to_errno(e)),
-        }
+        self.rt.spawn(async move {
+            match client.unlink(parent, &name).await {
+                Ok(()) => reply.ok(),
+                Err(e) => reply.error(fs_error_to_errno(e)),
+            }
+        });
     }
 
     fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         let name = name.to_string_lossy().to_string();
         let client = self.client.clone();
-        let result = self.rt.block_on(async move { client.rmdir(parent, &name).await });
-        match result {
-            Ok(()) => reply.ok(),
-            Err(e) => reply.error(fs_error_to_errno(e)),
-        }
+        self.rt.spawn(async move {
+            match client.rmdir(parent, &name).await {
+                Ok(()) => reply.ok(),
+                Err(e) => reply.error(fs_error_to_errno(e)),
+            }
+        });
     }
 
     fn rename(
@@ -405,13 +406,12 @@ where
         let name = name.to_string_lossy().to_string();
         let newname = newname.to_string_lossy().to_string();
         let client = self.client.clone();
-        let result = self.rt.block_on(async move {
-            client.rename(parent, &name, newparent, &newname).await
+        self.rt.spawn(async move {
+            match client.rename(parent, &name, newparent, &newname).await {
+                Ok(()) => reply.ok(),
+                Err(e) => reply.error(fs_error_to_errno(e)),
+            }
         });
-        match result {
-            Ok(()) => reply.ok(),
-            Err(e) => reply.error(fs_error_to_errno(e)),
-        }
     }
 
     fn link(
@@ -424,13 +424,12 @@ where
     ) {
         let newname = newname.to_string_lossy().to_string();
         let client = self.client.clone();
-        let result = self.rt.block_on(async move {
-            client.link(newparent, &newname, ino).await
+        self.rt.spawn(async move {
+            match client.link(newparent, &newname, ino).await {
+                Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
+                Err(e) => reply.error(fs_error_to_errno(e)),
+            }
         });
-        match result {
-            Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
-            Err(e) => reply.error(fs_error_to_errno(e)),
-        }
     }
 
     fn symlink(
@@ -446,22 +445,22 @@ where
         let uid = req.uid();
         let gid = req.gid();
         let client = self.client.clone();
-        let result = self.rt.block_on(async move {
-            client.symlink(parent, &link_name, &target, uid, gid).await
+        self.rt.spawn(async move {
+            match client.symlink(parent, &link_name, &target, uid, gid).await {
+                Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
+                Err(e) => reply.error(fs_error_to_errno(e)),
+            }
         });
-        match result {
-            Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
-            Err(e) => reply.error(fs_error_to_errno(e)),
-        }
     }
 
     fn readlink(&mut self, _req: &Request<'_>, ino: u64, reply: fuser::ReplyData) {
         let client = self.client.clone();
-        let result = self.rt.block_on(async move { client.readlink(ino).await });
-        match result {
-            Ok(target) => reply.data(target.as_bytes()),
-            Err(e) => reply.error(fs_error_to_errno(e)),
-        }
+        self.rt.spawn(async move {
+            match client.readlink(ino).await {
+                Ok(target) => reply.data(target.as_bytes()),
+                Err(e) => reply.error(fs_error_to_errno(e)),
+            }
+        });
     }
 
     fn release(
@@ -475,29 +474,31 @@ where
         reply: ReplyEmpty,
     ) {
         let client = self.client.clone();
-        let result = self.rt.block_on(async move { client.release(ino).await });
-        match result {
-            Ok(()) => reply.ok(),
-            Err(e) => reply.error(fs_error_to_errno(e)),
-        }
+        self.rt.spawn(async move {
+            match client.release(ino).await {
+                Ok(()) => reply.ok(),
+                Err(e) => reply.error(fs_error_to_errno(e)),
+            }
+        });
     }
 
     fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
         let client = self.client.clone();
-        let result = self.rt.block_on(async move { client.statfs(1).await });
-        match result {
-            Ok(st) => reply.statfs(
-                st.blocks,
-                st.bfree,
-                st.bavail,
-                st.files,
-                st.ffree,
-                st.bsize,
-                st.namelen,
-                st.bsize,
-            ),
-            Err(e) => reply.error(fs_error_to_errno(e)),
-        }
+        self.rt.spawn(async move {
+            match client.statfs(1).await {
+                Ok(st) => reply.statfs(
+                    st.blocks,
+                    st.bfree,
+                    st.bavail,
+                    st.files,
+                    st.ffree,
+                    st.bsize,
+                    st.namelen,
+                    st.bsize,
+                ),
+                Err(e) => reply.error(fs_error_to_errno(e)),
+            }
+        });
     }
 }
 
