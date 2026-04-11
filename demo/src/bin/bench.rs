@@ -105,12 +105,14 @@ async fn bench_create(
     meta: Arc<dyn MetadataOps>,
     n_threads: usize,
     ops_per_thread: u64,
+    run_id: u64,
 ) -> BenchResult {
     const ROOT: u64 = 1;
 
     // Create a unique parent directory for this run to avoid conflicts.
+    let dir_name = format!("bench_create_{}t_r{}", n_threads, run_id);
     let run_dir = meta
-        .mkdir(ROOT, &format!("bench_create_{}", n_threads), 0o755, 0, 0)
+        .mkdir(ROOT, &dir_name, 0o755, 0, 0)
         .await
         .expect("failed to create bench dir");
     let parent = run_dir.inode;
@@ -319,15 +321,16 @@ async fn main() {
     // --- Create benchmark ---
     println!("=== CREATE ===");
     print_header();
-    for &nt in &thread_counts {
-        let r = bench_create(meta.clone(), nt, cli.ops).await;
+    for (i, &nt) in thread_counts.iter().enumerate() {
+        let r = bench_create(meta.clone(), nt, cli.ops, i as u64).await;
         print_result(&r);
     }
     println!();
 
     // Collect inodes for stat benchmark.
+    let stat_dir_name = format!("bench_stat_prep_{}", std::process::id());
     let stat_dir = meta
-        .mkdir(1, "bench_stat_prep", 0o755, 0, 0)
+        .mkdir(1, &stat_dir_name, 0o755, 0, 0)
         .await
         .expect("mkdir for stat prep");
     let mut stat_inodes = Vec::new();
@@ -351,21 +354,39 @@ async fn main() {
     // --- Unlink benchmark ---
     println!("=== UNLINK ===");
     print_header();
-    for &nt in &thread_counts {
-        let dir_name = format!("bench_unlink_{}", nt);
+    for (i, &nt) in thread_counts.iter().enumerate() {
+        let dir_name = format!("bench_unlink_{}t_r{}", nt, i);
         let unlink_dir = meta
             .mkdir(1, &dir_name, 0o755, 0, 0)
             .await
             .expect("mkdir for unlink");
         let total = nt as u64 * cli.ops;
-        let mut names = Vec::with_capacity(total as usize);
-        for i in 0..total {
-            let name = format!("u_{}", i);
-            meta.create(unlink_dir.inode, &name, 0o644, 0, 0)
-                .await
-                .expect("create for unlink");
-            names.push(name);
+
+        // Parallel prep: create files concurrently.
+        let mut prep_handles = Vec::new();
+        let chunk_size = ((total as usize) + nt - 1) / nt;
+        for tid in 0..nt {
+            let meta = meta.clone();
+            let parent = unlink_dir.inode;
+            let start_idx = tid * chunk_size;
+            let end_idx = ((tid + 1) * chunk_size).min(total as usize);
+            prep_handles.push(tokio::spawn(async move {
+                let mut names = Vec::new();
+                for idx in start_idx..end_idx {
+                    let name = format!("u_{}", idx);
+                    meta.create(parent, &name, 0o644, 0, 0)
+                        .await
+                        .expect("create for unlink prep");
+                    names.push(name);
+                }
+                names
+            }));
         }
+        let mut names = Vec::with_capacity(total as usize);
+        for h in prep_handles {
+            names.extend(h.await.expect("prep panicked"));
+        }
+
         let r = bench_unlink(meta.clone(), unlink_dir.inode, names, nt).await;
         print_result(&r);
     }
