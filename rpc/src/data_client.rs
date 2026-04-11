@@ -1,8 +1,6 @@
 //! Data RPC client — implements `DataOps` over gRPC.
 
 use async_trait::async_trait;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use tonic::transport::Channel;
 use tonic::Request;
 
@@ -14,9 +12,14 @@ use crate::data_proto::{
 use crate::tls::ClientTlsConfig as TlsConfig;
 
 /// gRPC client that implements `DataOps` for remote DataServer.
+/// 
+/// The client wraps DataServiceClient directly without additional Mutex wrapping.
+/// DataServiceClient is already fully thread-safe and can be cloned and shared
+/// across async tasks. The underlying tonic Channel supports HTTP/2 multiplexing,
+/// allowing concurrent requests without serialization.
 #[derive(Clone)]
 pub struct DataRpcClient {
-    client: Arc<Mutex<DataServiceClient<Channel>>>,
+    client: DataServiceClient<Channel>,
 }
 
 impl DataRpcClient {
@@ -29,7 +32,7 @@ impl DataRpcClient {
             .map_err(|e| FsError::Io(e.to_string()))?;
 
         Ok(Self {
-            client: Arc::new(Mutex::new(DataServiceClient::new(channel))),
+            client: DataServiceClient::new(channel),
         })
     }
 
@@ -62,7 +65,7 @@ impl DataRpcClient {
             .map_err(|e| FsError::Io(e.to_string()))?;
 
         Ok(Self {
-            client: Arc::new(Mutex::new(DataServiceClient::new(channel))),
+            client: DataServiceClient::new(channel),
         })
     }
 }
@@ -86,8 +89,8 @@ impl DataOps for DataRpcClient {
             offset,
             size,
         });
-        let mut client = self.client.lock().await;
-        client
+        self.client
+            .clone()
             .read_data(req)
             .await
             .map(|r| r.into_inner().data)
@@ -100,8 +103,8 @@ impl DataOps for DataRpcClient {
             offset,
             data: data.to_vec(),
         });
-        let mut client = self.client.lock().await;
-        client
+        self.client
+            .clone()
             .write_data(req)
             .await
             .map(|r| r.into_inner().bytes_written)
@@ -110,20 +113,28 @@ impl DataOps for DataRpcClient {
 
     async fn truncate(&self, inode: Inode, size: u64) -> FsResult<()> {
         let req = Request::new(TruncateRequest { inode, size });
-        let mut client = self.client.lock().await;
-        client.truncate(req).await.map(|_| ()).map_err(map_error)
+        self.client
+            .clone()
+            .truncate(req)
+            .await
+            .map(|_| ())
+            .map_err(map_error)
     }
 
     async fn flush(&self, inode: Inode) -> FsResult<()> {
         let req = Request::new(FlushRequest { inode });
-        let mut client = self.client.lock().await;
-        client.flush(req).await.map(|_| ()).map_err(map_error)
+        self.client
+            .clone()
+            .flush(req)
+            .await
+            .map(|_| ())
+            .map_err(map_error)
     }
 
     async fn delete_data(&self, inode: Inode) -> FsResult<()> {
         let req = Request::new(DeleteDataRequest { inode });
-        let mut client = self.client.lock().await;
-        client
+        self.client
+            .clone()
             .delete_data(req)
             .await
             .map(|_| ())

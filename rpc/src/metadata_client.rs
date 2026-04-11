@@ -1,8 +1,6 @@
 //! Metadata RPC client — implements `MetadataOps` over gRPC.
 
 use async_trait::async_trait;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use tonic::transport::Channel;
 use tonic::Request;
 
@@ -20,9 +18,14 @@ use crate::metadata_proto::{
 use crate::tls::ClientTlsConfig as TlsConfig;
 
 /// gRPC client that implements `MetadataOps` for remote MetadataServer.
+/// 
+/// The client wraps MetadataServiceClient directly without additional Mutex wrapping.
+/// MetadataServiceClient is already fully thread-safe and can be cloned and shared
+/// across async tasks. The underlying tonic Channel supports HTTP/2 multiplexing,
+/// allowing concurrent requests without serialization.
 #[derive(Clone)]
 pub struct MetadataRpcClient {
-    client: Arc<Mutex<MetadataServiceClient<Channel>>>,
+    client: MetadataServiceClient<Channel>,
 }
 
 impl MetadataRpcClient {
@@ -35,7 +38,7 @@ impl MetadataRpcClient {
             .map_err(|e| FsError::Io(e.to_string()))?;
 
         Ok(Self {
-            client: Arc::new(Mutex::new(MetadataServiceClient::new(channel))),
+            client: MetadataServiceClient::new(channel),
         })
     }
 
@@ -68,7 +71,7 @@ impl MetadataRpcClient {
             .map_err(|e| FsError::Io(e.to_string()))?;
 
         Ok(Self {
-            client: Arc::new(Mutex::new(MetadataServiceClient::new(channel))),
+            client: MetadataServiceClient::new(channel),
         })
     }
 }
@@ -121,8 +124,8 @@ impl MetadataOps for MetadataRpcClient {
             parent,
             name: name.to_string(),
         });
-        let mut client = self.client.lock().await;
-        client
+        self.client
+            .clone()
             .lookup(req)
             .await
             .map(|r| from_proto_attr(r.into_inner()))
@@ -131,8 +134,8 @@ impl MetadataOps for MetadataRpcClient {
 
     async fn getattr(&self, inode: Inode) -> FsResult<FileAttr> {
         let req = Request::new(GetattrRequest { inode });
-        let mut client = self.client.lock().await;
-        client
+        self.client
+            .clone()
             .getattr(req)
             .await
             .map(|r| from_proto_attr(r.into_inner()))
@@ -141,8 +144,12 @@ impl MetadataOps for MetadataRpcClient {
 
     async fn readdir(&self, inode: Inode) -> FsResult<Vec<DirEntry>> {
         let req = Request::new(ReaddirRequest { inode });
-        let mut client = self.client.lock().await;
-        let resp = client.readdir(req).await.map_err(map_error)?.into_inner();
+        let resp = self.client
+            .clone()
+            .readdir(req)
+            .await
+            .map_err(map_error)?
+            .into_inner();
         Ok(resp
             .entries
             .into_iter()
@@ -169,8 +176,8 @@ impl MetadataOps for MetadataRpcClient {
             uid,
             gid,
         });
-        let mut client = self.client.lock().await;
-        client
+        self.client
+            .clone()
             .create(req)
             .await
             .map(|r| from_proto_attr(r.into_inner()))
@@ -192,8 +199,8 @@ impl MetadataOps for MetadataRpcClient {
             uid,
             gid,
         });
-        let mut client = self.client.lock().await;
-        client
+        self.client
+            .clone()
             .mkdir(req)
             .await
             .map(|r| from_proto_attr(r.into_inner()))
@@ -205,8 +212,12 @@ impl MetadataOps for MetadataRpcClient {
             parent,
             name: name.to_string(),
         });
-        let mut client = self.client.lock().await;
-        let resp = client.unlink(req).await.map_err(map_error)?.into_inner();
+        let resp = self.client
+            .clone()
+            .unlink(req)
+            .await
+            .map_err(map_error)?
+            .into_inner();
         Ok(UnlinkResponse {
             purged_inodes: resp.purged_inodes,
         })
@@ -217,8 +228,7 @@ impl MetadataOps for MetadataRpcClient {
             parent,
             name: name.to_string(),
         });
-        let mut client = self.client.lock().await;
-        client.rmdir(req).await.map(|_| ()).map_err(map_error)
+        self.client.clone().rmdir(req).await.map(|_| ()).map_err(map_error)
     }
 
     async fn rename(
@@ -234,8 +244,12 @@ impl MetadataOps for MetadataRpcClient {
             new_parent,
             new_name: new_name.to_string(),
         });
-        let mut client = self.client.lock().await;
-        let resp = client.rename(req).await.map_err(map_error)?.into_inner();
+        let resp = self.client
+            .clone()
+            .rename(req)
+            .await
+            .map_err(map_error)?
+            .into_inner();
         Ok(RenameResponse {
             purged_inodes: resp.purged_inodes,
         })
@@ -251,8 +265,12 @@ impl MetadataOps for MetadataRpcClient {
             atime: req.atime,
             mtime: req.mtime,
         });
-        let mut client = self.client.lock().await;
-        let resp = client.setattr(proto_req).await.map_err(map_error)?.into_inner();
+        let resp = self.client
+            .clone()
+            .setattr(proto_req)
+            .await
+            .map_err(map_error)?
+            .into_inner();
         let attr = resp
             .attr
             .map(from_proto_attr)
@@ -265,8 +283,8 @@ impl MetadataOps for MetadataRpcClient {
 
     async fn statfs(&self, inode: Inode) -> FsResult<StatFs> {
         let req = Request::new(StatfsRequest { inode });
-        let mut client = self.client.lock().await;
-        client
+        self.client
+            .clone()
             .statfs(req)
             .await
             .map(|r| from_proto_statfs(r.into_inner()))
@@ -275,8 +293,12 @@ impl MetadataOps for MetadataRpcClient {
 
     async fn open(&self, inode: Inode, flags: u32) -> FsResult<OpenResponse> {
         let req = Request::new(OpenRequest { inode, flags });
-        let mut client = self.client.lock().await;
-        let resp = client.open(req).await.map_err(map_error)?.into_inner();
+        let resp = self.client
+            .clone()
+            .open(req)
+            .await
+            .map_err(map_error)?
+            .into_inner();
         let data_location = resp
             .data_location
             .map(|dl| DataLocation {
@@ -300,8 +322,8 @@ impl MetadataOps for MetadataRpcClient {
             new_size,
             mtime,
         });
-        let mut client = self.client.lock().await;
-        client
+        self.client
+            .clone()
             .report_write(req)
             .await
             .map(|_| ())
@@ -319,8 +341,8 @@ impl MetadataOps for MetadataRpcClient {
             name: name.to_string(),
             target_inode,
         });
-        let mut client = self.client.lock().await;
-        client
+        self.client
+            .clone()
             .link(req)
             .await
             .map(|r| from_proto_attr(r.into_inner()))
@@ -342,8 +364,8 @@ impl MetadataOps for MetadataRpcClient {
             uid,
             gid,
         });
-        let mut client = self.client.lock().await;
-        client
+        self.client
+            .clone()
             .symlink(req)
             .await
             .map(|r| from_proto_attr(r.into_inner()))
@@ -352,8 +374,8 @@ impl MetadataOps for MetadataRpcClient {
 
     async fn readlink(&self, inode: Inode) -> FsResult<String> {
         let req = Request::new(ReadlinkRequest { inode });
-        let mut client = self.client.lock().await;
-        client
+        self.client
+            .clone()
             .readlink(req)
             .await
             .map(|r| r.into_inner().target)
@@ -362,8 +384,12 @@ impl MetadataOps for MetadataRpcClient {
 
     async fn release(&self, inode: Inode) -> FsResult<ReleaseResponse> {
         let req = Request::new(ReleaseRequest { inode });
-        let mut client = self.client.lock().await;
-        let resp = client.release(req).await.map_err(map_error)?.into_inner();
+        let resp = self.client
+            .clone()
+            .release(req)
+            .await
+            .map_err(map_error)?
+            .into_inner();
         Ok(ReleaseResponse {
             purged_inodes: resp.purged_inodes,
         })
