@@ -50,6 +50,10 @@ mkdir -p "$DATA_MNT/mysql"
 rsync -av /var/lib/mysql/ "$DATA_MNT/mysql/"
 chown -R mysql:mysql "$DATA_MNT/mysql"
 
+# Disable default localhost-only binding first
+sed -i 's/^bind-address.*127.0.0.1/# bind-address = 127.0.0.1/' /etc/mysql/mysql.conf.d/mysqld.cnf
+sed -i 's/^mysqlx-bind-address.*127.0.0.1/# mysqlx-bind-address = 127.0.0.1/' /etc/mysql/mysql.conf.d/mysqld.cnf
+
 # Configure MySQL
 cat > /etc/mysql/mysql.conf.d/bench.cnf <<'MYCNF'
 [mysqld]
