@@ -50,7 +50,7 @@ variable "instance_type_meta" {
 variable "instance_type_data" {
   description = "CVM instance type for data server (Machine C)"
   type        = string
-  default     = "SA3.XLARGE8" # 4C8G
+  default     = "S6.LARGE8" # 4C8G
 }
 
 # ---------- Disk sizes (GB) ----------
@@ -82,15 +82,29 @@ variable "image_id" {
 }
 
 # ---------- Network ----------
+# Set existing_vpc_id + existing_subnet_id to reuse existing VPC (e.g. when VPC quota is full).
+# Leave empty to create new VPC/subnet.
+
+variable "existing_vpc_id" {
+  description = "Existing VPC ID to reuse. Leave empty to create a new VPC."
+  type        = string
+  default     = ""
+}
+
+variable "existing_subnet_id" {
+  description = "Existing subnet ID to reuse. Leave empty to create a new subnet."
+  type        = string
+  default     = ""
+}
 
 variable "vpc_cidr" {
-  description = "VPC CIDR block"
+  description = "VPC CIDR block (only used when creating new VPC)"
   type        = string
   default     = "10.0.0.0/16"
 }
 
 variable "subnet_cidr" {
-  description = "Subnet CIDR block"
+  description = "Subnet CIDR block (only used when creating new subnet)"
   type        = string
   default     = "10.0.1.0/24"
 }

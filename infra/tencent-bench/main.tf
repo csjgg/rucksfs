@@ -16,17 +16,31 @@ provider "tencentcloud" {
 }
 
 # ============================================================
-# VPC
+# Locals — resolve VPC/subnet ID (existing or newly created)
+# ============================================================
+
+locals {
+  use_existing_vpc    = var.existing_vpc_id != ""
+  use_existing_subnet = var.existing_subnet_id != ""
+
+  vpc_id    = local.use_existing_vpc ? var.existing_vpc_id : tencentcloud_vpc.bench[0].id
+  subnet_id = local.use_existing_subnet ? var.existing_subnet_id : tencentcloud_subnet.bench[0].id
+}
+
+# ============================================================
+# VPC (only created when not reusing existing)
 # ============================================================
 
 resource "tencentcloud_vpc" "bench" {
+  count      = local.use_existing_vpc ? 0 : 1
   name       = "${var.name_prefix}-vpc"
   cidr_block = var.vpc_cidr
 }
 
 resource "tencentcloud_subnet" "bench" {
+  count             = local.use_existing_subnet ? 0 : 1
   name              = "${var.name_prefix}-subnet"
-  vpc_id            = tencentcloud_vpc.bench.id
+  vpc_id            = local.vpc_id
   cidr_block        = var.subnet_cidr
   availability_zone = var.availability_zone
 }
@@ -41,21 +55,38 @@ resource "tencentcloud_security_group" "bench" {
   project_id  = var.project_id
 }
 
-# Allow all traffic within the VPC CIDR (inbound)
-resource "tencentcloud_security_group_lite_rule" "bench" {
+resource "tencentcloud_security_group_rule_set" "bench" {
   security_group_id = tencentcloud_security_group.bench.id
 
-  ingress = [
-    # Internal: allow all from VPC
-    "ACCEPT#${var.vpc_cidr}#ALL#ALL",
-    # External: SSH only
-    "ACCEPT#0.0.0.0/0#22#TCP",
-    # ICMP for ping
-    "ACCEPT#0.0.0.0/0#ALL#ICMP",
-  ]
+  ingress {
+    action      = "ACCEPT"
+    cidr_block  = var.vpc_cidr
+    protocol    = "ALL"
+    port        = "ALL"
+    description = "Allow all from VPC"
+  }
 
-  egress = [
-    # Allow all outbound
-    "ACCEPT#0.0.0.0/0#ALL#ALL",
-  ]
+  ingress {
+    action      = "ACCEPT"
+    cidr_block  = "0.0.0.0/0"
+    protocol    = "TCP"
+    port        = "22"
+    description = "SSH"
+  }
+
+  ingress {
+    action      = "ACCEPT"
+    cidr_block  = "0.0.0.0/0"
+    protocol    = "ICMP"
+    port        = "ALL"
+    description = "ICMP ping"
+  }
+
+  egress {
+    action      = "ACCEPT"
+    cidr_block  = "0.0.0.0/0"
+    protocol    = "ALL"
+    port        = "ALL"
+    description = "Allow all outbound"
+  }
 }

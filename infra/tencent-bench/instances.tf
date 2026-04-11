@@ -9,8 +9,8 @@ resource "tencentcloud_instance" "client" {
   instance_type              = var.instance_type_client
   instance_charge_type       = "POSTPAID_BY_HOUR"
   project_id                 = var.project_id
-  vpc_id                     = tencentcloud_vpc.bench.id
-  subnet_id                  = tencentcloud_subnet.bench.id
+  vpc_id                     = local.vpc_id
+  subnet_id                  = local.subnet_id
   allocate_public_ip         = true
   internet_max_bandwidth_out = 10
   orderly_security_groups    = [tencentcloud_security_group.bench.id]
@@ -27,7 +27,8 @@ resource "tencentcloud_instance" "client" {
   user_data = base64encode(file("${path.module}/scripts/init-client.sh"))
 
   tags = {
-    project = "rucksfs-bench"
+    billing = "shunjiecui"
+    app     = "rucksfs-bench"
     role    = "client"
   }
 }
@@ -43,8 +44,8 @@ resource "tencentcloud_instance" "meta" {
   instance_type              = var.instance_type_meta
   instance_charge_type       = "POSTPAID_BY_HOUR"
   project_id                 = var.project_id
-  vpc_id                     = tencentcloud_vpc.bench.id
-  subnet_id                  = tencentcloud_subnet.bench.id
+  vpc_id                     = local.vpc_id
+  subnet_id                  = local.subnet_id
   allocate_public_ip         = true
   internet_max_bandwidth_out = 10
   orderly_security_groups    = [tencentcloud_security_group.bench.id]
@@ -61,7 +62,8 @@ resource "tencentcloud_instance" "meta" {
   user_data = base64encode(file("${path.module}/scripts/init-meta.sh"))
 
   tags = {
-    project = "rucksfs-bench"
+    billing = "shunjiecui"
+    app     = "rucksfs-bench"
     role    = "metadata"
   }
 }
@@ -77,8 +79,8 @@ resource "tencentcloud_instance" "data" {
   instance_type              = var.instance_type_data
   instance_charge_type       = "POSTPAID_BY_HOUR"
   project_id                 = var.project_id
-  vpc_id                     = tencentcloud_vpc.bench.id
-  subnet_id                  = tencentcloud_subnet.bench.id
+  vpc_id                     = local.vpc_id
+  subnet_id                  = local.subnet_id
   allocate_public_ip         = true
   internet_max_bandwidth_out = 10
   orderly_security_groups    = [tencentcloud_security_group.bench.id]
@@ -95,7 +97,8 @@ resource "tencentcloud_instance" "data" {
   user_data = base64encode(file("${path.module}/scripts/init-data.sh"))
 
   tags = {
-    project = "rucksfs-bench"
+    billing = "shunjiecui"
+    app     = "rucksfs-bench"
     role    = "data"
   }
 }
