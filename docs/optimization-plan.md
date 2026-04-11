@@ -1,350 +1,208 @@
-# RucksFS Iterative Optimization Plan
+# RucksFS Iterative Optimization Plan v2
 
-## Methodology
+## Core Philosophy: Measure First, Optimize Second
 
-Every optimization follows a strict closed loop:
+之前的 mdtest 测的是 FUSE 全链路，混杂了 FUSE 开销。**无法区分瓶颈在哪一层。**
 
-```
-1. Baseline measurement (before)
-2. Code change (minimal, isolated)
-3. Test measurement (after)
-4. Compare -> keep or revert
-```
+新策略：**先写一个绕过 FUSE 的 microbench 工具**，直接调用各层 API，分层压测，定位真正的瓶颈后再针对性优化。
 
-All measurements use the same mdtest command on the same Tencent Cloud testbed (3 machines in HK).
+## Phase 0: Microbench Tool (最高优先级)
 
-**Baseline command** (single-process):
-```bash
-mdtest -C -T -r -n 3000 -z 0 -d /mnt/rucksfs-dist/bench
-```
+### 0.1 设计
 
-**Scaling command** (multi-process):
-```bash
-mpirun -np {1,2,4} mdtest -C -T -r -n 3000 -z 0 -d /mnt/rucksfs-dist/bench
-```
+一个 Rust binary `rucksfs-bench`，直接调用 trait 接口，跳过 FUSE 层。
 
-## Current Baseline
-
-| Metric | rucksfs-dist | NFS+ext4 | JuiceFS-Redis | Target |
-|--------|-------------|----------|---------------|--------|
-| Create (np=1) | 639 | 774 | 1,237 | >1,500 |
-| Stat (np=1) | 6,387 | 25,992 | 7,453 | >15,000 |
-| Remove (np=1) | 889 | 869 | 1,148 | >1,500 |
-| Create scaling (np=1→4) | 636→697 (1.1x) | 794→2,171 (2.7x) | 1,227→3,978 (3.2x) | >2.5x |
-
-## Problem Diagnosis
-
-### Why scaling is flat (1.1x at np=4)
-
-**Root cause**: `fuser::mount2()` runs a **single-threaded** event loop.
+**三层测试模式：**
 
 ```
-Kernel FUSE queue -> [fuser reads 1 request] -> [block_on(gRPC call)] -> [reply] -> [read next]
-                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                     Only 1 request in flight at any time
+┌─────────────────────────────────────────────────────────┐
+│ Layer 1: 本地元数据 (MetadataServer 直接调用)            │
+│   - 直接构造 MetadataServer，操作本地 RocksDB            │
+│   - 测出元数据引擎的裸性能天花板                          │
+│                                                         │
+│ Layer 2: gRPC 元数据 (MetadataRpcClient 远程调用)        │
+│   - 通过网络调用远端 MetadataServer                      │
+│   - Layer1 - Layer2 差值 = gRPC + 网络开销                │
+│                                                         │
+│ Layer 3: 完整 VfsOps (VfsCore 远程调用)                  │
+│   - 通过 VfsCore 调用，走完整的元数据+数据协调路径        │
+│   - Layer2 - Layer3 差值 = VfsCore 协调开销               │
+│                                                         │
+│ (对比) FUSE 路径: mdtest 已有数据                        │
+│   - Layer3 vs mdtest 差值 = FUSE 层开销                  │
+└─────────────────────────────────────────────────────────┘
 ```
 
-Even with 4 mdtest processes generating requests concurrently, fuser processes them **one at a time**. The kernel queues them in `/dev/fuse`, but userspace drains them sequentially.
+**测试操作：**
 
-### Why NFS beats us on file create (774 vs 639)
+| 操作 | 方法 | 说明 |
+|------|------|------|
+| create | `create(parent, name, 0o644, 0, 0)` | 文件创建 |
+| stat | `getattr(inode)` | 属性读取 |
+| lookup | `lookup(parent, name)` | 目录查找 |
+| unlink | `unlink(parent, name)` | 文件删除 |
+| mkdir | `mkdir(parent, name, 0o755, 0, 0)` | 目录创建 |
+| readdir | `readdir(parent)` | 目录列举 |
 
-Two factors:
-1. **Write path overhead**: NFS uses ext4 journal write (~1 syscall). RucksFS uses RocksDB LSM write (WAL + memtable insert, heavier).
-2. **Round-trip overhead**: NFS CREATE is 1 RPC. RucksFS create is also 1 gRPC call, but gRPC/HTTP2/protobuf has higher per-message overhead than NFS/RPC/XDR.
+**并发模式：**
+- 线程数: 1, 2, 4, 8, 16
+- 每线程操作数: N (可配置，默认 10000)
+- 使用 tokio 异步任务并发（不是 OS 线程），更贴近真实 gRPC 使用模式
 
-### Cost breakdown for a single `create` operation
-
+**输出格式：**
 ```
-[FUSE dispatch]  ~0.05ms   fuser read from /dev/fuse + parse
-[block_on entry] ~0.01ms   tokio Handle::block_on setup
-[gRPC serialize] ~0.02ms   protobuf encode request (~30 bytes)
-[network RTT]    ~0.20ms   same-VPC TCP round-trip
-[server decode]  ~0.02ms   protobuf decode
-[RocksDB write]  ~0.80ms   atomic WriteBatch (6 ops: inode + dir_entry + parent deltas)
-[gRPC response]  ~0.02ms   protobuf encode response (~65 bytes)
-[network return] ~0.20ms   TCP return trip
-[FUSE reply]     ~0.02ms   write reply to /dev/fuse
-─────────────────────────
-Total            ~1.34ms   → theoretical max ~746 ops/s (close to measured 639)
+=== Layer 1: Local MetadataServer ===
+Op          Threads   Total ops    ops/s      P50(us)  P99(us)
+create      1         10000        52,341     18.2     45.1
+create      4         10000        198,223    19.5     62.3
+create      16        10000        412,105    37.8     125.6
+stat        1         10000        285,000    3.2      8.1
+...
+
+=== Layer 2: gRPC MetadataRpcClient ===
+Op          Threads   Total ops    ops/s      P50(us)  P99(us)
+create      1         10000        3,125      310.5    520.1
+create      4         10000        11,200     345.2    890.3
+...
+
+=== Overhead Analysis ===
+Op          Local       gRPC        FUSE        gRPC overhead   FUSE overhead
+create      52,341      3,125       639         94.0%           79.5%
+stat        285,000     18,200      6,387       93.6%           64.9%
 ```
 
-**Bottleneck rank**: RocksDB write (60%) > Network RTT (30%) > Everything else (10%)
+### 0.2 实现要点
+
+```rust
+// demo/src/bin/bench.rs
+// 直接构造各层实例，不走 FUSE
+
+// Layer 1: 本地
+let storage = RocksStorage::open(temp_dir)?;
+let meta = MetadataServer::new(storage);
+bench_ops(&meta, threads, ops_per_thread).await;
+
+// Layer 2: gRPC (需要远端 metaserver 已启动)
+let meta_client = MetadataRpcClient::connect(meta_addr).await?;
+bench_ops(&meta_client, threads, ops_per_thread).await;
+
+// Layer 3: VfsCore (需要远端 metaserver + dataserver 已启动)
+let vfs = VfsCore::new(meta_client, data_client);
+bench_ops(&vfs, threads, ops_per_thread).await;
+```
+
+关键：`bench_ops` 泛型接受 `MetadataOps`（Layer 1/2）或 `VfsOps`（Layer 3），统一压测逻辑。
+
+### 0.3 预期产出
+
+跑完 microbench 后，我们能精确回答：
+
+1. **元数据层天花板多少？** Layer 1 单线程 create ops/s = RocksDB + 元数据逻辑的极限
+2. **gRPC 加了多少开销？** Layer 1 vs Layer 2 的差值
+3. **FUSE 加了多少开销？** Layer 3 vs mdtest 的差值
+4. **哪个操作是瓶颈？** 比较 create/stat/unlink 的绝对数值
+5. **并发 scaling 如何？** 每层的 1→4→16 线程扩展比
+6. **延迟分布？** P50/P99 能暴露长尾问题（比如 delta compaction 触发时的 spike）
 
 ---
 
-## Optimization Phases
+## Phase 1: 数据驱动优化（基于 Phase 0 结果）
 
-### Phase 1: FUSE Multithreading (P0 — Scaling Fix)
+Phase 0 跑完后，根据数据选择优化方向。以下是**候选优化项**，按 microbench 结果来决定优先级：
 
-**Goal**: Enable concurrent FUSE request processing to unlock scaling.
+### 场景 A: 如果 Layer 1 天花板就不高（< 20K create/s）
 
-**Approach**: Replace `fuser::mount2()` (single-threaded) with `fuser::Session::mount()` + manual multi-threaded dispatch using a thread pool.
+**说明元数据引擎本身是瓶颈**，优化重点在 RocksDB 写路径：
 
-```rust
-// Before (single-threaded):
-fuser::mount2(fs, mountpoint, &options)?;
+| 优化项 | 做法 | 预期效果 |
+|--------|------|---------|
+| WAL sync 关闭 | `write_opts.set_sync(false)` | Create +30-50% |
+| 合并 parent delta | 4 个 delta put → 1 个 compound delta | Create +10-15% |
+| Bloom filter | metadata CF 加 10-bit bloom | Stat/Lookup +20% |
+| WriteBatch 优化 | 减少序列化开销 | Create +5-10% |
+| Memtable 调优 | 增大 write_buffer_size, 多 memtable | Write throughput ↑ |
 
-// After (multi-threaded):
-let session = fuser::Session::new(fs, mountpoint.as_ref(), &options)?;
-let mut unmounter = session.unmount_callable();
+### 场景 B: 如果 Layer 1 很高但 Layer 2 骤降（gRPC 开销 > 80%）
 
-// Ctrl+C handler
-ctrlc::set_handler(move || { unmounter.unmount().ok(); })?;
+**说明网络/序列化是瓶颈**，优化重点在 gRPC 层：
 
-// Run session on a thread pool
-session.join();  // fuser 0.15 Session::run() supports multi-threaded mode
-```
+| 优化项 | 做法 | 预期效果 |
+|--------|------|---------|
+| 多连接 | 多个 gRPC channel round-robin | 并发吞吐 ↑ |
+| 请求批量化 | 攒一批请求，一次 RPC 发送 | 摊薄 per-RPC overhead |
+| 协议优化 | 减少 protobuf 字段 / 用 flatbuffers | 序列化开销 ↓ |
+| TCP 调优 | Nagle off, TCP_NODELAY | 延迟 ↓ |
 
-Actually, the better approach for fuser 0.15: use `fuser::spawn_mount2()` which runs the event loop on a background thread, or implement the `Filesystem` trait with interior mutability and spawn tasks from within callbacks.
+### 场景 C: 如果 Layer 2 不错但 mdtest 骤降（FUSE 开销 > 70%）
 
-**Key insight**: The real fix is to make FUSE callbacks **non-blocking**. Instead of `block_on(async_call)` which blocks the fuser thread, we should:
+**说明 FUSE 层是瓶颈**，优化重点在 FUSE 并发：
 
-1. Option A: Use `fuser::spawn_mount2()` and spawn async tasks from callbacks
-2. Option B: Spawn a thread pool, each thread runs its own `/dev/fuse` read loop (requires raw `/dev/fuse` access)
-3. Option C: Switch to `polyfuse` or `fuse3` crate that supports async natively
+| 优化项 | 做法 | 预期效果 |
+|--------|------|---------|
+| FUSE 多线程 | 多线程 /dev/fuse 读取 | Scaling 1.1x → 3x+ |
+| 属性缓存 | 客户端缓存 getattr | Stat 2-4x |
+| Readdir 预取 | readdir 时预取子项属性 | ls -l ↑ |
 
-**Recommended**: Option A first (lowest risk), then evaluate if Option B is needed.
+### 场景 D: 混合瓶颈
 
-**Expected impact**: Scaling from 1.1x → 2.5x+ at np=4.
-
-**Test plan**:
-```bash
-# Before: measure scaling baseline
-for np in 1 2 4 8; do
-  mpirun -np $np mdtest -C -T -r -n 3000 -z 0 -d /mnt/rucksfs-dist/bench
-done
-
-# After: same commands, compare scaling ratio
-```
+**每层都有优化空间**，按照投入产出比排序执行。
 
 ---
 
-### Phase 2: Latency Instrumentation (P0 — Prerequisite for data-driven optimization)
+## Phase 2: 迭代优化循环
 
-**Goal**: Add fine-grained tracing to quantify time spent in each layer.
+对每个候选优化项，严格执行：
 
-**Approach**: Add `tracing::instrument` spans to measure:
-- FUSE callback entry → exit
-- gRPC call start → response received
-- RocksDB write batch start → commit
-- Network serialization time
-
-```rust
-// In MetadataRpcClient::create():
-#[tracing::instrument(skip(self), fields(parent, name))]
-async fn create(&self, parent: u64, name: &str, ...) -> FsResult<FileAttr> {
-    let _rpc_span = tracing::info_span!("grpc_create").entered();
-    // ...
-}
-
-// In MetadataServer::create():
-#[tracing::instrument(skip(self))]
-fn create(&self, parent: u64, name: &str, ...) -> FsResult<FileAttr> {
-    let _rocks_span = tracing::info_span!("rocksdb_write").entered();
-    // ...
-}
+```
+1. Baseline: 跑 rucksfs-bench，记录各操作 ops/s + P50/P99
+2. Code change: 实施一个优化（最小改动）
+3. Re-bench: 再跑 rucksfs-bench，同样参数
+4. Compare:
+   - 改进 > 5%  → KEEP，提交代码，更新 baseline
+   - 改进 0-5%  → 看代码复杂度，简单则保留，复杂则回滚
+   - 回退        → 立即 git revert
+5. 重复直到达成目标或投入产出比不合理
 ```
 
-Output: structured JSON traces that can be aggregated to show:
-- P50/P99 latency per operation per layer
-- Where time is actually spent
-
-**Expected impact**: No performance change, but enables all subsequent optimizations to be measured precisely.
-
-**Test plan**: Run benchmark with `RUST_LOG=info`, parse trace output, generate latency breakdown table.
+每轮优化后都**重跑 mdtest**，确认 microbench 改进能传导到 FUSE 全链路。
 
 ---
 
-### Phase 3: RocksDB Write Path Optimization (P1 — Close the NFS gap)
+## 当前 Baseline（mdtest，待 microbench 补充）
 
-**Goal**: Reduce per-create RocksDB write latency from ~0.8ms to ~0.4ms.
+| Metric | rucksfs-embedded | rucksfs-dist | NFS+ext4 | JuiceFS-Redis |
+|--------|-----------------|-------------|----------|---------------|
+| Create (np=1) | 9,403 | 639 | 774 | 1,237 |
+| Stat (np=1) | 237,129 | 6,387 | 25,992 | 7,453 |
+| Remove (np=1) | 13,511 | 889 | 869 | 1,148 |
+| Create scaling (1→4) | 9,298→23,271 | 636→697 | 794→2,171 | 1,227→3,978 |
 
-**Sub-optimizations** (each tested independently):
-
-#### 3a. WAL + sync mode tuning
-
-```rust
-// Current: default sync writes (every write flushes WAL to disk)
-// Proposed: group commit / async WAL
-let mut write_opts = WriteOptions::default();
-write_opts.set_sync(false);  // Don't fsync WAL per write
-// Rely on WAL for crash recovery, but batch fsync
-```
-
-**Risk**: Data loss on crash (last few ms of writes). Acceptable for benchmark; configurable in production.
-
-**Expected impact**: 30-50% reduction in write latency.
-
-#### 3b. WriteBatch size reduction
-
-Current create() does 6 operations in 1 WriteBatch:
-1. Put inode metadata
-2. Put directory entry
-3. Put parent mtime delta
-4. Put parent ctime delta
-5. Put parent nlink delta
-6. Put parent size delta (child count)
-
-**Optimization**: Combine parent deltas into a single compound delta entry.
-
-```rust
-// Before: 4 separate delta puts
-batch.put(delta_key(parent, "mtime", seq), new_mtime);
-batch.put(delta_key(parent, "ctime", seq), new_ctime);
-batch.put(delta_key(parent, "nlink", seq), +1);
-batch.put(delta_key(parent, "size", seq), +1);
-
-// After: 1 compound delta put
-batch.put(delta_key(parent, seq), CompoundDelta { mtime, ctime, nlink: +1, size: +1 });
-```
-
-**Expected impact**: ~15% reduction in WriteBatch size and serialization overhead.
-
-#### 3c. Column family and bloom filter tuning
-
-```rust
-// Add bloom filter to metadata CF for faster point lookups
-let mut cf_opts = Options::default();
-cf_opts.set_bloom_filter(10, false);  // 10 bits per key
-cf_opts.set_memtable_whole_key_filtering(true);
-```
-
-**Expected impact**: Faster stat/lookup (less disk I/O), minor create improvement.
-
-**Test plan for all 3a/3b/3c**: Each tested independently, measure single-process create ops/s.
+**注意**：embedded 模式 create 9,403 说明 MetadataServer + RocksDB 本身就有不错的性能（这还包含了 FUSE 开销！），所以 Layer 1 天花板应该远高于此。分布式模式 639 骤降到 embedded 的 6.8%，说明大部分开销在 gRPC + 网络 + FUSE 串行化。
 
 ---
 
-### Phase 4: gRPC Overhead Reduction (P1)
+## 目标
 
-**Goal**: Reduce per-RPC overhead.
+| Metric | Current (dist) | Target | Stretch |
+|--------|---------------|--------|---------|
+| Create (np=1) | 639 | 2,000 | 5,000 |
+| Stat (np=1) | 6,387 | 20,000 | 50,000 |
+| Remove (np=1) | 889 | 2,000 | 5,000 |
+| Create scaling (np=1→4) | 1.1x | 3.0x | Near-linear |
 
-#### 4a. Connection pooling / multiple HTTP/2 streams
-
-Current: single gRPC channel, HTTP/2 multiplexing.
-
-```rust
-// Create multiple channels and round-robin
-let channels: Vec<Channel> = (0..4)
-    .map(|_| Channel::from_static(addr).connect_lazy())
-    .collect();
-```
-
-**Expected impact**: Better throughput under concurrent load (Phase 1 makes this relevant).
-
-#### 4b. Combine write + report_write into single RPC
-
-Current write path:
-```
-Client                    DataServer              MetadataServer
-  |--- WriteData(ino) ------->|                        |
-  |<-- WriteDataReply --------|                        |
-  |--- ReportWrite(ino) ------------------------------>|
-  |<-- ReportWriteReply ------------------------------|
-```
-
-Optimized write path:
-```
-Client                    DataServer              MetadataServer
-  |--- WriteData(ino) ------->|                        |
-  |                           |--- UpdateMeta -------->|
-  |<-- WriteDataReply --------|                        |
-```
-
-DataServer calls MetadataServer internally, saving 1 client round-trip.
-
-**Expected impact**: ~30% improvement in write throughput.
-
-**Risk**: Increases coupling between DataServer and MetadataServer. May defer this.
+对比目标：
+- 全面超过 NFS+ext4
+- 全面超过 JuiceFS-Redis
+- Scaling 接近线性
 
 ---
 
-### Phase 5: Read Path Optimization (P2 — Stat performance)
+## 执行计划
 
-**Goal**: Improve stat from 6,387 to >15,000 ops/s.
-
-#### 5a. Client-side inode cache
-
-```rust
-struct VfsCore {
-    meta_client: Arc<dyn MetadataOps>,
-    data_client: Arc<dyn DataOps>,
-    attr_cache: Arc<DashMap<u64, (FileAttr, Instant)>>,  // inode -> (attr, expiry)
-}
-```
-
-Cache getattr results for 1 second (matching FUSE entry_timeout).
-
-**Expected impact**: Dramatic stat improvement for repeated accesses. mdtest stat benchmark does lookup+stat on recently created files, so cache hit rate should be very high.
-
-#### 5b. Readdir prefetch
-
-When readdir returns entries, prefetch and cache their attributes.
-
-**Expected impact**: Faster `ls -l` and stat-after-readdir patterns.
-
----
-
-### Phase 6: Batch Operations (P2 — Throughput ceiling)
-
-**Goal**: Amortize per-operation overhead across multiple operations.
-
-#### 6a. Client-side write buffering
-
-Buffer small writes and flush as a single gRPC call.
-
-#### 6b. Batch create RPC
-
-New RPC: `BatchCreate(parent, names[]) -> attrs[]`
-Server processes all creates in a single RocksDB WriteBatch.
-
-**Expected impact**: Could 3-5x create throughput by amortizing RPC + RocksDB overhead.
-
-**Risk**: Requires protocol change; only helps batch workloads (mdtest).
-
----
-
-## Execution Order and Timeline
-
-| Order | Phase | Effort | Expected Impact | Risk |
-|-------|-------|--------|-----------------|------|
-| 1 | Phase 2: Instrumentation | 2h | Enable measurement | None |
-| 2 | Phase 1: FUSE multithreading | 4-8h | Scaling 1.1x → 2.5x+ | Medium (fuser API complexity) |
-| 3 | Phase 3a: WAL sync tuning | 1h | Create +30-50% | Low |
-| 4 | Phase 3b: Compound deltas | 2h | Create +15% | Low |
-| 5 | Phase 5a: Attr cache | 2h | Stat 2-4x | Low |
-| 6 | Phase 4a: Connection pool | 1h | Throughput under concurrency | Low |
-| 7 | Phase 3c: Bloom filters | 1h | Stat +10-20% | None |
-| 8 | Phase 4b: Combine write RPCs | 4h | Write +30% | Medium |
-| 9 | Phase 5b: Readdir prefetch | 2h | ls -l perf | Low |
-| 10 | Phase 6: Batch ops | 4-8h | Create 3-5x | High (protocol change) |
-
-## Success Criteria
-
-After all optimizations:
-
-| Metric | Current | Target | Stretch |
-|--------|---------|--------|---------|
-| Create (np=1) | 639 | 1,500 | 3,000 |
-| Stat (np=1) | 6,387 | 15,000 | 30,000 |
-| Remove (np=1) | 889 | 1,500 | 3,000 |
-| Create scaling (np=4/np=1) | 1.1x | 2.5x | 3.5x |
-
-Comparison targets:
-- Beat NFS+ext4 on all metrics
-- Beat JuiceFS-Redis on create and stat
-- Demonstrate near-linear scaling up to np=4
-
-## Decision Framework
-
-After each optimization:
-
-```
-IF improvement > 5%:
-    KEEP the change, commit, update baseline
-ELIF improvement 0-5%:
-    KEEP if code is clean and adds no complexity
-    REVERT if it adds complexity
-ELIF regression:
-    REVERT immediately
-```
+| 顺序 | 任务 | 工时 | 产出 |
+|------|------|------|------|
+| **0** | **写 rucksfs-bench 工具** | **3-4h** | **分层性能数据** |
+| 1 | 跑 microbench，生成各层 baseline | 1h | 数据驱动的优化优先级 |
+| 2 | 根据数据选择 Top-3 优化项 | - | 确定方向 |
+| 3-N | 迭代优化循环（每项 1-4h） | 每项 1-4h | 逐步提升 |
+| Final | 全量 mdtest 回归 | 2h | 最终效果确认 |
