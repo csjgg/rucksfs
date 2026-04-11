@@ -100,13 +100,19 @@ where
     ///
     /// This is called by the write path after appending deltas.
     pub fn mark_dirty(&self, inode: Inode) {
-        if let Ok(mut set) = self.dirty.lock() {
+        let was_empty = if let Ok(mut set) = self.dirty.lock() {
+            let was_empty = set.is_empty();
             set.insert(inode);
-        }
-        // Wake the compaction loop.
-        if let Ok(mut flag) = self.notify_flag.lock() {
-            *flag = true;
-            self.notify.notify_one();
+            was_empty
+        } else {
+            return;
+        };
+        // Only wake compaction thread when transitioning from idle (empty set).
+        if was_empty {
+            if let Ok(mut flag) = self.notify_flag.lock() {
+                *flag = true;
+                self.notify.notify_one();
+            }
         }
     }
 

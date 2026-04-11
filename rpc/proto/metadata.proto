@@ -35,7 +35,7 @@ message DirEntry {
 
 // DataServer endpoint information
 message DataLocation {
-  string address = 1;
+  string server_id = 1;
 }
 
 // Lookup
@@ -62,6 +62,8 @@ message CreateRequest {
   uint64 parent = 1;
   string name = 2;
   uint32 mode = 3;
+  uint32 uid = 4;
+  uint32 gid = 5;
 }
 
 // Mkdir
@@ -69,12 +71,17 @@ message MkdirRequest {
   uint64 parent = 1;
   string name = 2;
   uint32 mode = 3;
+  uint32 uid = 4;
+  uint32 gid = 5;
 }
 
 // Unlink
 message UnlinkRequest {
   uint64 parent = 1;
   string name = 2;
+}
+message UnlinkResponse {
+  repeated uint64 purged_inodes = 1;
 }
 
 // Rmdir
@@ -90,6 +97,9 @@ message RenameRequest {
   uint64 new_parent = 3;
   string new_name = 4;
 }
+message RenameResponse {
+  repeated uint64 purged_inodes = 1;
+}
 
 // Setattr — uses optional fields to express "no change"
 message SetAttrRequest {
@@ -100,6 +110,10 @@ message SetAttrRequest {
   optional uint64 size = 5;
   optional uint64 atime = 6;
   optional uint64 mtime = 7;
+}
+message SetAttrResponse {
+  FileAttr attr = 1;
+  optional uint64 needs_truncate = 2;
 }
 
 // Statfs
@@ -124,6 +138,38 @@ message ReportWriteRequest {
   uint64 mtime = 3;
 }
 
+// Link — hard link
+message LinkRequest {
+  uint64 parent = 1;
+  string name = 2;
+  uint64 target_inode = 3;
+}
+
+// Symlink — symbolic link
+message SymlinkRequest {
+  uint64 parent = 1;
+  string name = 2;
+  string link_target = 3;
+  uint32 uid = 4;
+  uint32 gid = 5;
+}
+
+// Readlink
+message ReadlinkRequest {
+  uint64 inode = 1;
+}
+message ReadlinkResponse {
+  string target = 1;
+}
+
+// Release
+message ReleaseRequest {
+  uint64 inode = 1;
+}
+message ReleaseResponse {
+  repeated uint64 purged_inodes = 1;
+}
+
 // Empty response
 message EmptyResponse {}
 
@@ -134,11 +180,15 @@ service MetadataService {
   rpc Readdir(ReaddirRequest) returns (ReaddirResponse);
   rpc Create(CreateRequest) returns (FileAttr);
   rpc Mkdir(MkdirRequest) returns (FileAttr);
-  rpc Unlink(UnlinkRequest) returns (EmptyResponse);
+  rpc Unlink(UnlinkRequest) returns (UnlinkResponse);
   rpc Rmdir(RmdirRequest) returns (EmptyResponse);
-  rpc Rename(RenameRequest) returns (EmptyResponse);
-  rpc Setattr(SetAttrRequest) returns (FileAttr);
+  rpc Rename(RenameRequest) returns (RenameResponse);
+  rpc Setattr(SetAttrRequest) returns (SetAttrResponse);
   rpc Statfs(StatfsRequest) returns (StatFs);
   rpc Open(OpenRequest) returns (OpenResponse);
   rpc ReportWrite(ReportWriteRequest) returns (EmptyResponse);
+  rpc Link(LinkRequest) returns (FileAttr);
+  rpc Symlink(SymlinkRequest) returns (FileAttr);
+  rpc Readlink(ReadlinkRequest) returns (ReadlinkResponse);
+  rpc Release(ReleaseRequest) returns (ReleaseResponse);
 }

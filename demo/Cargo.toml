@@ -12,11 +12,29 @@ rucksfs-storage = { path = "../storage" }
 rucksfs-server = { path = "../server" }
 rucksfs-dataserver = { path = "../dataserver" }
 rucksfs-client = { path = "../client" }
+rucksfs-rpc = { path = "../rpc" }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std"] }
+tonic = { version = "0.12" }
 clap = { version = "4", features = ["derive"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[[bin]]
+name = "rucksfs"
+path = "src/main.rs"
+
+[[bin]]
+name = "rucksfs-metaserver"
+path = "src/bin/metaserver.rs"
+
+[[bin]]
+name = "rucksfs-dataserver"
+path = "src/bin/dataserver.rs"
+
+[[bin]]
+name = "rucksfs-remote-client"
+path = "src/bin/client.rs"

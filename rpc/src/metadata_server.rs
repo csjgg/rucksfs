@@ -30,6 +30,7 @@ fn map_error(err: FsError) -> Status {
         FsError::NotADirectory => Status::invalid_argument(err.to_string()),
         FsError::IsADirectory => Status::invalid_argument(err.to_string()),
         FsError::DirectoryNotEmpty => Status::failed_precondition(err.to_string()),
+        FsError::TransactionConflict => Status::aborted(err.to_string()),
         FsError::Other(msg) => Status::internal(msg),
     }
 }
@@ -99,7 +100,7 @@ impl metadata_service_server::MetadataService for MetadataRpcServer {
     ) -> Result<Response<FileAttr>, Status> {
         let req = request.into_inner();
         self.backend
-            .create(req.parent, &req.name, req.mode)
+            .create(req.parent, &req.name, req.mode, req.uid, req.gid)
             .await
             .map(|attr| Response::new(to_proto_attr(attr)))
             .map_err(map_error)
@@ -111,7 +112,7 @@ impl metadata_service_server::MetadataService for MetadataRpcServer {
     ) -> Result<Response<FileAttr>, Status> {
         let req = request.into_inner();
         self.backend
-            .mkdir(req.parent, &req.name, req.mode)
+            .mkdir(req.parent, &req.name, req.mode, req.uid, req.gid)
             .await
             .map(|attr| Response::new(to_proto_attr(attr)))
             .map_err(map_error)
@@ -120,12 +121,16 @@ impl metadata_service_server::MetadataService for MetadataRpcServer {
     async fn unlink(
         &self,
         request: Request<UnlinkRequest>,
-    ) -> Result<Response<EmptyResponse>, Status> {
+    ) -> Result<Response<UnlinkResponse>, Status> {
         let req = request.into_inner();
         self.backend
             .unlink(req.parent, &req.name)
             .await
-            .map(|_| Response::new(EmptyResponse {}))
+            .map(|resp| {
+                Response::new(UnlinkResponse {
+                    purged_inodes: resp.purged_inodes,
+                })
+            })
             .map_err(map_error)
     }
 
@@ -144,19 +149,23 @@ impl metadata_service_server::MetadataService for MetadataRpcServer {
     async fn rename(
         &self,
         request: Request<RenameRequest>,
-    ) -> Result<Response<EmptyResponse>, Status> {
+    ) -> Result<Response<RenameResponse>, Status> {
         let req = request.into_inner();
         self.backend
             .rename(req.parent, &req.name, req.new_parent, &req.new_name)
             .await
-            .map(|_| Response::new(EmptyResponse {}))
+            .map(|resp| {
+                Response::new(RenameResponse {
+                    purged_inodes: resp.purged_inodes,
+                })
+            })
             .map_err(map_error)
     }
 
     async fn setattr(
         &self,
         request: Request<SetAttrRequest>,
-    ) -> Result<Response<FileAttr>, Status> {
+    ) -> Result<Response<SetAttrResponse>, Status> {
         let req = request.into_inner();
         let core_req = rucksfs_core::SetAttrRequest {
             mode: req.mode,
@@ -169,7 +178,12 @@ impl metadata_service_server::MetadataService for MetadataRpcServer {
         self.backend
             .setattr(req.inode, core_req)
             .await
-            .map(|attr| Response::new(to_proto_attr(attr)))
+            .map(|resp| {
+                Response::new(SetAttrResponse {
+                    attr: Some(to_proto_attr(resp.attr)),
+                    needs_truncate: resp.needs_truncate,
+                })
+            })
             .map_err(map_error)
     }
 
@@ -207,7 +221,7 @@ impl metadata_service_server::MetadataService for MetadataRpcServer {
                 Response::new(OpenResponse {
                     handle: resp.handle,
                     data_location: Some(DataLocation {
-                        address: resp.data_location.address,
+                        server_id: resp.data_location.server_id,
                     }),
                 })
             })
@@ -223,6 +237,58 @@ impl metadata_service_server::MetadataService for MetadataRpcServer {
             .report_write(req.inode, req.new_size, req.mtime)
             .await
             .map(|_| Response::new(EmptyResponse {}))
+            .map_err(map_error)
+    }
+
+    async fn link(
+        &self,
+        request: Request<LinkRequest>,
+    ) -> Result<Response<FileAttr>, Status> {
+        let req = request.into_inner();
+        self.backend
+            .link(req.parent, &req.name, req.target_inode)
+            .await
+            .map(|attr| Response::new(to_proto_attr(attr)))
+            .map_err(map_error)
+    }
+
+    async fn symlink(
+        &self,
+        request: Request<SymlinkRequest>,
+    ) -> Result<Response<FileAttr>, Status> {
+        let req = request.into_inner();
+        self.backend
+            .symlink(req.parent, &req.name, &req.link_target, req.uid, req.gid)
+            .await
+            .map(|attr| Response::new(to_proto_attr(attr)))
+            .map_err(map_error)
+    }
+
+    async fn readlink(
+        &self,
+        request: Request<ReadlinkRequest>,
+    ) -> Result<Response<ReadlinkResponse>, Status> {
+        let req = request.into_inner();
+        self.backend
+            .readlink(req.inode)
+            .await
+            .map(|target| Response::new(ReadlinkResponse { target }))
+            .map_err(map_error)
+    }
+
+    async fn release(
+        &self,
+        request: Request<ReleaseRequest>,
+    ) -> Result<Response<ReleaseResponse>, Status> {
+        let req = request.into_inner();
+        self.backend
+            .release(req.inode)
+            .await
+            .map(|resp| {
+                Response::new(ReleaseResponse {
+                    purged_inodes: resp.purged_inodes,
+                })
+            })
             .map_err(map_error)
     }
 }

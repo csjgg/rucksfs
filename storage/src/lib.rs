@@ -103,6 +103,10 @@ pub enum BatchOp {
     PutDataLocation { key: Vec<u8>, value: Vec<u8> },
     /// Delete a data location entry: CF:inodes (key prefix 'L')
     DeleteDataLocation { key: Vec<u8> },
+    /// Put a symlink target: CF:inodes (key prefix 'S')
+    PutSymlink { key: Vec<u8>, value: Vec<u8> },
+    /// Delete a symlink target: CF:inodes (key prefix 'S')
+    DeleteSymlink { key: Vec<u8> },
 }
 
 /// A batch of write operations that will be committed atomically.
