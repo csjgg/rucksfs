@@ -7,4 +7,4 @@ pub use embedded::EmbeddedClient;
 pub use vfs_core::VfsCore;
 
 #[cfg(target_os = "linux")]
-pub use fuse::{fs_error_to_errno, mount_fuse, FuseClient};
+pub use fuse::{mount_fuse, FuseClient};

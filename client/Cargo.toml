@@ -13,5 +13,7 @@ tracing = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "signal"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-fuser = "0.15"
+fuse3 = { version = "0.8", features = ["tokio-runtime", "unprivileged"] }
 libc = "0.2"
+bytes = "1"
+futures-util = "0.3"

@@ -1,576 +1,599 @@
 #[cfg(target_os = "linux")]
-use fuser::{
-    FileAttr as FuseAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyCreate, ReplyData,
-    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request,
-};
-#[cfg(target_os = "linux")]
-use libc::{EAGAIN, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, EEXIST, EOPNOTSUPP, EPERM};
-#[cfg(target_os = "linux")]
-use rucksfs_core::{FileAttr, FsError, FsResult, SetAttrRequest, VfsOps};
-#[cfg(target_os = "linux")]
 use std::ffi::OsStr;
 #[cfg(target_os = "linux")]
-use std::time::{Duration, SystemTime};
+use std::num::NonZeroU32;
 #[cfg(target_os = "linux")]
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// FUSE client wrapper that implements fuser::Filesystem.
+#[cfg(target_os = "linux")]
+use bytes::Bytes;
+#[cfg(target_os = "linux")]
+use fuse3::raw::prelude::*;
+#[cfg(target_os = "linux")]
+use fuse3::{Errno, MountOptions, Result as Fuse3Result};
+#[cfg(target_os = "linux")]
+use rucksfs_core::{FsError, FsResult, SetAttrRequest, VfsOps};
+
+#[cfg(target_os = "linux")]
+const TTL: Duration = Duration::from_secs(1);
+
+/// Async FUSE filesystem implementation backed by fuse3.
 ///
-/// Holds a `tokio::runtime::Handle` so that async VfsOps calls (which may
-/// depend on tokio I/O, e.g. gRPC via tonic) are driven by the tokio
-/// runtime instead of a bare `self.rt.block_on`.
+/// Because fuse3's Filesystem trait is async, we can directly await
+/// VfsOps methods without block_on or spawn hacks. fuse3 uses tokio
+/// internally and dispatches requests to multiple concurrent tasks,
+/// enabling true parallel FUSE request handling.
 #[cfg(target_os = "linux")]
 pub struct FuseClient<C> {
     client: Arc<C>,
-    rt: tokio::runtime::Handle,
 }
 
 #[cfg(target_os = "linux")]
 impl<C> FuseClient<C> {
-    pub fn new(client: Arc<C>, rt: tokio::runtime::Handle) -> Self {
-        Self { client, rt }
+    pub fn new(client: Arc<C>) -> Self {
+        Self { client }
     }
 }
 
 #[cfg(target_os = "linux")]
-impl<C> Filesystem for FuseClient<C>
-where
-    C: VfsOps + 'static,
-{
-    fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        let name = name.to_string_lossy().to_string();
-        let client = self.client.clone();
-        self.rt.spawn(async move {
-            match client.lookup(parent, &name).await {
-                Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
-                Err(e) => reply.error(fs_error_to_errno(e)),
-            }
-        });
-    }
-
-    fn getattr(&mut self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
-        let client = self.client.clone();
-        self.rt.spawn(async move {
-            match client.getattr(ino).await {
-                Ok(attr) => reply.attr(&Duration::from_secs(1), &to_fuse_attr(attr)),
-                Err(e) => reply.error(fs_error_to_errno(e)),
-            }
-        });
-    }
-
-    fn setattr(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        mode: Option<u32>,
-        uid: Option<u32>,
-        gid: Option<u32>,
-        size: Option<u64>,
-        atime: Option<fuser::TimeOrNow>,
-        mtime: Option<fuser::TimeOrNow>,
-        _ctime: Option<SystemTime>,
-        _fh: Option<u64>,
-        _crtime: Option<SystemTime>,
-        _chgtime: Option<SystemTime>,
-        _bkuptime: Option<SystemTime>,
-        _flags: Option<u32>,
-        reply: ReplyAttr,
-    ) {
-        let client = self.client.clone();
-        let req = SetAttrRequest {
-            mode,
-            uid,
-            gid,
-            size,
-            atime: atime.map(|t| match t {
-                fuser::TimeOrNow::SpecificTime(st) => st
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-                fuser::TimeOrNow::Now => SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-            }),
-            mtime: mtime.map(|t| match t {
-                fuser::TimeOrNow::SpecificTime(st) => st
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-                fuser::TimeOrNow::Now => SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-            }),
-        };
-        self.rt.spawn(async move {
-            match client.setattr(ino, req).await {
-                Ok(attr) => reply.attr(&Duration::from_secs(1), &to_fuse_attr(attr)),
-                Err(e) => reply.error(fs_error_to_errno(e)),
-            }
-        });
-    }
-
-    fn readdir(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
-        mut reply: ReplyDirectory,
-    ) {
-        let client = self.client.clone();
-        self.rt.spawn(async move {
-            match client.readdir(ino).await {
-                Ok(entries) => {
-                    // Skip entries before offset (FUSE pagination).
-                    for (i, entry) in entries.into_iter().enumerate().skip(offset as usize) {
-                        let kind = dir_entry_kind_to_file_type(entry.kind);
-                        // reply.add returns true when the buffer is full.
-                        if reply.add(entry.inode, (i + 1) as i64, kind, entry.name) {
-                            break;
-                        }
-                    }
-                    reply.ok();
-                }
-                Err(e) => reply.error(fs_error_to_errno(e)),
-            }
-        });
-    }
-
-    fn open(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
-        let client = self.client.clone();
-        self.rt.spawn(async move {
-            match client.open(ino, flags as u32).await {
-                Ok(handle) => reply.opened(handle, 0),
-                Err(e) => reply.error(fs_error_to_errno(e)),
-            }
-        });
-    }
-
-    fn read(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
-        size: u32,
-        _flags: i32,
-        _lock_owner: Option<u64>,
-        reply: ReplyData,
-    ) {
-        let client = self.client.clone();
-        self.rt.spawn(async move {
-            match client.read(ino, offset as u64, size).await {
-                Ok(data) => reply.data(&data),
-                Err(e) => reply.error(fs_error_to_errno(e)),
-            }
-        });
-    }
-
-    fn write(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
-        data: &[u8],
-        _write_flags: u32,
-        flags: i32,
-        _lock_owner: Option<u64>,
-        reply: ReplyWrite,
-    ) {
-        let client = self.client.clone();
-        let data = data.to_vec();
-        self.rt.spawn(async move {
-            match client.write(ino, offset as u64, &data, flags as u32).await {
-                Ok(written) => reply.written(written),
-                Err(e) => reply.error(fs_error_to_errno(e)),
-            }
-        });
-    }
-
-    fn flush(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        _fh: u64,
-        _lock_owner: u64,
-        reply: ReplyEmpty,
-    ) {
-        let client = self.client.clone();
-        self.rt.spawn(async move {
-            match client.flush(ino).await {
-                Ok(()) => reply.ok(),
-                Err(e) => reply.error(fs_error_to_errno(e)),
-            }
-        });
-    }
-
-    fn fsync(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        _fh: u64,
-        datasync: bool,
-        reply: ReplyEmpty,
-    ) {
-        let client = self.client.clone();
-        self.rt.spawn(async move {
-            match client.fsync(ino, datasync).await {
-                Ok(()) => reply.ok(),
-                Err(e) => reply.error(fs_error_to_errno(e)),
-            }
-        });
-    }
-
-    fn create(
-        &mut self,
-        req: &Request<'_>,
-        parent: u64,
-        name: &OsStr,
-        mode: u32,
-        umask: u32,
-        _flags: i32,
-        reply: ReplyCreate,
-    ) {
-        let name = name.to_string_lossy().to_string();
-        let uid = req.uid();
-        let gid = req.gid();
-        // Apply umask: strip bits that umask disallows, keep file-type bits.
-        let effective_mode = mode & !umask & 0o7777;
-        let client = self.client.clone();
-        self.rt.spawn(async move {
-            match client.create(parent, &name, effective_mode, uid, gid).await {
-                Ok(attr) => {
-                    let ino = attr.inode;
-                    let fuse_attr = to_fuse_attr(attr);
-                    reply.created(&Duration::from_secs(1), &fuse_attr, 0, ino, 0);
-                }
-                Err(e) => reply.error(fs_error_to_errno(e)),
-            }
-        });
-    }
-
-    fn mknod(
-        &mut self,
-        req: &Request<'_>,
-        parent: u64,
-        name: &OsStr,
-        mode: u32,
-        umask: u32,
-        _rdev: u32,
-        reply: ReplyEntry,
-    ) {
-        // Only support regular files. Other types (block/char devices,
-        // sockets, FIFOs) are not implemented.
-        let file_type = mode & libc::S_IFMT;
-        if file_type != libc::S_IFREG && file_type != 0 {
-            reply.error(EOPNOTSUPP);
-            return;
-        }
-
-        let name = name.to_string_lossy().to_string();
-        let uid = req.uid();
-        let gid = req.gid();
-        let effective_mode = mode & !umask & 0o7777;
-        let client = self.client.clone();
-        self.rt.spawn(async move {
-            match client.create(parent, &name, effective_mode, uid, gid).await {
-                Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
-                Err(e) => reply.error(fs_error_to_errno(e)),
-            }
-        });
-    }
-
-    fn fallocate(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
-        length: i64,
-        mode: i32,
-        reply: ReplyEmpty,
-    ) {
-        let client = self.client.clone();
-
-        // FALLOC_FL_KEEP_SIZE = 0x01, FALLOC_FL_PUNCH_HOLE = 0x02
-        let keep_size = mode & 0x01 != 0;
-        let punch_hole = mode & 0x02 != 0;
-        let unsupported_flags = mode & !(0x01 | 0x02);
-
-        if unsupported_flags != 0 {
-            reply.error(EOPNOTSUPP);
-            return;
-        }
-
-        if punch_hole {
-            // Punch hole: no-op for our sparse-like RawDisk backend.
-            reply.ok();
-            return;
-        }
-
-        if keep_size {
-            // Preallocate without changing size: no-op for our backend.
-            reply.ok();
-            return;
-        }
-
-        // Mode 0: preallocate space. Extend file size if needed.
-        let new_end = (offset + length) as u64;
-        self.rt.spawn(async move {
-            let result = async {
-                let attr = client.getattr(ino).await?;
-                if new_end > attr.size {
-                    let req = rucksfs_core::SetAttrRequest {
-                        size: Some(new_end),
-                        ..Default::default()
-                    };
-                    client.setattr(ino, req).await?;
-                }
-                Ok::<(), rucksfs_core::FsError>(())
-            }.await;
-            match result {
-                Ok(()) => reply.ok(),
-                Err(e) => reply.error(fs_error_to_errno(e)),
-            }
-        });
-    }
-
-    fn access(&mut self, _req: &Request<'_>, ino: u64, _mask: i32, reply: ReplyEmpty) {
-        let client = self.client.clone();
-        self.rt.spawn(async move {
-            match client.getattr(ino).await {
-                Ok(_) => reply.ok(),
-                Err(e) => reply.error(fs_error_to_errno(e)),
-            }
-        });
-    }
-
-    fn mkdir(
-        &mut self,
-        req: &Request<'_>,
-        parent: u64,
-        name: &OsStr,
-        mode: u32,
-        umask: u32,
-        reply: ReplyEntry,
-    ) {
-        let name = name.to_string_lossy().to_string();
-        let uid = req.uid();
-        let gid = req.gid();
-        // Apply umask: strip bits that umask disallows, keep file-type bits.
-        let effective_mode = mode & !umask & 0o7777;
-        let client = self.client.clone();
-        self.rt.spawn(async move {
-            match client.mkdir(parent, &name, effective_mode, uid, gid).await {
-                Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
-                Err(e) => reply.error(fs_error_to_errno(e)),
-            }
-        });
-    }
-
-    fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-        let name = name.to_string_lossy().to_string();
-        let client = self.client.clone();
-        self.rt.spawn(async move {
-            match client.unlink(parent, &name).await {
-                Ok(()) => reply.ok(),
-                Err(e) => reply.error(fs_error_to_errno(e)),
-            }
-        });
-    }
-
-    fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-        let name = name.to_string_lossy().to_string();
-        let client = self.client.clone();
-        self.rt.spawn(async move {
-            match client.rmdir(parent, &name).await {
-                Ok(()) => reply.ok(),
-                Err(e) => reply.error(fs_error_to_errno(e)),
-            }
-        });
-    }
-
-    fn rename(
-        &mut self,
-        _req: &Request<'_>,
-        parent: u64,
-        name: &OsStr,
-        newparent: u64,
-        newname: &OsStr,
-        _flags: u32,
-        reply: ReplyEmpty,
-    ) {
-        let name = name.to_string_lossy().to_string();
-        let newname = newname.to_string_lossy().to_string();
-        let client = self.client.clone();
-        self.rt.spawn(async move {
-            match client.rename(parent, &name, newparent, &newname).await {
-                Ok(()) => reply.ok(),
-                Err(e) => reply.error(fs_error_to_errno(e)),
-            }
-        });
-    }
-
-    fn link(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        newparent: u64,
-        newname: &OsStr,
-        reply: ReplyEntry,
-    ) {
-        let newname = newname.to_string_lossy().to_string();
-        let client = self.client.clone();
-        self.rt.spawn(async move {
-            match client.link(newparent, &newname, ino).await {
-                Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
-                Err(e) => reply.error(fs_error_to_errno(e)),
-            }
-        });
-    }
-
-    fn symlink(
-        &mut self,
-        req: &Request<'_>,
-        parent: u64,
-        link_name: &OsStr,
-        target: &std::path::Path,
-        reply: ReplyEntry,
-    ) {
-        let link_name = link_name.to_string_lossy().to_string();
-        let target = target.to_string_lossy().to_string();
-        let uid = req.uid();
-        let gid = req.gid();
-        let client = self.client.clone();
-        self.rt.spawn(async move {
-            match client.symlink(parent, &link_name, &target, uid, gid).await {
-                Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
-                Err(e) => reply.error(fs_error_to_errno(e)),
-            }
-        });
-    }
-
-    fn readlink(&mut self, _req: &Request<'_>, ino: u64, reply: fuser::ReplyData) {
-        let client = self.client.clone();
-        self.rt.spawn(async move {
-            match client.readlink(ino).await {
-                Ok(target) => reply.data(target.as_bytes()),
-                Err(e) => reply.error(fs_error_to_errno(e)),
-            }
-        });
-    }
-
-    fn release(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        _fh: u64,
-        _flags: i32,
-        _lock_owner: Option<u64>,
-        _flush: bool,
-        reply: ReplyEmpty,
-    ) {
-        let client = self.client.clone();
-        self.rt.spawn(async move {
-            match client.release(ino).await {
-                Ok(()) => reply.ok(),
-                Err(e) => reply.error(fs_error_to_errno(e)),
-            }
-        });
-    }
-
-    fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
-        let client = self.client.clone();
-        self.rt.spawn(async move {
-            match client.statfs(1).await {
-                Ok(st) => reply.statfs(
-                    st.blocks,
-                    st.bfree,
-                    st.bavail,
-                    st.files,
-                    st.ffree,
-                    st.bsize,
-                    st.namelen,
-                    st.bsize,
-                ),
-                Err(e) => reply.error(fs_error_to_errno(e)),
-            }
-        });
-    }
+fn secs_to_systime(secs: u64) -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(secs)
 }
 
 #[cfg(target_os = "linux")]
-fn dir_entry_kind_to_file_type(kind: u32) -> FileType {
-    let mt = kind & libc::S_IFMT;
-    if mt == libc::S_IFDIR {
+fn to_fuse3_attr(attr: rucksfs_core::FileAttr) -> FileAttr {
+    let kind = if (attr.mode & libc::S_IFMT) == libc::S_IFDIR {
         FileType::Directory
-    } else if mt == libc::S_IFLNK {
+    } else if (attr.mode & libc::S_IFMT) == libc::S_IFLNK {
         FileType::Symlink
     } else {
         FileType::RegularFile
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn to_fuse_attr(attr: FileAttr) -> FuseAttr {
-    let kind = dir_entry_kind_to_file_type(attr.mode & libc::S_IFMT);
-    FuseAttr {
+    };
+    FileAttr {
         ino: attr.inode,
         size: attr.size,
         blocks: 0,
-        atime: SystemTime::UNIX_EPOCH + Duration::from_secs(attr.atime),
-        mtime: SystemTime::UNIX_EPOCH + Duration::from_secs(attr.mtime),
-        ctime: SystemTime::UNIX_EPOCH + Duration::from_secs(attr.ctime),
-        crtime: SystemTime::UNIX_EPOCH,
+        atime: secs_to_systime(attr.atime).into(),
+        mtime: secs_to_systime(attr.mtime).into(),
+        ctime: secs_to_systime(attr.ctime).into(),
         kind,
         perm: (attr.mode & 0o7777) as u16,
         nlink: attr.nlink,
         uid: attr.uid,
         gid: attr.gid,
         rdev: 0,
-        flags: 0,
         blksize: 512,
     }
 }
 
 #[cfg(target_os = "linux")]
-pub fn mount_fuse<C: VfsOps + 'static>(
+pub fn fs_error_to_errno(e: FsError) -> Errno {
+    use FsError::*;
+    let code = match e {
+        NotImplemented => libc::EOPNOTSUPP,
+        NotFound => libc::ENOENT,
+        AlreadyExists => libc::EEXIST,
+        NotADirectory => libc::ENOTDIR,
+        IsADirectory => libc::EISDIR,
+        DirectoryNotEmpty => libc::ENOTEMPTY,
+        PermissionDenied => libc::EPERM,
+        InvalidInput(_) => libc::EINVAL,
+        Io(_) => libc::EIO,
+        Other(_) => libc::EIO,
+        TransactionConflict => libc::EAGAIN,
+    };
+    Errno::from(code)
+}
+
+#[cfg(target_os = "linux")]
+impl<C: VfsOps + 'static> Filesystem for FuseClient<C> {
+    async fn init(&self, _req: Request) -> Fuse3Result<ReplyInit> {
+        Ok(ReplyInit {
+            max_write: NonZeroU32::new(128 * 1024).unwrap(),
+        })
+    }
+
+    async fn destroy(&self, _req: Request) {}
+
+    async fn lookup(
+        &self,
+        _req: Request,
+        parent: u64,
+        name: &OsStr,
+    ) -> Fuse3Result<ReplyEntry> {
+        let name = name.to_string_lossy().to_string();
+        let attr = self.client.lookup(parent, &name).await.map_err(fs_error_to_errno)?;
+        Ok(ReplyEntry {
+            ttl: TTL,
+            attr: to_fuse3_attr(attr),
+            generation: 0,
+        })
+    }
+
+    async fn getattr(
+        &self,
+        _req: Request,
+        inode: u64,
+        _fh: Option<u64>,
+        _flags: u32,
+    ) -> Fuse3Result<ReplyAttr> {
+        let attr = self.client.getattr(inode).await.map_err(fs_error_to_errno)?;
+        Ok(ReplyAttr {
+            ttl: TTL,
+            attr: to_fuse3_attr(attr),
+        })
+    }
+
+    async fn setattr(
+        &self,
+        _req: Request,
+        inode: u64,
+        _fh: Option<u64>,
+        set_attr: SetAttr,
+    ) -> Fuse3Result<ReplyAttr> {
+        let req = SetAttrRequest {
+            mode: set_attr.mode,
+            uid: set_attr.uid,
+            gid: set_attr.gid,
+            size: set_attr.size,
+            atime: set_attr.atime.map(|t| t.sec as u64),
+            mtime: set_attr.mtime.map(|t| t.sec as u64),
+        };
+        let attr = self.client.setattr(inode, req).await.map_err(fs_error_to_errno)?;
+        Ok(ReplyAttr {
+            ttl: TTL,
+            attr: to_fuse3_attr(attr),
+        })
+    }
+
+    async fn mkdir(
+        &self,
+        req: Request,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
+    ) -> Fuse3Result<ReplyEntry> {
+        let name = name.to_string_lossy().to_string();
+        let effective_mode = mode & !umask & 0o7777;
+        let attr = self
+            .client
+            .mkdir(parent, &name, effective_mode, req.uid, req.gid)
+            .await
+            .map_err(fs_error_to_errno)?;
+        Ok(ReplyEntry {
+            ttl: TTL,
+            attr: to_fuse3_attr(attr),
+            generation: 0,
+        })
+    }
+
+    async fn create(
+        &self,
+        req: Request,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        flags: u32,
+    ) -> Fuse3Result<ReplyCreated> {
+        let name = name.to_string_lossy().to_string();
+        // fuse3 doesn't pass umask separately in create; use mode as-is.
+        let effective_mode = mode & 0o7777;
+        let attr = self
+            .client
+            .create(parent, &name, effective_mode, req.uid, req.gid)
+            .await
+            .map_err(fs_error_to_errno)?;
+        let ino = attr.inode;
+        // Auto-open the newly created file.
+        let fh = self.client.open(ino, flags).await.map_err(fs_error_to_errno)?;
+        Ok(ReplyCreated {
+            ttl: TTL,
+            attr: to_fuse3_attr(attr),
+            generation: 0,
+            fh,
+            flags: 0,
+        })
+    }
+
+    async fn mknod(
+        &self,
+        req: Request,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _rdev: u32,
+    ) -> Fuse3Result<ReplyEntry> {
+        let file_type = mode & libc::S_IFMT;
+        if file_type != libc::S_IFREG && file_type != 0 {
+            return Err(libc::EOPNOTSUPP.into());
+        }
+        let name = name.to_string_lossy().to_string();
+        let effective_mode = mode & 0o7777;
+        let attr = self
+            .client
+            .create(parent, &name, effective_mode, req.uid, req.gid)
+            .await
+            .map_err(fs_error_to_errno)?;
+        Ok(ReplyEntry {
+            ttl: TTL,
+            attr: to_fuse3_attr(attr),
+            generation: 0,
+        })
+    }
+
+    async fn unlink(
+        &self,
+        _req: Request,
+        parent: u64,
+        name: &OsStr,
+    ) -> Fuse3Result<()> {
+        let name = name.to_string_lossy().to_string();
+        self.client.unlink(parent, &name).await.map_err(fs_error_to_errno)
+    }
+
+    async fn rmdir(
+        &self,
+        _req: Request,
+        parent: u64,
+        name: &OsStr,
+    ) -> Fuse3Result<()> {
+        let name = name.to_string_lossy().to_string();
+        self.client.rmdir(parent, &name).await.map_err(fs_error_to_errno)
+    }
+
+    async fn rename(
+        &self,
+        _req: Request,
+        parent: u64,
+        name: &OsStr,
+        new_parent: u64,
+        new_name: &OsStr,
+    ) -> Fuse3Result<()> {
+        let name = name.to_string_lossy().to_string();
+        let new_name = new_name.to_string_lossy().to_string();
+        self.client
+            .rename(parent, &name, new_parent, &new_name)
+            .await
+            .map_err(fs_error_to_errno)
+    }
+
+    async fn open(
+        &self,
+        _req: Request,
+        inode: u64,
+        flags: u32,
+    ) -> Fuse3Result<ReplyOpen> {
+        let fh = self.client.open(inode, flags).await.map_err(fs_error_to_errno)?;
+        Ok(ReplyOpen { fh, flags: 0 })
+    }
+
+    async fn read(
+        &self,
+        _req: Request,
+        inode: u64,
+        _fh: u64,
+        offset: u64,
+        size: u32,
+    ) -> Fuse3Result<ReplyData> {
+        let data = self.client.read(inode, offset, size).await.map_err(fs_error_to_errno)?;
+        Ok(ReplyData {
+            data: Bytes::from(data),
+        })
+    }
+
+    async fn write(
+        &self,
+        _req: Request,
+        inode: u64,
+        _fh: u64,
+        offset: u64,
+        data: &[u8],
+        _write_flags: u32,
+        flags: u32,
+    ) -> Fuse3Result<ReplyWrite> {
+        let written = self
+            .client
+            .write(inode, offset, data, flags)
+            .await
+            .map_err(fs_error_to_errno)?;
+        Ok(ReplyWrite { written })
+    }
+
+    async fn release(
+        &self,
+        _req: Request,
+        inode: u64,
+        _fh: u64,
+        _flags: u32,
+        _lock_owner: u64,
+        _flush: bool,
+    ) -> Fuse3Result<()> {
+        self.client.release(inode).await.map_err(fs_error_to_errno)
+    }
+
+    async fn flush(
+        &self,
+        _req: Request,
+        inode: u64,
+        _fh: u64,
+        _lock_owner: u64,
+    ) -> Fuse3Result<()> {
+        self.client.flush(inode).await.map_err(fs_error_to_errno)
+    }
+
+    async fn fsync(
+        &self,
+        _req: Request,
+        inode: u64,
+        _fh: u64,
+        datasync: bool,
+    ) -> Fuse3Result<()> {
+        self.client.fsync(inode, datasync).await.map_err(fs_error_to_errno)
+    }
+
+    async fn readdir(
+        &self,
+        _req: Request,
+        _parent: u64,
+        _fh: u64,
+        _offset: i64,
+    ) -> Fuse3Result<ReplyDirectory<Self::DirEntryStream<'_>>> {
+        // Not used — we implement readdirplus instead.
+        // Returning ENOSYS tells the kernel to use readdirplus.
+        Err(libc::ENOSYS.into())
+    }
+
+    type DirEntryStream<'a> = futures_util::stream::Iter<std::vec::IntoIter<Fuse3Result<DirectoryEntry>>>;
+
+    async fn opendir(
+        &self,
+        _req: Request,
+        _inode: u64,
+        _flags: u32,
+    ) -> Fuse3Result<ReplyOpen> {
+        // We don't track directory handles; just return a dummy.
+        Ok(ReplyOpen { fh: 0, flags: 0 })
+    }
+
+    async fn releasedir(
+        &self,
+        _req: Request,
+        _inode: u64,
+        _fh: u64,
+        _flags: u32,
+    ) -> Fuse3Result<()> {
+        Ok(())
+    }
+
+    type DirEntryPlusStream<'a> = futures_util::stream::Iter<std::vec::IntoIter<Fuse3Result<DirectoryEntryPlus>>>;
+
+    async fn readdirplus(
+        &self,
+        _req: Request,
+        parent: u64,
+        _fh: u64,
+        offset: u64,
+        _lock_owner: u64,
+    ) -> Fuse3Result<ReplyDirectoryPlus<Self::DirEntryPlusStream<'_>>> {
+        let entries = self.client.readdir(parent).await.map_err(fs_error_to_errno)?;
+        let plus_entries: Vec<Fuse3Result<DirectoryEntryPlus>> = entries
+            .into_iter()
+            .enumerate()
+            .skip(offset as usize)
+            .map(|(i, entry)| {
+                let kind = if (entry.kind & libc::S_IFMT) == libc::S_IFDIR {
+                    FileType::Directory
+                } else if (entry.kind & libc::S_IFMT) == libc::S_IFLNK {
+                    FileType::Symlink
+                } else {
+                    FileType::RegularFile
+                };
+                Ok(DirectoryEntryPlus {
+                    inode: entry.inode,
+                    generation: 0,
+                    kind,
+                    name: entry.name.into(),
+                    offset: (i + 1) as i64,
+                    attr: FileAttr {
+                        ino: entry.inode,
+                        size: 0,
+                        blocks: 0,
+                        atime: UNIX_EPOCH.into(),
+                        mtime: UNIX_EPOCH.into(),
+                        ctime: UNIX_EPOCH.into(),
+                        kind,
+                        perm: 0o755,
+                        nlink: 1,
+                        uid: 0,
+                        gid: 0,
+                        rdev: 0,
+                        blksize: 512,
+                    },
+                    entry_ttl: TTL,
+                    attr_ttl: TTL,
+                })
+            })
+            .collect();
+        Ok(ReplyDirectoryPlus {
+            entries: futures_util::stream::iter(plus_entries),
+        })
+    }
+
+    async fn access(
+        &self,
+        _req: Request,
+        inode: u64,
+        _mask: u32,
+    ) -> Fuse3Result<()> {
+        // With default_permissions, kernel checks permissions.
+        // We just verify the inode exists.
+        self.client.getattr(inode).await.map_err(fs_error_to_errno)?;
+        Ok(())
+    }
+
+    async fn statfs(
+        &self,
+        _req: Request,
+        inode: u64,
+    ) -> Fuse3Result<ReplyStatFs> {
+        let st = self.client.statfs(inode).await.map_err(fs_error_to_errno)?;
+        Ok(ReplyStatFs {
+            blocks: st.blocks,
+            bfree: st.bfree,
+            bavail: st.bavail,
+            files: st.files,
+            ffree: st.ffree,
+            bsize: st.bsize,
+            namelen: st.namelen,
+            frsize: st.bsize,
+        })
+    }
+
+    async fn fallocate(
+        &self,
+        _req: Request,
+        inode: u64,
+        _fh: u64,
+        offset: u64,
+        length: u64,
+        mode: u32,
+    ) -> Fuse3Result<()> {
+        let keep_size = mode & 0x01 != 0;
+        let punch_hole = mode & 0x02 != 0;
+        let unsupported = mode & !(0x01 | 0x02);
+
+        if unsupported != 0 {
+            return Err(libc::EOPNOTSUPP.into());
+        }
+        if punch_hole || keep_size {
+            return Ok(());
+        }
+
+        let new_end = offset + length;
+        let attr = self.client.getattr(inode).await.map_err(fs_error_to_errno)?;
+        if new_end > attr.size {
+            let req = SetAttrRequest {
+                size: Some(new_end),
+                ..Default::default()
+            };
+            self.client.setattr(inode, req).await.map_err(fs_error_to_errno)?;
+        }
+        Ok(())
+    }
+
+    async fn link(
+        &self,
+        _req: Request,
+        inode: u64,
+        new_parent: u64,
+        new_name: &OsStr,
+    ) -> Fuse3Result<ReplyEntry> {
+        let new_name = new_name.to_string_lossy().to_string();
+        let attr = self
+            .client
+            .link(new_parent, &new_name, inode)
+            .await
+            .map_err(fs_error_to_errno)?;
+        Ok(ReplyEntry {
+            ttl: TTL,
+            attr: to_fuse3_attr(attr),
+            generation: 0,
+        })
+    }
+
+    async fn symlink(
+        &self,
+        req: Request,
+        parent: u64,
+        name: &OsStr,
+        link: &OsStr,
+    ) -> Fuse3Result<ReplyEntry> {
+        let name = name.to_string_lossy().to_string();
+        let link = link.to_string_lossy().to_string();
+        let attr = self
+            .client
+            .symlink(parent, &name, &link, req.uid, req.gid)
+            .await
+            .map_err(fs_error_to_errno)?;
+        Ok(ReplyEntry {
+            ttl: TTL,
+            attr: to_fuse3_attr(attr),
+            generation: 0,
+        })
+    }
+
+    async fn readlink(
+        &self,
+        _req: Request,
+        inode: u64,
+    ) -> Fuse3Result<ReplyData> {
+        let target = self.client.readlink(inode).await.map_err(fs_error_to_errno)?;
+        Ok(ReplyData {
+            data: Bytes::from(target.into_bytes()),
+        })
+    }
+}
+
+/// Mount the filesystem using fuse3 with async support.
+///
+/// This uses fuse3's async mount which dispatches FUSE requests
+/// to tokio tasks, enabling true concurrent request handling.
+#[cfg(target_os = "linux")]
+pub async fn mount_fuse<C: VfsOps + 'static>(
     mountpoint: &str,
     client: Arc<C>,
-    rt: tokio::runtime::Handle,
 ) -> FsResult<()> {
-    let fs = FuseClient::new(client, rt);
-    let options = vec![
-        MountOption::FSName("rucksfs".to_string()),
-        MountOption::AutoUnmount,
-        MountOption::DefaultPermissions,
-        MountOption::AllowOther,
-    ];
-    fuser::mount2(fs, mountpoint, &options).map_err(|e| FsError::Io(e.to_string()))
+    let fs = FuseClient::new(client);
+    let mut mount_options = MountOptions::default();
+    mount_options
+        .fs_name("rucksfs")
+        .force_readdir_plus(true)
+        .allow_other(true)
+        .default_permissions(true);
+
+    let mount_handle = fuse3::raw::Session::new(mount_options)
+        .mount_with_unprivileged(fs, mountpoint)
+        .await
+        .map_err(|e| FsError::Io(format!("FUSE mount failed: {}", e)))?;
+
+    // Wait for Ctrl+C, then unmount.
+    tokio::signal::ctrl_c()
+        .await
+        .map_err(|e| FsError::Io(format!("signal handler failed: {}", e)))?;
+
+    mount_handle
+        .unmount()
+        .await
+        .map_err(|e| FsError::Io(format!("unmount failed: {}", e)))?;
+
+    Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn mount_fuse<C: VfsOps + 'static>(_mountpoint: &str, _client: Arc<C>) -> FsResult<()> {
+pub async fn mount_fuse<C: VfsOps + 'static>(
+    _mountpoint: &str,
+    _client: Arc<C>,
+) -> FsResult<()> {
     Err(FsError::NotImplemented)
 }
 
 #[cfg(target_os = "linux")]
-pub fn fs_error_to_errno(e: FsError) -> i32 {
+pub fn fs_error_to_libc_errno(e: FsError) -> i32 {
     use FsError::*;
     match e {
-        NotImplemented => EOPNOTSUPP,
-        NotFound => ENOENT,
-        AlreadyExists => EEXIST,
-        NotADirectory => ENOTDIR,
-        IsADirectory => EISDIR,
-        DirectoryNotEmpty => ENOTEMPTY,
-        PermissionDenied => EPERM,
-        InvalidInput(_) => EINVAL,
-        Io(_) => EIO,
-        Other(_) => EIO,
-        TransactionConflict => EAGAIN,
+        NotImplemented => libc::EOPNOTSUPP,
+        NotFound => libc::ENOENT,
+        AlreadyExists => libc::EEXIST,
+        NotADirectory => libc::ENOTDIR,
+        IsADirectory => libc::EISDIR,
+        DirectoryNotEmpty => libc::ENOTEMPTY,
+        PermissionDenied => libc::EPERM,
+        InvalidInput(_) => libc::EINVAL,
+        Io(_) => libc::EIO,
+        Other(_) => libc::EIO,
+        TransactionConflict => libc::EAGAIN,
     }
 }
