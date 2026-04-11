@@ -15,15 +15,20 @@ use std::time::{Duration, SystemTime};
 use std::sync::Arc;
 
 /// FUSE client wrapper that implements fuser::Filesystem.
+///
+/// Holds a `tokio::runtime::Handle` so that async VfsOps calls (which may
+/// depend on tokio I/O, e.g. gRPC via tonic) are driven by the tokio
+/// runtime instead of a bare `self.rt.block_on`.
 #[cfg(target_os = "linux")]
 pub struct FuseClient<C> {
     client: Arc<C>,
+    rt: tokio::runtime::Handle,
 }
 
 #[cfg(target_os = "linux")]
 impl<C> FuseClient<C> {
-    pub fn new(client: Arc<C>) -> Self {
-        Self { client }
+    pub fn new(client: Arc<C>, rt: tokio::runtime::Handle) -> Self {
+        Self { client, rt }
     }
 }
 
@@ -35,7 +40,7 @@ where
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let name = name.to_string_lossy().to_string();
         let client = self.client.clone();
-        let result = futures::executor::block_on(async move { client.lookup(parent, &name).await });
+        let result = self.rt.block_on(async move { client.lookup(parent, &name).await });
         match result {
             Ok(attr) => reply.entry(&Duration::from_secs(1), &to_fuse_attr(attr), 0),
             Err(e) => reply.error(fs_error_to_errno(e)),
@@ -44,7 +49,7 @@ where
 
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
         let client = self.client.clone();
-        let result = futures::executor::block_on(async move { client.getattr(ino).await });
+        let result = self.rt.block_on(async move { client.getattr(ino).await });
         match result {
             Ok(attr) => reply.attr(&Duration::from_secs(1), &to_fuse_attr(attr)),
             Err(e) => reply.error(fs_error_to_errno(e)),
@@ -97,7 +102,7 @@ where
             }),
         };
         let result =
-            futures::executor::block_on(async move { client.setattr(ino, req).await });
+            self.rt.block_on(async move { client.setattr(ino, req).await });
         match result {
             Ok(attr) => reply.attr(&Duration::from_secs(1), &to_fuse_attr(attr)),
             Err(e) => reply.error(fs_error_to_errno(e)),
@@ -113,7 +118,7 @@ where
         mut reply: ReplyDirectory,
     ) {
         let client = self.client.clone();
-        let result = futures::executor::block_on(async move { client.readdir(ino).await });
+        let result = self.rt.block_on(async move { client.readdir(ino).await });
         match result {
             Ok(entries) => {
                 // Skip entries before offset (FUSE pagination).
@@ -132,7 +137,7 @@ where
 
     fn open(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
         let client = self.client.clone();
-        let result = futures::executor::block_on(async move { client.open(ino, flags as u32).await });
+        let result = self.rt.block_on(async move { client.open(ino, flags as u32).await });
         match result {
             Ok(handle) => reply.opened(handle, 0),
             Err(e) => reply.error(fs_error_to_errno(e)),
@@ -151,7 +156,7 @@ where
         reply: ReplyData,
     ) {
         let client = self.client.clone();
-        let result = futures::executor::block_on(async move {
+        let result = self.rt.block_on(async move {
             client.read(ino, offset as u64, size).await
         });
         match result {
@@ -174,7 +179,7 @@ where
     ) {
         let client = self.client.clone();
         let data = data.to_vec();
-        let result = futures::executor::block_on(async move {
+        let result = self.rt.block_on(async move {
             client.write(ino, offset as u64, &data, flags as u32).await
         });
         match result {
@@ -192,7 +197,7 @@ where
         reply: ReplyEmpty,
     ) {
         let client = self.client.clone();
-        let result = futures::executor::block_on(async move { client.flush(ino).await });
+        let result = self.rt.block_on(async move { client.flush(ino).await });
         match result {
             Ok(()) => reply.ok(),
             Err(e) => reply.error(fs_error_to_errno(e)),
@@ -209,7 +214,7 @@ where
     ) {
         let client = self.client.clone();
         let result =
-            futures::executor::block_on(async move { client.fsync(ino, datasync).await });
+            self.rt.block_on(async move { client.fsync(ino, datasync).await });
         match result {
             Ok(()) => reply.ok(),
             Err(e) => reply.error(fs_error_to_errno(e)),
@@ -232,7 +237,7 @@ where
         // Apply umask: strip bits that umask disallows, keep file-type bits.
         let effective_mode = mode & !umask & 0o7777;
         let client = self.client.clone();
-        let result = futures::executor::block_on(async move {
+        let result = self.rt.block_on(async move {
             client.create(parent, &name, effective_mode, uid, gid).await
         });
         match result {
@@ -268,7 +273,7 @@ where
         let gid = req.gid();
         let effective_mode = mode & !umask & 0o7777;
         let client = self.client.clone();
-        let result = futures::executor::block_on(async move {
+        let result = self.rt.block_on(async move {
             client.create(parent, &name, effective_mode, uid, gid).await
         });
         match result {
@@ -313,7 +318,7 @@ where
 
         // Mode 0: preallocate space. Extend file size if needed.
         let new_end = (offset + length) as u64;
-        let result = futures::executor::block_on(async move {
+        let result = self.rt.block_on(async move {
             let attr = client.getattr(ino).await?;
             if new_end > attr.size {
                 let req = rucksfs_core::SetAttrRequest {
@@ -332,7 +337,7 @@ where
 
     fn access(&mut self, _req: &Request<'_>, ino: u64, _mask: i32, reply: ReplyEmpty) {
         let client = self.client.clone();
-        let result = futures::executor::block_on(async move {
+        let result = self.rt.block_on(async move {
             // With default_permissions, the kernel already checks permissions.
             // We just verify the inode exists.
             client.getattr(ino).await
@@ -358,7 +363,7 @@ where
         // Apply umask: strip bits that umask disallows, keep file-type bits.
         let effective_mode = mode & !umask & 0o7777;
         let client = self.client.clone();
-        let result = futures::executor::block_on(async move {
+        let result = self.rt.block_on(async move {
             client.mkdir(parent, &name, effective_mode, uid, gid).await
         });
         match result {
@@ -370,7 +375,7 @@ where
     fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         let name = name.to_string_lossy().to_string();
         let client = self.client.clone();
-        let result = futures::executor::block_on(async move { client.unlink(parent, &name).await });
+        let result = self.rt.block_on(async move { client.unlink(parent, &name).await });
         match result {
             Ok(()) => reply.ok(),
             Err(e) => reply.error(fs_error_to_errno(e)),
@@ -380,7 +385,7 @@ where
     fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         let name = name.to_string_lossy().to_string();
         let client = self.client.clone();
-        let result = futures::executor::block_on(async move { client.rmdir(parent, &name).await });
+        let result = self.rt.block_on(async move { client.rmdir(parent, &name).await });
         match result {
             Ok(()) => reply.ok(),
             Err(e) => reply.error(fs_error_to_errno(e)),
@@ -400,7 +405,7 @@ where
         let name = name.to_string_lossy().to_string();
         let newname = newname.to_string_lossy().to_string();
         let client = self.client.clone();
-        let result = futures::executor::block_on(async move {
+        let result = self.rt.block_on(async move {
             client.rename(parent, &name, newparent, &newname).await
         });
         match result {
@@ -419,7 +424,7 @@ where
     ) {
         let newname = newname.to_string_lossy().to_string();
         let client = self.client.clone();
-        let result = futures::executor::block_on(async move {
+        let result = self.rt.block_on(async move {
             client.link(newparent, &newname, ino).await
         });
         match result {
@@ -441,7 +446,7 @@ where
         let uid = req.uid();
         let gid = req.gid();
         let client = self.client.clone();
-        let result = futures::executor::block_on(async move {
+        let result = self.rt.block_on(async move {
             client.symlink(parent, &link_name, &target, uid, gid).await
         });
         match result {
@@ -452,7 +457,7 @@ where
 
     fn readlink(&mut self, _req: &Request<'_>, ino: u64, reply: fuser::ReplyData) {
         let client = self.client.clone();
-        let result = futures::executor::block_on(async move { client.readlink(ino).await });
+        let result = self.rt.block_on(async move { client.readlink(ino).await });
         match result {
             Ok(target) => reply.data(target.as_bytes()),
             Err(e) => reply.error(fs_error_to_errno(e)),
@@ -470,7 +475,7 @@ where
         reply: ReplyEmpty,
     ) {
         let client = self.client.clone();
-        let result = futures::executor::block_on(async move { client.release(ino).await });
+        let result = self.rt.block_on(async move { client.release(ino).await });
         match result {
             Ok(()) => reply.ok(),
             Err(e) => reply.error(fs_error_to_errno(e)),
@@ -479,7 +484,7 @@ where
 
     fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
         let client = self.client.clone();
-        let result = futures::executor::block_on(async move { client.statfs(1).await });
+        let result = self.rt.block_on(async move { client.statfs(1).await });
         match result {
             Ok(st) => reply.statfs(
                 st.blocks,
@@ -531,8 +536,12 @@ fn to_fuse_attr(attr: FileAttr) -> FuseAttr {
 }
 
 #[cfg(target_os = "linux")]
-pub fn mount_fuse<C: VfsOps + 'static>(mountpoint: &str, client: Arc<C>) -> FsResult<()> {
-    let fs = FuseClient::new(client);
+pub fn mount_fuse<C: VfsOps + 'static>(
+    mountpoint: &str,
+    client: Arc<C>,
+    rt: tokio::runtime::Handle,
+) -> FsResult<()> {
+    let fs = FuseClient::new(client, rt);
     let options = vec![
         MountOption::FSName("rucksfs".to_string()),
         MountOption::AutoUnmount,

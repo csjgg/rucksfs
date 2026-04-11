@@ -612,7 +612,12 @@ async fn run_mount_mode(cli: &Cli) {
         println!("▶ Using persistent storage at: {}", data_dir.display());
         let client = Arc::new(build_client(&data_dir, cli.max_file_size));
         println!("▶ Press Ctrl+C or run `fusermount -u {}` to unmount.", mountpoint);
-        if let Err(e) = rucksfs_client::mount_fuse(mountpoint, client) {
+        let rt = tokio::runtime::Handle::current();
+        let mp = mountpoint.to_string();
+        let fuse_result = tokio::task::spawn_blocking(move || {
+            rucksfs_client::mount_fuse(&mp, client, rt)
+        }).await.expect("FUSE thread panicked");
+        if let Err(e) = fuse_result {
             eprintln!("FUSE mount error: {}", e);
             std::process::exit(1);
         }

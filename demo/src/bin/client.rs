@@ -60,7 +60,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "linux")]
     {
         println!("  Press Ctrl+C or run `fusermount -u {}` to unmount.", cli.mount);
-        if let Err(e) = rucksfs_client::mount_fuse(&cli.mount, vfs) {
+        let rt = tokio::runtime::Handle::current();
+        let mountpoint = cli.mount.clone();
+        // Run FUSE event loop on a blocking thread so it doesn't block tokio workers.
+        let fuse_result = tokio::task::spawn_blocking(move || {
+            rucksfs_client::mount_fuse(&mountpoint, vfs, rt)
+        }).await.expect("FUSE thread panicked");
+        if let Err(e) = fuse_result {
             eprintln!("FUSE mount error: {}", e);
             std::process::exit(1);
         }

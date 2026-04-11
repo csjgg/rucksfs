@@ -15,4 +15,3 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "signal"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = "0.15"
 libc = "0.2"
-futures = "0.3"
