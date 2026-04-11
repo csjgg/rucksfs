@@ -9,11 +9,9 @@
 | 维度 | 工具 | 目的 |
 |------|------|------|
 | **正确性** | pjdfstest (8800+ tests) | POSIX 合规性验证 |
-| **性能** | mdtest + rucksfs-bench | 元数据 ops/sec，横向对比 |
+| **性能** | mdtest (IOR/LLNL) | 元数据 ops/sec，横向对比 |
 
 ---
-
-## 2. 对比对象
 
 ## 2. 对比对象与控制变量
 
@@ -23,25 +21,32 @@
 必须控制变量，按层次分组：
 
 ```
-层次 1（核心对比）: 都走网络 + 都走 FUSE → 变量只有元数据引擎
-层次 2（开销量化）: 同一系统嵌入式 vs 分布式 → 量化 gRPC 网络开销
-层次 3（参照线）:   ext4 本地 → 标注为 baseline reference，不做直接对比
+层次 1（核心对比）: 都走 FUSE + 都走网络 + 都持久化到磁盘 → 变量只有元数据引擎
+层次 2（内存优势量化）: JuiceFS+Redis vs JuiceFS+MySQL → 变量只有内存 vs 磁盘
+层次 3（网络开销量化）: RucksFS 嵌入式 vs 分布式 → 变量只有函数直调 vs gRPC
+层次 4（参照线）:   ext4 本地 / NFS+ext4 → 标注为 reference，不做直接对比
 ```
 
 ### 正式对比矩阵
 
 | 对比组 | 对象 A | 对象 B | 控制变量 | 证明什么 |
 |--------|--------|--------|---------|---------|
-| **核心对比** | RucksFS 分布式 | JuiceFS + Redis | 都走 FUSE + 网络，变量是元数据引擎 (RocksDB vs Redis) | RucksFS 元数据引擎的竞争力 |
-| **网络开销** | RucksFS 嵌入式 | RucksFS 分布式 | 同一代码，变量是函数直调 vs gRPC | gRPC 通信开销可控 |
-| **参照线** | ext4 (本地, 无 FUSE) | — | 不参与对比 | 图表中标注为 "local ext4 reference"，让读者理解 FUSE 天花板 |
+| **核心对比** | RucksFS 分布式 (FUSE+gRPC+RocksDB) | JuiceFS + MySQL (FUSE+网络+磁盘持久化) | 都走 FUSE + 网络，都用磁盘持久化元数据引擎 | RocksDB vs MySQL 元数据引擎的竞争力 |
+| **内存优势量化** | JuiceFS + Redis | JuiceFS + MySQL | 同一 JuiceFS 代码，变量是内存引擎 vs 磁盘引擎 | 内存型引擎的加速比（帮助读者理解公平性） |
+| **网络开销量化** | RucksFS 嵌入式 | RucksFS 分布式 | 同一代码，变量是函数直调 vs gRPC | gRPC 通信开销可控 |
+| **传统网络FS参照** | NFS (kernel nfsd + ext4) | — | 内核态 NFS，无 FUSE | 传统方案的性能参照线 |
+| **本地天花板参照** | ext4 (本地, 无 FUSE, 无网络) | — | 不参与任何对比 | 图表中标注为 "local ext4 ceiling"，让读者理解上限 |
 
-### 可选对比项（如有条件）
+### 为什么用 JuiceFS+MySQL 而非 JuiceFS+Redis 做核心对比？
 
-| 对比对象 | 说明 |
-|---------|------|
-| JuiceFS + TiKV | JuiceFS 的分布式元数据引擎方案，对比分布式 KV |
-| NFS (kernel nfsd + ext4) | 传统网络文件系统，走内核态 NFS，无 FUSE |
+| 维度 | Redis | MySQL | RocksDB (RucksFS) |
+|------|-------|-------|-------------------|
+| 数据持久化 | 默认异步 (AOF/RDB) | WAL + B-Tree，同步写 | WAL + LSM-Tree，同步写 |
+| 存储介质 | **内存**为主 | **磁盘**为主 | **磁盘**为主 |
+| 延迟量级 | µs 级 | ms 级 | ms 级 |
+
+Redis 的内存操作天然比磁盘快 1-2 个数量级，直接对比不公平。
+JuiceFS+MySQL 与 RucksFS+RocksDB 都是磁盘持久化引擎，延迟在同一量级，是最公平的对比基础。
 
 ---
 
@@ -83,19 +88,7 @@ mdtest -h
 | File removal | unlink 性能 |
 | Tree creation/removal | 递归创建/删除目录树 |
 
-### 3.2 rucksfs-bench（自研工具）
-
-项目已有的 Rust 原生 benchmark 工具（`benchmark/bench-tool/`）。
-
-优势：
-- 直接测 FUSE 挂载点，不需要 MPI
-- 支持 easy/hard 两种模式（私有目录 vs 共享目录）
-- CSV 输出，方便自动化对比
-- 可以跑 chained 模式（create→stat→rename→unlink 全链路）
-
-**两个工具互补**：rucksfs-bench 用于快速内部迭代找瓶颈，mdtest 出最终论文数据。
-
-### 3.3 pjdfstest（正确性）
+### 3.2 pjdfstest（正确性验证）
 
 ```bash
 # 安装
@@ -112,57 +105,100 @@ prove -rv /path/to/pjdfstest/tests/
 
 ---
 
-## 4. 机器需求
+## 4. 测试环境：腾讯云 CVM 配置
 
-### 最小配置（2 台机器）
+### 4.1 机器规划（3 台）
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  机器 A: 客户端 + 测试驱动                                     │
-│  角色: 运行 mdtest / rucksfs-bench / pjdfstest                │
-│  配置: 4 core CPU, 8GB RAM, SSD                              │
-│  软件: FUSE, MPI (mpich), mdtest, pjdfstest                  │
-│                                                              │
-│  同时也部署:                                                   │
-│  - ext4 本地测试 (不挂 FUSE, 直接 mdtest → 本地目录)            │
-│  - JuiceFS client (FUSE mount)                               │
-│  - RucksFS client (FUSE mount, 分布式模式)                     │
-│  - RucksFS embedded (FUSE mount, 一体化模式)                   │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  机器 A: 测试驱动 + 客户端                                         │
+│  角色: 运行 mdtest / pjdfstest，承载所有 FUSE 挂载点                 │
+│                                                                   │
+│  部署:                                                            │
+│  - ext4 本地测试 (直接 mdtest → 本地 SSD 目录)                      │
+│  - RucksFS embedded (FUSE mount, 一体化模式)                       │
+│  - RucksFS distributed client (FUSE mount → 机器 B)               │
+│  - JuiceFS client (FUSE mount → 机器 B Redis/MySQL + 机器 C MinIO) │
+│  - NFS client (mount → 机器 C nfsd)                               │
+│                                                                   │
+│  软件: FUSE, MPI (mpich), mdtest, pjdfstest, JuiceFS CLI, NFS    │
+│        client, RucksFS binaries                                   │
+└──────────────────────────────────────────────────────────────────┘
         │
-        │ gRPC / JuiceFS 协议
+        │ gRPC / MySQL / Redis / NFS / JuiceFS 协议
         ▼
-┌─────────────────────────────────────────────────────────────┐
-│  机器 B: 服务端                                               │
-│  角色: 运行各个文件系统的后端                                    │
-│  配置: 4 core CPU, 8GB RAM, SSD                              │
-│  软件:                                                       │
-│  - RucksFS MetadataServer + DataServer                       │
-│  - Redis (for JuiceFS metadata)                              │
-│  - MinIO / 本地 S3 模拟 (for JuiceFS data)                    │
-│  - JuiceFS format + mount helper                             │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  机器 B: 元数据服务端                                               │
+│  角色: 运行所有元数据引擎后端                                         │
+│                                                                   │
+│  部署:                                                            │
+│  - RucksFS MetadataServer (gRPC :8001)                            │
+│  - MySQL 8.0 (for JuiceFS, :3306)                                 │
+│  - Redis 7.x (for JuiceFS 内存对比, :6379)                         │
+│                                                                   │
+│  关键: 所有元数据引擎运行在同一台机器上，硬件条件完全一致               │
+└──────────────────────────────────────────────────────────────────┘
+        │
+        │ gRPC / S3 / NFS
+        ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  机器 C: 数据服务端                                                 │
+│  角色: 运行所有数据存储后端                                          │
+│                                                                   │
+│  部署:                                                            │
+│  - RucksFS DataServer (gRPC :8002)                                │
+│  - MinIO (S3 兼容, for JuiceFS, :9000)                             │
+│  - NFS Server (kernel nfsd + ext4, :2049)                         │
+│                                                                   │
+│  关键: 所有数据服务运行在同一台机器上                                  │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-### 推荐配置（3 台机器，更贴近生产）
+### 4.2 腾讯云 CVM 购买规格
 
+| 机器 | 规格 | 实例类型建议 | 系统盘 | 数据盘 | 说明 |
+|------|------|------------|--------|--------|------|
+| A (客户端) | 8 核 16GB | SA3.2XLARGE16 (标准型) | 50GB 高性能云硬盘 | 200GB SSD 云硬盘 | 运行 mdtest + FUSE 挂载，8 核确保多进程测试不成瓶颈 |
+| B (元数据) | 8 核 16GB | SA3.2XLARGE16 (标准型) | 50GB 高性能云硬盘 | 200GB SSD 云硬盘 | MySQL + Redis + RucksFS MetaServer 共用，16GB 够 Redis 缓存 |
+| C (数据) | 4 核 8GB | SA3.XLARGE8 (标准型) | 50GB 高性能云硬盘 | 500GB SSD 云硬盘 | MinIO + DataServer + NFS 共用，数据盘大一些 |
+
+**关键配置项**：
+
+| 项目 | 要求 |
+|------|------|
+| **地域** | 同一可用区（如广州三区） |
+| **VPC** | 三台机器在同一 VPC 子网 |
+| **安全组** | 互相放通全部端口（或至少 8001, 8002, 3306, 6379, 9000, 2049） |
+| **操作系统** | Ubuntu 22.04 LTS |
+| **网络** | 内网带宽 ≥ 3Gbps（SA3 默认即可），延迟 < 0.3ms |
+| **购买方式** | 按量计费（测试完即释放，预计测试 2-3 天） |
+
+**预估费用**（按量计费，广州区参考价）：
+
+| 机器 | 单价约 | 3 天费用约 |
+|------|--------|-----------|
+| A: 8C16G + 200G SSD | ~1.5 元/小时 | ~108 元 |
+| B: 8C16G + 200G SSD | ~1.5 元/小时 | ~108 元 |
+| C: 4C8G + 500G SSD | ~1.0 元/小时 | ~72 元 |
+| **合计** | | **~288 元** |
+
+> 提示：如有教育优惠或新用户优惠券可进一步降低成本。也可用竞价实例（Spot）节省 50-80%。
+
+### 4.3 网络验证
+
+测试开始前必须验证网络质量：
+
+```bash
+# 在机器 A 上执行
+# 1. 延迟验证（预期 < 0.3ms）
+ping -c 100 <机器B内网IP>
+ping -c 100 <机器C内网IP>
+
+# 2. 带宽验证（预期 > 3Gbps）
+# 机器 B/C 上: iperf3 -s
+iperf3 -c <机器B内网IP> -t 30 -P 4
+iperf3 -c <机器C内网IP> -t 30 -P 4
 ```
-机器 A: 纯客户端 (mdtest, FUSE mounts)
-机器 B: RucksFS MetadataServer + JuiceFS Redis
-机器 C: RucksFS DataServer + JuiceFS MinIO/S3
-```
-
-### 硬件要求
-
-| 项目 | 最低要求 | 推荐 |
-|------|---------|------|
-| CPU | 4 core | 8 core |
-| 内存 | 8 GB | 16 GB |
-| 磁盘 | SSD 100GB | NVMe SSD 200GB |
-| 网络 | 1 Gbps（同局域网） | 10 Gbps 或同机房内网 |
-| OS | Ubuntu 22.04+ | Ubuntu 22.04 LTS |
-
-**关键**：所有机器必须在同一局域网，网络延迟 < 1ms，否则网络延迟会淹没文件系统本身的性能差异。
 
 ---
 
@@ -206,20 +242,7 @@ mpirun -np 8  mdtest -d /mnt/<target> -n 10000 -F -C -T -r -u
 | `-z` | depth | 目录树深度 |
 | `-I` | items per dir | 每目录条目数 |
 
-### 5.2 rucksfs-bench 参数
-
-```bash
-# 基准测试
-rucksfs-bench -m /mnt/<target> -t 1 -n 10000 -o results/<target>/
-
-# 并发 scaling 测试
-rucksfs-bench -m /mnt/<target> -t 1,2,4,8 -n 10000 -o results/<target>/
-
-# chained 全链路
-rucksfs-bench -m /mnt/<target> -t 1,2,4,8 -n 10000 --mode all -o results/<target>/
-```
-
-### 5.3 pjdfstest 参数
+### 5.2 pjdfstest 参数
 
 ```bash
 cd /mnt/<target>
@@ -230,73 +253,141 @@ prove -rv /path/to/pjdfstest/tests/ 2>&1 | tee pjdfstest_results.txt
 
 ## 6. 部署流程
 
-### 6.1 ext4（基线，机器 A 本地）
+### 6.1 基础环境（所有机器）
 
 ```bash
-# 不需要额外部署，直接用本地 SSD 上的 ext4 分区
-mkdir -p /tmp/ext4-bench
-# 直接对本地目录跑 mdtest
-mdtest -d /tmp/ext4-bench -n 10000 -F -C -T -r -u -i 3
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y build-essential git curl wget
+
+# 记录环境信息
+uname -a > env_info.txt
+lscpu >> env_info.txt
+free -h >> env_info.txt
+lsblk >> env_info.txt
+ip a >> env_info.txt
 ```
 
-### 6.2 RucksFS 嵌入式模式（机器 A 本地）
+### 6.2 机器 A — 客户端 + 测试驱动
 
 ```bash
-# 编译
+# mdtest
+sudo apt install -y mpich automake
+git clone https://github.com/hpc/ior.git
+cd ior && ./bootstrap && ./configure --prefix=/usr/local/ior
+make -j$(nproc) && sudo make install
+
+# pjdfstest
+git clone https://github.com/pjd/pjdfstest.git
+cd pjdfstest && autoreconf -ifs && ./configure && make
+
+# FUSE
+sudo apt install -y fuse3 libfuse3-dev
+echo "user_allow_other" | sudo tee -a /etc/fuse.conf
+
+# JuiceFS client
+curl -sSL https://d.juicefs.com/install | sh -
+
+# NFS client
+sudo apt install -y nfs-common
+
+# RucksFS (从源码编译)
+# 需要先安装 Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source $HOME/.cargo/env
+cd /path/to/rucksfs
 cargo build --release -p rucksfs
-# 挂载
-mkdir -p /mnt/rucksfs-embedded
-./target/release/rucksfs --mount /mnt/rucksfs-embedded --data-dir /tmp/rucksfs-data
-# 跑测试
-mdtest -d /mnt/rucksfs-embedded -n 10000 -F -C -T -r -u -i 3
+
+# ext4 本地测试目录
+mkdir -p /tmp/ext4-bench
 ```
 
-### 6.3 RucksFS 分布式模式
+### 6.3 机器 B — 元数据服务端
 
 ```bash
-# 机器 B: 启动 MetadataServer + DataServer
-./rucksfs-metaserver --listen 0.0.0.0:8001 --data-dir /var/rucksfs
-./rucksfs-dataserver --listen 0.0.0.0:8002 --data-dir /var/rucksfs
+# MySQL 8.0
+sudo apt install -y mysql-server
+sudo systemctl start mysql
+# 配置：
+# - bind-address = 0.0.0.0
+# - 创建 juicefs 用户和数据库
+sudo mysql -e "CREATE DATABASE juicefs;"
+sudo mysql -e "CREATE USER 'juicefs'@'%' IDENTIFIED BY 'juicefs_bench';"
+sudo mysql -e "GRANT ALL ON juicefs.* TO 'juicefs'@'%';"
+sudo mysql -e "FLUSH PRIVILEGES;"
 
-# 机器 A: 启动远程 client
-./rucksfs-remote-client \
-    --mount /mnt/rucksfs-dist \
-    --meta-addr http://<机器B_IP>:8001 \
-    --data-addr http://<机器B_IP>:8002
-
-# 跑测试
-mdtest -d /mnt/rucksfs-dist -n 10000 -F -C -T -r -u -i 3
-```
-
-### 6.4 JuiceFS + Redis（对比项）
-
-```bash
-# 机器 B: 部署 Redis + MinIO
+# Redis
 sudo apt install -y redis-server
-redis-server --bind 0.0.0.0 --port 6379 --daemonize yes
+# 配置 bind 0.0.0.0
+sudo sed -i 's/^bind .*/bind 0.0.0.0/' /etc/redis/redis.conf
+sudo systemctl restart redis
 
-# MinIO (S3 兼容对象存储)
+# RucksFS MetadataServer
+# 将编译好的 binary 传到机器 B
+./rucksfs-metaserver --listen 0.0.0.0:8001 --data-dir /data/rucksfs-meta
+```
+
+### 6.4 机器 C — 数据服务端
+
+```bash
+# MinIO
 wget https://dl.min.io/server/minio/release/linux-amd64/minio
 chmod +x minio
 MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin \
-    ./minio server /var/minio-data --address :9000 &
+    ./minio server /data/minio --address :9000 &
 
-# 机器 A: 安装 JuiceFS 并格式化
-curl -sSL https://d.juicefs.com/install | sh -
+# NFS server
+sudo apt install -y nfs-kernel-server
+sudo mkdir -p /data/nfs-export
+echo "/data/nfs-export *(rw,sync,no_subtree_check,no_root_squash)" | sudo tee -a /etc/exports
+sudo exportfs -rav
+sudo systemctl restart nfs-kernel-server
+
+# RucksFS DataServer
+./rucksfs-dataserver --listen 0.0.0.0:8002 --data-dir /data/rucksfs-data
+```
+
+### 6.5 机器 A — 挂载各文件系统
+
+```bash
+# 1. RucksFS 嵌入式（一体化模式，本地 FUSE）
+mkdir -p /mnt/rucksfs-embedded
+./rucksfs --mount /mnt/rucksfs-embedded --data-dir /data/rucksfs-local
+
+# 2. RucksFS 分布式（远程 MetadataServer + DataServer）
+mkdir -p /mnt/rucksfs-dist
+./rucksfs-remote-client \
+    --mount /mnt/rucksfs-dist \
+    --meta-addr http://<B_IP>:8001 \
+    --data-addr http://<C_IP>:8002
+
+# 3. JuiceFS + MySQL（核心对比对象）
+mkdir -p /mnt/juicefs-mysql
 juicefs format \
     --storage minio \
-    --bucket http://<机器B_IP>:9000/jfs-bench \
+    --bucket http://<C_IP>:9000/jfs-mysql \
     --access-key minioadmin \
     --secret-key minioadmin \
-    redis://<机器B_IP>:6379/1 \
-    jfs-bench
+    "mysql://juicefs:juicefs_bench@(<B_IP>:3306)/juicefs" \
+    jfs-mysql
+juicefs mount "mysql://juicefs:juicefs_bench@(<B_IP>:3306)/juicefs" /mnt/juicefs-mysql -d
 
-# 挂载
-mkdir -p /mnt/juicefs
-juicefs mount redis://<机器B_IP>:6379/1 /mnt/juicefs -d
+# 4. JuiceFS + Redis（内存优势量化）
+mkdir -p /mnt/juicefs-redis
+juicefs format \
+    --storage minio \
+    --bucket http://<C_IP>:9000/jfs-redis \
+    --access-key minioadmin \
+    --secret-key minioadmin \
+    "redis://<B_IP>:6379/1" \
+    jfs-redis
+juicefs mount "redis://<B_IP>:6379/1" /mnt/juicefs-redis -d
 
-# 跑测试
-mdtest -d /mnt/juicefs -n 10000 -F -C -T -r -u -i 3
+# 5. NFS (传统网络文件系统参照)
+mkdir -p /mnt/nfs
+sudo mount -t nfs <C_IP>:/data/nfs-export /mnt/nfs
+
+# 6. ext4 本地（天花板参照，不挂 FUSE）
+mkdir -p /tmp/ext4-bench
 ```
 
 ---
@@ -305,81 +396,107 @@ mdtest -d /mnt/juicefs -n 10000 -F -C -T -r -u -i 3
 
 每个 target 跑同样的参数，结果放到统一格式里对比。
 
-### 单进程基准（核心对比）
+### 7.1 单进程基准（核心对比）
 
-| 操作 | RucksFS-嵌入式 | RucksFS-分布式 | JuiceFS+Redis | ext4 (参照线) |
-|------|---------------|--------------|---------------|--------------|
-| File creation (ops/s) | | | | |
-| File stat (ops/s) | | | | |
-| File removal (ops/s) | | | | |
-| Dir creation (ops/s) | | | | |
-| Dir stat (ops/s) | | | | |
-| Dir removal (ops/s) | | | | |
+| 操作 | RucksFS 嵌入式 | RucksFS 分布式 | JuiceFS+MySQL | JuiceFS+Redis | NFS+ext4 | ext4 本地 |
+|------|---------------|--------------|--------------|--------------|----------|----------|
+| File creation (ops/s) | | | | | | |
+| File stat (ops/s) | | | | | | |
+| File removal (ops/s) | | | | | | |
+| Dir creation (ops/s) | | | | | | |
+| Dir stat (ops/s) | | | | | | |
+| Dir removal (ops/s) | | | | | | |
 
-### 并发 scaling（文件 create ops/s）
+> **注**: ext4 本地数据仅标注为 "ceiling reference"，不参与对比分析。NFS+ext4 标注为 "traditional NFS reference"。
 
-| 进程数 | RucksFS-嵌入式 | RucksFS-分布式 | JuiceFS+Redis | ext4 (参照线) |
-|--------|---------------|--------------|---------------|--------------|
-| 1 | | | | |
-| 2 | | | | |
-| 4 | | | | |
-| 8 | | | | |
+### 7.2 并发 scaling（文件 create ops/s）
 
-### 正确性
+| 进程数 | RucksFS 嵌入式 | RucksFS 分布式 | JuiceFS+MySQL | JuiceFS+Redis | NFS+ext4 |
+|--------|---------------|--------------|--------------|--------------|----------|
+| 1 | | | | | |
+| 2 | | | | | |
+| 4 | | | | | |
+| 8 | | | | | |
 
-| 测试套件 | RucksFS | JuiceFS |
-|---------|---------|---------|
+### 7.3 正确性
+
+| 测试套件 | RucksFS | JuiceFS+MySQL |
+|---------|---------|---------------|
 | pjdfstest 通过率 | /8800 | /8800 |
 | 已知跳过项 | link, mkfifo, mknod | (查 JuiceFS 文档) |
+
+### 7.4 论文图表规划
+
+| 图编号 | 类型 | 内容 | 对比对象 |
+|-------|------|------|---------|
+| Fig.1 | 柱状图 | 单进程 6 种操作 ops/s | RucksFS-dist vs JuiceFS+MySQL（核心结论图） |
+| Fig.2 | 折线图 | 并发 scaling (1→8 进程) | RucksFS-dist vs JuiceFS+MySQL |
+| Fig.3 | 柱状图 | RucksFS 嵌入式 vs 分布式 | 量化 gRPC 网络开销 |
+| Fig.4 | 柱状图 | JuiceFS+Redis vs JuiceFS+MySQL | 说明内存引擎优势，证明选 MySQL 对比更公平 |
+| Fig.5 | 柱状图 | 所有系统 + NFS + ext4 参照线 | 全景图，带虚线标注 reference |
+| Fig.6 | 表格 | pjdfstest 通过率 | RucksFS vs JuiceFS |
 
 ---
 
 ## 8. 测试流程自动化脚本
 
-建议创建一个一键跑完所有对比测试的脚本：
-
 ```bash
 #!/bin/bash
 # scripts/benchmark/run_comparison.sh
 
-TARGETS=("ext4:/tmp/ext4-bench" 
-         "rucksfs-embedded:/mnt/rucksfs-embedded"
-         "rucksfs-dist:/mnt/rucksfs-dist"
-         "juicefs:/mnt/juicefs")
+TARGETS=(
+    "ext4:/tmp/ext4-bench"
+    "rucksfs-embedded:/mnt/rucksfs-embedded"
+    "rucksfs-dist:/mnt/rucksfs-dist"
+    "juicefs-mysql:/mnt/juicefs-mysql"
+    "juicefs-redis:/mnt/juicefs-redis"
+    "nfs:/mnt/nfs"
+)
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RESULT_DIR="test-results/comparison_${TIMESTAMP}"
 mkdir -p "$RESULT_DIR"
 
+# 固定 CPU 频率
+sudo cpupower frequency-set -g performance 2>/dev/null
+
 for entry in "${TARGETS[@]}"; do
     name="${entry%%:*}"
     path="${entry##*:}"
     echo "=== Testing $name at $path ==="
-    
-    # 1. 清理
+
+    # 预热
+    echo "  [warmup]"
+    mdtest -d "$path" -n 1000 -F -C -T -r -u > /dev/null 2>&1
     rm -rf "$path"/* 2>/dev/null
-    
-    # 2. mdtest 单进程
+
+    # drop caches
+    sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+
+    # 1. mdtest 单进程
+    echo "  [single-process mdtest]"
     mdtest -d "$path" -n 10000 -F -C -T -r -u -i 3 \
         | tee "$RESULT_DIR/${name}_mdtest_single.txt"
-    rm -rf "$path"/*
-    
-    # 3. mdtest 多进程
+    rm -rf "$path"/* 2>/dev/null
+
+    # 2. mdtest 多进程 scaling
     for np in 1 2 4 8; do
+        sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+        echo "  [mdtest np=$np]"
         mpirun -np $np mdtest -d "$path" -n 10000 -F -u -i 3 \
             | tee "$RESULT_DIR/${name}_mdtest_np${np}.txt"
-        rm -rf "$path"/*
+        rm -rf "$path"/* 2>/dev/null
     done
-    
-    # 4. rucksfs-bench (如果有)
-    if command -v rucksfs-bench &>/dev/null; then
-        rucksfs-bench -m "$path" -t 1,2,4,8 -n 10000 \
-            -o "$RESULT_DIR/${name}_bench/"
-        rm -rf "$path"/*
-    fi
+
+    # 3. mdtest 目录树测试
+    sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+    echo "  [tree test]"
+    mdtest -d "$path" -b 6 -I 8 -z 4 -i 3 \
+        | tee "$RESULT_DIR/${name}_mdtest_tree.txt"
+    rm -rf "$path"/* 2>/dev/null
 done
 
-echo "Results saved to $RESULT_DIR"
+echo "=== All tests complete. Results in $RESULT_DIR ==="
 ```
 
 ---
@@ -388,16 +505,18 @@ echo "Results saved to $RESULT_DIR"
 
 | 场景 | 预期结果 |
 |------|---------|
-| RucksFS-嵌入式 vs JuiceFS | RucksFS 可能更快（RocksDB 本地 vs Redis 网络 + S3） |
-| RucksFS-分布式 vs JuiceFS | 核心对比项——同是 FUSE+网络文件系统，看元数据引擎效率 |
-| RucksFS-嵌入式 vs RucksFS-分布式 | 嵌入式快 2-10x（量化 gRPC 通信开销） |
-| ext4 参照线 | 比所有 FUSE 方案快 10-50x，仅作为天花板参照 |
-| 并发 scaling | RucksFS 的 PCC 事务在高并发下的冲突率是关键指标 |
+| **RucksFS-分布式 vs JuiceFS+MySQL** | **核心结论** — RocksDB LSM-Tree 的写入性能可能优于 MySQL B-Tree，尤其在 create/unlink 等写密集操作 |
+| **JuiceFS+Redis vs JuiceFS+MySQL** | Redis 快 3-10x，说明我们选 MySQL 做对比是公平的 |
+| **RucksFS-嵌入式 vs RucksFS-分布式** | 嵌入式快 2-10x，量化 gRPC 通信开销 |
+| **NFS+ext4 参照线** | 内核态 NFS 在 stat 等读操作上可能很快，但 create/unlink 不一定快（ext4 journal 开销） |
+| **ext4 天花板** | 比所有网络方案快 10-50x，仅作为天花板参照 |
+| **并发 scaling** | RucksFS 的 PCC 事务在高并发下的冲突率是关键指标 |
 
 **毕设论文的核心论点**：
-1. RucksFS 嵌入式模式在元数据性能上接近或优于 JuiceFS（验证 RocksDB 元数据引擎的效率）
-2. 分布式模式 gRPC 开销可控，和 JuiceFS 在同一数量级
+1. RucksFS 分布式模式在元数据性能上与 JuiceFS+MySQL 处于同一数量级或更优（验证 RocksDB 元数据引擎的效率）
+2. gRPC 通信开销可控（嵌入式 vs 分布式对比）
 3. PCC 事务 + delta compaction 在并发场景下的 scaling 特性
+4. POSIX 合规性通过 pjdfstest 验证
 
 ---
 
@@ -410,7 +529,9 @@ echo "Results saved to $RESULT_DIR"
 5. **固定 CPU 频率**：`cpupower frequency-set -g performance`，避免动态调频影响结果
 6. **关闭无关服务**：测试期间关闭 cron、apt 自动更新等后台服务
 7. **记录环境**：保存 `uname -a`、`lscpu`、`free -h`、`lsblk`、`ip a` 输出
-8. **网络验证**：测试前用 `ping` 和 `iperf3` 确认网络延迟 < 1ms、带宽 >= 1Gbps
+8. **网络验证**：测试前用 `ping` 和 `iperf3` 确认网络延迟 < 0.3ms、带宽 >= 3Gbps
+9. **MySQL 调优**：`innodb_flush_log_at_trx_commit=1`（保持默认同步写，公平对比）
+10. **Redis 持久化**：`appendonly yes`，`appendfsync everysec`（与 JuiceFS 官方推荐一致）
 
 ---
 
@@ -419,6 +540,7 @@ echo "Results saved to $RESULT_DIR"
 - [mdtest (IOR project) GitHub](https://github.com/hpc/ior)
 - [JuiceFS 官方 mdtest 文档](https://www.juicefs.com/docs/zh/community/mdtest)
 - [JuiceFS Benchmark 数据](https://github.com/juicedata/juicefs/blob/main/docs/en/benchmark/benchmark.md)
+- [JuiceFS MySQL 引擎](https://juicefs.com/docs/zh/community/databases_for_metadata#mysql)
 - [pjdfstest GitHub](https://github.com/pjd/pjdfstest)
 - [MDTest - Lustre Wiki](https://www.wiki.lustre.org/index.php?oldid=5315&title=MDTest)
-- [BeeGFS Benchmark Guide](https://doc.beegfs.io/8.1/advanced_topics/benchmark.html)
+- [腾讯云 CVM 实例规格](https://cloud.tencent.com/document/product/213/11518)
