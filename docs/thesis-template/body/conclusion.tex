@@ -1,0 +1,24 @@
+\section{总结与展望}
+
+\subsection{工作总结}
+
+本课题围绕文件系统元数据的键值对存储展开研究，完成了以下工作：
+
+\begin{enumerate}
+    \item 设计并实现了基于 RocksDB 多列族的 FUSE（Filesystem in Userspace）文件系统 RucksFS，支持 create、mkdir、unlink、rmdir、rename、readdir 等核心 POSIX 文件操作，采用四层列族架构（inodes、dir\_entries、delta\_entries、system）分离不同类型的元数据存储。
+    \item 提出增量更新与懒折叠机制，通过追加写 DeltaOp 替代父目录的读--修改--写模式，将变异操作的 WAL（Write-Ahead Log）写入次数从 2 次减少到 1 次；后台压缩线程在增量日志累积超过 32 条时自动折叠，避免读路径退化。
+    \item 实现了基于 PCC（Pessimistic Concurrency Control）事务模型的并发控制方案，通过 WriteBatch 原子提交与 TOCTOU（Time-of-Check to Time-of-Use）防护机制，保证 create、unlink、rename 等目录操作在并发场景下的一致性，冲突时自动重试最多 3 次。
+    \item 基于 fuse3 异步接口与 tokio 运行时，实现了支持多并发客户端的 FUSE 文件系统挂载，挂载选项包括 default\_permissions 和 AllowOther，由内核 VFS 层完成 POSIX 权限检查。
+    \item 在 4 节点集群上使用 mdtest 与 JuiceFS（MySQL/TiKV 后端）、CubeFS、NFS 进行对比测试，RucksFS 在 64 并发进程下达到 9,917 次/秒的文件创建吞吐量，是 JuiceFS+MySQL 的 2.4 倍。
+    \item 单机模式下元数据操作性能接近 ext4：create 达到 ext4 的 0.98 倍，unlink 达到 1.17 倍。
+\end{enumerate}
+
+\subsection{不足与展望}
+
+尽管 RucksFS 在元数据操作性能上取得了较好的结果，当前实现仍存在以下不足：
+
+\begin{enumerate}
+    \item \textbf{gRPC 网络往返开销}。分布式模式下，gRPC 网络往返是性能的主要瓶颈。实验测量表明，单次 create 操作需要 4 次 RPC 调用，网络开销是本地操作的 48.6 倍。后续可通过合并 RPC 调用（将 4 次缩减为 1 次批量请求）以及引入客户端元数据缓存来缓解该问题。
+    \item \textbf{分布式部署尚未完成}。当前系统仅支持单 MetadataServer 与单 DataServer 的部署形态，多节点元数据分片和数据副本机制尚未实现。后续可参考 CubeFS 的 Multi-Raft 方案或 JuiceFS 的分布式 KV 后端，实现元数据的水平扩展。
+    \item \textbf{元数据预取与智能调度}。当前系统对所有元数据请求采用相同的处理路径，未针对访问模式做优化。后续可探索基于 eBPF（extended Berkeley Packet Filter）技术的内核态访问模式采集，结合预取策略减少用户态--内核态上下文切换的开销。
+\end{enumerate}

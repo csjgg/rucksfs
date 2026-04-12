@@ -1,0 +1,388 @@
+\section{相关技术基础}
+
+用户态文件系统的设计涉及多个层次的技术选型：从内核与用户空间的交互机制，
+到底层存储引擎的数据组织方式，再到文件操作语义的正确性保证和并发访问控制。
+本章围绕 RucksFS 所依赖的四项关键技术展开讨论——FUSE 用户态文件系统框架、
+RocksDB 存储引擎、POSIX 文件系统语义，以及悲观并发控制机制。
+每一项技术的原理与工程特性将直接影响后续章节中系统架构和实现方案的选择。
+
+\subsection{FUSE 用户态文件系统框架}
+
+传统文件系统（如 ext4、XFS、Btrfs）以内核模块的形式运行，
+开发和调试需要修改内核源码、编译模块、重启系统，迭代周期长且内核 bug 可能导致整机崩溃。
+FUSE（Filesystem in Userspace）\cite{szeredi2005fuse} 提供了一种将文件系统逻辑搬到用户空间的替代方案。
+自 Linux 2.6.14 起，FUSE 被纳入内核主线，成为用户态文件系统开发的事实标准。
+
+\subsubsection{FUSE 架构原理}
+
+FUSE 的架构由三个部分组成：VFS 层中注册的 FUSE 文件系统类型、FUSE 内核模块
+（\texttt{fuse.ko}），以及运行在用户空间的守护进程。当应用程序发起文件操作
+（如 \texttt{open()}、\texttt{read()}）时，系统调用进入 Linux VFS。VFS 识别出目标路径
+挂载在 FUSE 文件系统上，将请求转发给 FUSE 内核模块。该模块把 VFS 操作封装为
+一个结构化的 FUSE 请求，分配唯一的请求 ID，放入字符设备 \texttt{/dev/fuse} 的
+请求队列中。用户态守护进程通过 \texttt{read()} 系统调用从 \texttt{/dev/fuse}
+取出请求、解析操作类型和参数、执行自定义的文件系统逻辑，再将结果通过
+\texttt{write()} 写回 \texttt{/dev/fuse}。内核模块根据请求 ID 匹配响应，
+唤醒阻塞的应用线程，将结果返回给调用者。
+
+整个请求路径可以表示为：
+
+\begin{center}
+应用程序 $\rightarrow$ 系统调用 $\rightarrow$ VFS $\rightarrow$ FUSE 内核模块
+$\rightarrow$ \texttt{/dev/fuse} $\rightarrow$ 用户态守护进程
+\end{center}
+
+这种架构的工程优势是直接的。开发者可以使用任何用户态编程语言
+（C、Go、Rust、Python 等）实现文件系统逻辑，不受内核 API 和 GPL 许可证的约束。
+守护进程的 bug 只会导致文件系统不可用，而不会引发内核 panic。
+调试时可以直接使用 gdb、valgrind 等常规工具，修改代码后无需重启系统即可测试。
+
+\subsubsection{FUSE 请求处理流程}
+
+FUSE 内核模块维护两个队列：待处理请求队列（pending queue）和处理中队列（processing queue）。
+VFS 产生新的文件操作时，内核模块创建一个 \texttt{fuse\_req} 结构体并放入待处理队列。
+用户态守护进程通过 \texttt{read()} 从 \texttt{/dev/fuse} 获取请求时，
+该请求从待处理队列转移到处理中队列。守护进程通过 \texttt{write()} 写回应答后，
+内核模块将请求从处理中队列移除并唤醒等待的应用线程。
+
+libfuse 3.x 引入了多线程模式，守护进程可启动多个工作线程，
+各自独立地从 \texttt{/dev/fuse} 读取并处理请求。
+内核侧也支持并行派发——多个应用线程发起的请求可以同时存在于待处理队列中。
+这种并行处理能力在元数据密集型负载下尤其重要，因为单个 \texttt{lookup} 或
+\texttt{getattr} 操作的处理时间极短（微秒级），若串行处理则线程间等待时间远大于实际计算时间。
+
+在 Rust 生态中，\texttt{fuser} crate\cite{fuser2023crate}（版本 0.15）提供了对 FUSE 低级
+API 的封装，支持多线程 Session。每个线程拥有独立的文件描述符副本，直接从
+\texttt{/dev/fuse} 读取请求并调用用户实现的回调方法。
+另一个 Rust crate \texttt{fuse3} 则集成了 \texttt{tokio} 异步运行时，
+将 \texttt{/dev/fuse} 的读写操作注册到 epoll 事件循环中，
+使得单个线程即可处理大量并发请求而不阻塞，适合 I/O 等待时间较长的网络文件系统场景。
+
+\subsubsection{FUSE 性能特征与优化方向}
+
+Vangoor 等人\cite{vangoor2017fuse}在 FAST'17 上对 FUSE 的性能开销进行了系统测量。
+实验结果表明，相比内核原生文件系统，FUSE 引入的额外延迟因操作类型而异。
+元数据操作（如 \texttt{getattr}、\texttt{lookup}）的开销比例较大——
+这类操作本身执行时间极短（微秒级），而每次操作至少经历两次用户/内核态上下文切换，
+固定开销占比高，整体退化约 20\%--60\%。
+数据操作（如顺序读写大文件）的退化幅度相对较小，约 5\%--20\%，
+因为实际 I/O 时间占主导，切换开销被大量数据传输所摊薄。
+
+针对这些瓶颈，工程实践中存在若干优化手段：
+
+第一，利用内核侧的属性缓存（\texttt{attr\_timeout}）和目录项缓存
+（\texttt{entry\_timeout}）减少对用户态的回调次数。对于单机文件系统，
+不存在多客户端缓存一致性问题，缓存时长可以设置为秒级甚至更长。
+
+第二，启用 writeback 缓存模式，让内核页缓存合并多次小写入后再批量下发，
+将多次上下文切换减少为一次。
+
+第三，使用 \texttt{splice} 系统调用在内核缓冲区和用户态之间零拷贝传输数据，
+减少大文件读写的内存拷贝开销。
+
+第四，调整 \texttt{max\_background}（后台请求上限，默认 12）和
+\texttt{congestion\_threshold}（拥塞阈值，默认 9）参数，
+控制内核排队行为以匹配用户态处理能力。
+
+对于元数据密集型文件系统，缓存策略的选择尤为关键。
+\texttt{entry\_timeout} 设置过长可能导致应用看到过期的目录项，
+设置过短则频繁回调用户态。这需要根据文件系统的一致性需求和实际负载特征做权衡。
+
+\subsection{RocksDB 存储引擎}
+
+文件系统的元数据——inode 属性、目录项、扩展属性等——天然适合用键值对的形式组织。
+RocksDB\cite{dong2021rocksdb}是 Meta（原 Facebook）基于 Google
+LevelDB\cite{google2011leveldb}开发的嵌入式键值存储引擎，
+针对 SSD 和大规模写入场景做了大量优化。
+截至 2026 年，RocksDB 被广泛用于 MySQL（MyRocks）、TiKV、CockroachDB
+等系统的底层存储。
+
+\subsubsection{LSM-tree 数据结构}
+
+RocksDB 的底层数据结构为 LSM-tree（Log-Structured Merge-tree），
+最早由 O'Neil 等人\cite{oneil1996lsmtree}于 1996 年提出。
+其核心思想是将随机写转化为顺序写，以适应磁盘和 SSD 的 I/O 特性。
+
+写入路径如下：数据首先写入内存中的 MemTable（RocksDB 默认使用 SkipList 实现），
+同时追加一条 WAL（Write-Ahead Log）记录以保证持久性。
+当 MemTable 大小达到阈值（默认 64\,MB），它被转换为只读的 Immutable MemTable，
+由后台线程 flush 到磁盘，生成一个有序的 SST（Sorted String Table）文件，
+进入 Level-0 层。与此同时，一个新的空 MemTable 立即可用于接收后续写入。
+Level-0 的 SST 文件之间可能存在键范围重叠，当文件数量超过触发阈值
+（默认 4 个）时，后台 Compaction 线程将 Level-0 文件与 Level-1 文件合并排序，
+消除重叠并生成新的 SST 文件。类似的 Compaction 过程在更高层级之间逐层推进，
+每一层的总容量以固定倍率（默认 10 倍）递增。
+
+读取路径则相反：先查活跃 MemTable，再查 Immutable MemTable，
+然后从 Level-0 开始逐层搜索 SST 文件，直到找到目标键或确认不存在。
+为了加速点查询，每个 SST 文件内部维护索引块和可选的 Bloom 过滤器，
+内存中还维护块缓存（Block Cache）存放频繁访问的数据块。
+
+这种"写入友好"的结构使得 RocksDB 在写入密集场景下表现出色，
+但也带来写放大（同一数据在 Compaction 过程中被反复读写）和
+读放大（查询可能穿透多个层级）的问题。
+RocksDB 提供了 Leveled、Universal、FIFO 三种 Compaction 策略，
+允许使用者根据工作负载特征权衡写放大与空间利用率。
+
+\subsubsection{Column Family 机制}
+
+Column Family（列族）是 RocksDB 在单个数据库实例内提供的逻辑分区机制，
+设计上受到了 Bigtable\cite{chang2006bigtable}列族概念的启发。
+每个 Column Family 拥有独立的 MemTable、SST 文件集合和 Compaction 配置，
+但共享同一个 WAL 文件。一个 RocksDB 实例可以创建任意数量的 Column Family，
+各自配置不同的压缩算法、block\_size、Bloom 过滤器参数和 Compaction 触发阈值。
+
+这种隔离性在文件系统场景中有实际好处。inode 属性数据（几百字节一条）
+以点查询为主，适合配置较小的 block\_size 来减少读放大，并启用全键 Bloom 过滤器。
+目录项数据（父 inode 编号 + 文件名的映射）以前缀扫描为主——给定父目录 inode，
+遍历其下所有子项——适合配置前缀提取器和前缀 Bloom 过滤器。
+将两类数据放在不同的 Column Family 中，可以分别选择最优的配置，
+避免单一配置下的折衷。
+
+各 Column Family 独立 flush 和 Compaction 还有一个间接好处：
+频繁更新的数据（如文件大小、修改时间戳）产生的 Compaction I/O
+不会干扰相对稳定的目录结构数据。
+同时，同一个 WriteBatch 可以包含对多个 Column Family 的操作，
+并以原子方式提交——跨 Column Family 的原子性由共享 WAL 来保证。
+
+\subsubsection{WriteBatch 与事务支持}
+
+WriteBatch 是 RocksDB 的批量写入接口。
+多个 \texttt{put()}、\texttt{delete()}、\texttt{merge()} 操作可以被收集到
+同一个 WriteBatch 中，随后一次性提交。
+从持久化角度看，整个 WriteBatch 只产生一次 WAL 写入和一次 \texttt{fsync}，
+相比逐条提交将 I/O 次数降低了一到两个数量级。
+从原子性角度看，WriteBatch 中的所有操作要么全部对读取者可见，
+要么全部不可见，不存在部分提交的中间状态。
+
+单纯的 WriteBatch 无法处理"读取—判断—修改"模式的操作，
+因为在读取和写入之间，其他线程可能修改了相同的键。
+RocksDB 的 TransactionDB 在 WriteBatch 基础上增加了行级锁机制。
+打开数据库时指定 \texttt{TransactionDBOptions}，
+即可使用 \texttt{begin\_transaction()} 创建事务对象。
+事务内调用 \texttt{get\_for\_update(key)} 读取某个键时，
+TransactionDB 对该键加排他锁，阻止其他事务修改同一键，
+直到当前事务 \texttt{commit()} 或 \texttt{rollback()}。
+
+TransactionDB 同时支持两种并发控制模式：
+悲观模式（\texttt{TransactionDB}）在读取时即加锁；
+乐观模式（\texttt{OptimisticTransactionDB}）在提交时才检测冲突。
+文件系统元数据操作——特别是 \texttt{mkdir}、\texttt{rename}
+等涉及父目录并发修改的操作——冲突概率相对较高，
+悲观模式通过提前加锁避免了回滚的浪费。
+
+\subsubsection{Bloom 过滤器与前缀迭代器}
+
+点查询是文件系统元数据操作中最频繁的访问模式。
+例如 \texttt{lookup} 操作需要判断指定目录下是否存在某个名称的条目。
+如果目标 key 不存在，朴素的做法需要逐层遍历 SST 文件的索引才能确认，I/O 开销可观。
+
+RocksDB 在每个 SST 文件中嵌入 Bloom 过滤器\cite{rocksdb2023wiki}。
+这是一种概率性数据结构，能以 $O(k)$ 的时间（$k$ 为哈希函数个数）判断
+一个 key"一定不存在"或"可能存在"。
+默认配置下每个 key 使用 10 bits 的 Bloom 过滤器空间，假阳性率约为 1\%。
+查询命中否定结果时可以跳过该 SST 文件，对于不存在的 key，
+这种过滤能减少 90\% 以上的无效磁盘读取。
+
+除全键 Bloom 过滤器外，RocksDB 还提供前缀 Bloom 过滤器（Prefix Bloom Filter）。
+配合 \texttt{prefix\_extractor} 选项（如 \texttt{FixedPrefix(8)}），
+可以指定一个前缀提取函数——将 key 的前 $n$ 字节作为前缀，
+同一前缀下的所有 key 共享一个 Bloom 过滤器条目。
+配合 \texttt{ReadOptions::prefix\_same\_as\_start} 选项，
+迭代器在扫描完当前前缀后自动终止，无需遍历整个 SST 文件。
+
+前缀迭代器直接决定了目录遍历的执行效率。
+\texttt{readdir} 需要列出某个父目录下的所有子条目。
+如果目录项的 key 设计为"父 inode 编号（大端序 8 字节）+ 文件名"的复合格式，
+那么通过 \texttt{FixedPrefix(8)} 配置的前缀迭代器，可以只扫描属于该目录的条目，
+时间复杂度与该目录的条目数成正比，而非与整个数据库规模相关。
+前缀 Bloom 过滤器还能在扫描开始前排除不包含目标前缀的 SST 文件，
+进一步减少磁盘 I/O。
+
+\subsection{POSIX 文件系统语义}
+
+\subsubsection{inode 模型与目录结构}
+
+POSIX 标准\cite{ieee2017posix}定义了 Unix 系文件系统的基本抽象模型。
+每个文件系统对象（普通文件、目录、符号链接等）由一个 inode（index node）唯一标识。
+inode 编号在同一文件系统内全局唯一，存储了对象的全部元数据信息：
+文件类型与权限模式（\texttt{mode}，16 位整数）、
+所有者和所属组（\texttt{uid}/\texttt{gid}，各 32 位）、
+文件大小（\texttt{size}，64 位字节数）、
+硬链接计数（\texttt{nlink}）、
+访问时间（\texttt{atime}）、修改时间（\texttt{mtime}）、
+状态变更时间（\texttt{ctime}）等。
+
+目录是一种特殊文件，其数据内容是一组 (名称, inode 编号) 的映射关系，
+即目录项（directory entry, dentry）。
+同一个 inode 可以被多个目录项引用，这就是硬链接机制。
+inode 的 \texttt{nlink} 字段记录指向它的硬链接数量。
+当 \texttt{nlink} 降为 0 且没有进程持有该文件的打开文件描述符时，
+文件系统回收该 inode 及其数据块。
+
+根目录是整个文件系统命名空间的起点，通常使用 inode 编号 1 或 2（取决于具体实现）。
+每个目录至少包含两个特殊条目：\texttt{.}（指向自身）和 \texttt{..}（指向父目录）。
+路径解析从根目录开始，逐级在目录项中查找下一个分量的 inode 编号，
+直到到达目标对象或遇到错误（如中间某级目录不存在）。
+这个逐级查找过程在 FUSE 框架中对应 \texttt{lookup} 回调。
+
+\subsubsection{核心文件操作语义}
+
+POSIX 标准对文件操作的行为有严格规定，
+FUSE 文件系统必须正确实现这些语义才能被上层应用正常使用。
+以下是几个关键操作的语义约束。
+
+\texttt{create} 在指定目录下创建一个新的普通文件。
+系统需要分配一个未使用的 inode 编号、初始化 inode 元数据
+（\texttt{nlink} 设为 1，\texttt{size} 设为 0，\texttt{mode} 按参数设置），
+并在父目录中插入一条目录项。
+父目录的 \texttt{mtime} 和 \texttt{ctime} 需要同步更新。
+如果同名文件已存在，返回 \texttt{EEXIST} 错误。
+
+\texttt{unlink} 从指定目录中删除一个目录项，
+并将对应 inode 的 \texttt{nlink} 减 1。
+如果 \texttt{nlink} 降至 0，文件数据应当被释放
+（或在最后一个文件描述符关闭时延迟释放）。
+\texttt{unlink} 只能用于非目录对象——
+删除空目录需要使用 \texttt{rmdir}，
+它会额外检查目录是否为空（仅包含 \texttt{.} 和 \texttt{..}）。
+
+\texttt{rename} 将一个目录项从源位置移动到目标位置。
+POSIX 要求 \texttt{rename} 是原子操作：
+其他进程要么看到旧状态，要么看到新状态，
+不应观察到中间的不一致状态。
+如果目标位置已有同名文件，\texttt{rename} 先隐式 \texttt{unlink} 目标文件。
+跨目录的 \texttt{rename} 还需同时更新源父目录和目标父目录的元数据。
+
+\texttt{readdir} 遍历一个目录的所有条目，
+返回 (名称, inode 编号, 文件类型) 三元组的列表。
+POSIX 对遍历过程中的一致性保证较弱——
+允许在遍历期间新增或删除的条目可见性不确定。
+
+\subsubsection{权限模型}
+
+Unix 权限模型为每个 inode 关联三组 rwx（读/写/执行）权限位，
+分别对应文件所有者（owner）、所属组（group）和其他用户（other）。
+\texttt{mode} 字段的低 12 位编码了这些权限信息，
+其中高 3 位是特殊标志（setuid、setgid、sticky）。
+
+权限检查的逻辑是：对于发起操作的进程，
+先判断其 \texttt{uid} 是否等于文件的所有者 \texttt{uid}，
+如果匹配则使用 owner 权限位；
+否则检查进程的 \texttt{gid} 是否属于文件的 \texttt{gid}，
+匹配则使用 group 权限位；
+都不匹配时使用 other 权限位。
+\texttt{uid} 为 0（root）的进程绕过大部分权限检查。
+
+FUSE 框架提供了 \texttt{default\_permissions} 挂载选项。
+启用后，权限检查由内核 VFS 层代理完成，
+用户态守护进程无需自行实现权限判断逻辑——只需在 \texttt{getattr}
+中正确返回 \texttt{mode}、\texttt{uid}、\texttt{gid} 字段即可。
+内核根据请求中携带的调用者身份信息和 inode 存储的权限位，
+按照上述规则自动判断并在权限不足时返回 \texttt{EACCES}。
+配合 \texttt{allow\_other} 选项（需要 \texttt{/etc/fuse.conf}
+中启用 \texttt{user\_allow\_other}），
+非挂载者的用户也可以访问文件系统，适用于多用户环境。
+这种委托内核检查的方式既降低了实现复杂度，又保证了行为与内核原生文件系统一致。
+
+\subsection{悲观并发控制}
+
+文件系统的元数据操作天然面临并发竞争。多个进程可能同时在同一目录下创建文件、
+删除文件或执行 rename。如果不加以控制，并发操作可能导致链接计数错误、
+目录项残留或孤儿 inode 等一致性问题。
+
+\subsubsection{PCC 基本原理}
+
+悲观并发控制（Pessimistic Concurrency Control, PCC）的策略是"先加锁，再操作"。
+事务在访问数据之前即获取排他锁，持有锁期间其他事务对同一数据的访问被阻塞，
+直到锁释放。这种方式牺牲了一定的并行度，但换来了确定性的执行结果——
+事务一旦开始，就不会因为冲突而被迫回滚。
+
+与之对应的乐观并发控制（Optimistic Concurrency Control, OCC）则采取不同策略：
+事务执行期间不加锁，允许多个事务同时读写相同数据，
+仅在提交时检测是否与其他已提交事务发生冲突。
+若检测到冲突，事务回滚并重试。
+OCC 在冲突率较低的场景下性能更好，因为省去了加锁等待的时间。
+
+PCC 的适用场景与冲突概率直接相关。
+以 \texttt{mkdir} 为例：多个线程可能同时在同一父目录下创建子目录，
+每次操作都需要读取父目录的 \texttt{nlink}、检查子目录名是否已存在、
+插入新的目录项、更新父目录时间戳。
+这些操作之间存在真实的写-写冲突。
+若使用 OCC，大量事务会在提交阶段发现冲突并回滚，
+每次回滚意味着之前的 MemTable 查找、数据构造和 WriteBatch 组装全部浪费。
+PCC 通过在读取父目录 key 时就加锁，
+保证同一时刻只有一个事务能修改该目录的元数据，避免了无效计算。
+
+\subsubsection{行级锁与事务隔离}
+
+RocksDB TransactionDB 采用的锁粒度为单个 key——
+可以视为关系数据库行级锁在键值存储中的等价物。
+调用 \texttt{get\_for\_update(key)} 时，TransactionDB 对该 key 加排他锁。
+如果另一个事务已持有同一 key 的锁，当前事务进入等待状态。
+等待超时后（可配置，默认 1000\,ms），返回锁超时错误，调用方可选择重试或放弃。
+
+锁表存储在内存中的哈希表里，不持久化到磁盘。
+按 key 的哈希值分片（默认 16 个分片），减少了锁表本身的访问竞争。
+当事务 \texttt{commit()} 或 \texttt{rollback()} 时，持有的所有锁被释放。
+
+这种机制提供的隔离级别类似于 Read Committed：
+事务读取到的数据是已提交的最新版本，不会看到其他未提交事务的中间结果。
+结合排他锁，对于"读取—判断—修改"模式的操作，
+从加锁到提交之间不会有其他事务修改同一 key。
+
+在文件系统场景中，锁的粒度足够细。
+一个 \texttt{create} 操作通常只需锁定父目录的目录项 key（检测同名、插入新条目）
+和 inode 分配计数器 key（原子递增 inode 编号）。
+如果两个进程同时在同一目录下创建不同名称的文件，
+它们锁定的目录项 key 不同，可以并行执行。
+只有名称相同时，后到的事务才会在 \texttt{get\_for\_update} 处阻塞。
+
+\subsubsection{TOCTOU 竞态问题}
+
+TOCTOU（Time-of-Check to Time-of-Use）是并发编程中一类常见的竞态条件。
+程序先检查某个条件是否成立，再基于检查结果执行操作，
+但在检查和操作之间存在时间窗口，其他线程可能在此窗口内改变了条件，
+导致操作基于过期的信息执行。
+
+以 \texttt{rmdir} 操作为例。按照 POSIX 语义，\texttt{rmdir} 只能删除空目录。
+一个朴素的实现分两步执行：
+第一步，遍历目标目录的条目列表，确认目录为空；
+第二步，删除该目录的 inode 和父目录中的对应条目。
+如果这两步不在同一个原子事务内完成，就存在如下竞态：
+线程 A 在第一步确认目录为空后、第二步执行前，
+线程 B 在该目录下创建了新文件。
+随后线程 A 执行第二步删除目录——一个非空目录被错误地删除，
+其中的文件变成了无法通过任何路径访问的孤儿 inode。
+
+类似的 TOCTOU 风险存在于多个元数据操作中。
+\texttt{rename} 在检查目标是否存在和执行移动之间有窗口；
+\texttt{create} 在检查文件名不存在和插入目录项之间也有竞态；
+\texttt{unlink} 在读取 \texttt{nlink} 和执行减一操作之间同样存在并发修改的可能。
+
+解决 TOCTOU 的核心方法是将检查和操作纳入同一个原子事务。
+在 RocksDB TransactionDB 的 PCC 模式下，
+通过 \texttt{get\_for\_update} 在读取目录项时即加锁，
+保证从检查到修改的整个过程中，其他事务无法插入或删除该目录的条目。
+检查和操作之间的时间窗口被排他锁所覆盖，竞态条件随之消除。
+
+回到 \texttt{rmdir} 的例子：事务开始后，
+对目标目录的子条目前缀范围调用 \texttt{get\_for\_update}，确认为空且阻止并发插入，
+再执行实际的删除操作，最后 \texttt{commit()} 原子提交。
+如果在锁定过程中发现目录非空，事务直接回滚并返回 \texttt{ENOTEMPTY}。
+整个过程中，检查和删除在同一个锁保护范围内完成。
+
+\subsection{本章小结}
+
+本章介绍了 RucksFS 设计与实现所依赖的四项基础技术。
+FUSE 框架提供了将文件系统逻辑放在用户空间运行的能力，降低了开发复杂度，
+代价是每次操作引入额外的用户/内核态切换开销——元数据操作的退化尤为明显。
+RocksDB 基于 LSM-tree 提供写入友好的持久化存储，
+Column Family 机制允许对不同类型的元数据分别配置，
+WriteBatch 和 TransactionDB 为原子性和并发控制提供了底层支撑。
+POSIX 语义规范定义了文件系统操作的正确性约束，
+特别是 \texttt{rename} 的原子性要求和 \texttt{unlink} 的链接计数管理，
+直接影响存储层的事务设计。
+悲观并发控制通过先加锁再操作的方式，配合 RocksDB 的键级事务机制，
+为消除元数据操作中的 TOCTOU 竞态问题提供了可靠的方案。
+后续章节将以这些技术为基础，阐述 RucksFS 的具体设计方案和关键模块实现。

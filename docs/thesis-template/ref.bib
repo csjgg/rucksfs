@@ -1,0 +1,354 @@
+% =============================================================================
+% ref.bib - Bibliography for RucksFS Thesis
+% "Design and Implementation of File Operations with Metadata Key-Value Storage"
+% =============================================================================
+
+% ---------------------------------------------------------------------------
+% 1. Core KV Metadata Systems
+% ---------------------------------------------------------------------------
+
+@inproceedings{ren2013tablefs,
+  author    = {Kai Ren and Garth Gibson},
+  title     = {{TABLEFS}: Enhancing Metadata Efficiency in the Local File System},
+  booktitle = {2013 {USENIX} Annual Technical Conference ({USENIX} {ATC} 13)},
+  pages     = {145--156},
+  year      = {2013},
+  publisher = {{USENIX} Association},
+  address   = {San Jose, CA},
+  url       = {https://www.usenix.org/conference/atc13/technical-sessions/presentation/ren},
+}
+
+@inproceedings{ren2014indexfs,
+  author    = {Kai Ren and Qing Zheng and Swapnil Patil and Garth Gibson},
+  title     = {{IndexFS}: Scaling File System Metadata Performance with Stateless Caching and Bulk Insertion},
+  booktitle = {Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis ({SC} '14)},
+  pages     = {237--248},
+  year      = {2014},
+  publisher = {{IEEE} Press},
+  doi       = {10.1109/SC.2014.25},
+  note      = {Best Paper Award},
+}
+
+@inproceedings{li2017locofs,
+  author    = {Siyang Li and Youyou Lu and Jiwu Shu and Yang Hu and Tao Li},
+  title     = {{LocoFS}: A Loosely-Coupled Metadata Service for Distributed File Systems},
+  booktitle = {Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis ({SC} '17)},
+  articleno = {4},
+  pages     = {1--12},
+  year      = {2017},
+  publisher = {{ACM}},
+  doi       = {10.1145/3126908.3126928},
+}
+
+@inproceedings{shen2023fusee,
+  author    = {Jiacheng Shen and Pengfei Zuo and Xuchuan Luo and Tianyi Yang and Yuxin Su and Yangfan Zhou and Michael R. Lyu},
+  title     = {{FUSEE}: A Fully Memory-Disaggregated Key-Value Store},
+  booktitle = {21st {USENIX} Conference on File and Storage Technologies ({FAST} 23)},
+  pages     = {81--98},
+  year      = {2023},
+  publisher = {{USENIX} Association},
+  address   = {Santa Clara, CA},
+  url       = {https://www.usenix.org/conference/fast23/presentation/shen},
+}
+
+@misc{heidari2024metahive,
+  author    = {Alireza Heidari and Amirhossein Ahmadi and Zefeng Zhi and Wei Zhang},
+  title     = {{MetaHive}: A Cache-Optimized Metadata Management for Heterogeneous Key-Value Stores},
+  year      = {2024},
+  eprint    = {2407.19090},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.DB},
+  url       = {https://arxiv.org/abs/2407.19090},
+}
+
+@inproceedings{li2025mantle,
+  author    = {Jiahao Li and Biao Cao and Jielong Jian and Cheng Li and Sen Han and
+               Yiduo Wang and Yufei Wu and Kang Chen and Zhihui Yin and Qiushi Chen and
+               Jiwei Xiong and Jie Zhao and Fengyuan Liu and Yan Xing and Liguo Duan and
+               Miao Yu and Ran Zheng and Feng Wu and Xianjun Meng},
+  title     = {Mantle: Efficient Hierarchical Metadata Management for Cloud Object Storage Services},
+  booktitle = {Proceedings of the 28th {ACM} Symposium on Operating Systems Principles ({SOSP} '25)},
+  pages     = {928--943},
+  year      = {2025},
+  publisher = {{ACM}},
+  doi       = {10.1145/3731569.3764824},
+}
+
+@inproceedings{wang2023cfs,
+  author    = {Yiduo Wang and Yufei Wu and Cheng Li and Pengfei Zheng and Biao Cao and
+               Yan Sun and Fei Zhou and Yinlong Xu and Yao Wang and Guangjun Xie},
+  title     = {{CFS}: Scaling Metadata Service for Distributed File System via Pruned Scope of Critical Sections},
+  booktitle = {Proceedings of the Eighteenth European Conference on Computer Systems ({EuroSys} '23)},
+  pages     = {331--346},
+  year      = {2023},
+  publisher = {{ACM}},
+  doi       = {10.1145/3552326.3587443},
+}
+
+% ---------------------------------------------------------------------------
+% 2. Classic Distributed Filesystems
+% ---------------------------------------------------------------------------
+
+@inproceedings{ghemawat2003gfs,
+  author    = {Sanjay Ghemawat and Howard Gobioff and Shun-Tak Leung},
+  title     = {The {Google} File System},
+  booktitle = {Proceedings of the 19th {ACM} Symposium on Operating Systems Principles ({SOSP} '03)},
+  pages     = {29--43},
+  year      = {2003},
+  publisher = {{ACM}},
+  doi       = {10.1145/945445.945450},
+}
+
+@inproceedings{shvachko2010hdfs,
+  author    = {Konstantin Shvachko and Hairong Kuang and Sanjay Radia and Robert Chansler},
+  title     = {The {Hadoop} Distributed File System},
+  booktitle = {2010 {IEEE} 26th Symposium on Mass Storage Systems and Technologies ({MSST})},
+  pages     = {1--10},
+  year      = {2010},
+  publisher = {{IEEE}},
+  doi       = {10.1109/MSST.2010.5496972},
+}
+
+@inproceedings{weil2006ceph,
+  author    = {Sage A. Weil and Scott A. Brandt and Ethan L. Miller and Darrell D. E. Long and Carlos Maltzahn},
+  title     = {{Ceph}: A Scalable, High-Performance Distributed File System},
+  booktitle = {Proceedings of the 7th {USENIX} Symposium on Operating Systems Design and Implementation ({OSDI} '06)},
+  pages     = {307--320},
+  year      = {2006},
+  publisher = {{USENIX} Association},
+  url       = {https://www.usenix.org/conference/osdi-06/ceph-scalable-high-performance-distributed-file-system},
+}
+
+@inproceedings{liu2019cubefs,
+  author    = {Haifeng Liu and Qiang Wang and Yong Yang and Wenbo Zhang and Liangfeng Cheng and Bo Li},
+  title     = {{CFS}: A Distributed File System for Large Scale Container Platforms},
+  booktitle = {Proceedings of the 2019 International Conference on Management of Data ({SIGMOD} '19)},
+  year      = {2019},
+  publisher = {{ACM}},
+  doi       = {10.1145/3299869.3314046},
+}
+
+@inproceedings{pan2021tectonic,
+  author    = {Satadru Pan and Theano Stavrinos and Yunqiao Zhang and Atul Sikaria and
+               Pavel Zakharov and Abhinav Sharma and Shiva Shankar P. and Mike Shuey and
+               Richard Wareing and Monika Gangapuram and Guanglei Cao and Christian Preseau and
+               Pratap Singh and Kestutis Patiejunas and JR Tipton and Ethan Katz-Bassett and Wyatt Lloyd},
+  title     = {Facebook's {Tectonic} Filesystem: Efficiency from Exascale},
+  booktitle = {19th {USENIX} Conference on File and Storage Technologies ({FAST} 21)},
+  pages     = {1--16},
+  year      = {2021},
+  publisher = {{USENIX} Association},
+  url       = {https://www.usenix.org/conference/fast21/presentation/pan},
+}
+
+% ---------------------------------------------------------------------------
+% 3. Storage Engines and Data Structures
+% ---------------------------------------------------------------------------
+
+@article{oneil1996lsmtree,
+  author    = {Patrick O'Neil and Edward Cheng and Dieter Gawlick and Elizabeth O'Neil},
+  title     = {The Log-Structured Merge-Tree ({LSM-Tree})},
+  journal   = {Acta Informatica},
+  volume    = {33},
+  number    = {4},
+  pages     = {351--385},
+  year      = {1996},
+  publisher = {Springer},
+  doi       = {10.1007/s002360050048},
+}
+
+@inproceedings{chang2006bigtable,
+  author    = {Fay Chang and Jeffrey Dean and Sanjay Ghemawat and Wilson C. Hsieh and
+               Deborah A. Wallach and Mike Burrows and Tushar Chandra and Andrew Fikes and Robert E. Gruber},
+  title     = {{Bigtable}: A Distributed Storage System for Structured Data},
+  booktitle = {Proceedings of the 7th {USENIX} Symposium on Operating Systems Design and Implementation ({OSDI} '06)},
+  pages     = {205--218},
+  year      = {2006},
+  publisher = {{USENIX} Association},
+  url       = {https://www.usenix.org/conference/osdi-06/bigtable-distributed-storage-system-structured-data},
+}
+
+@inproceedings{dong2021rocksdb,
+  author    = {Siying Dong and Andrew Kryczka and Yanqin Jin and Michael Stumm},
+  title     = {Evolution of Development Priorities in Key-Value Stores Serving Large-Scale Applications: The {RocksDB} Experience},
+  booktitle = {19th {USENIX} Conference on File and Storage Technologies ({FAST} 21)},
+  pages     = {33--49},
+  year      = {2021},
+  publisher = {{USENIX} Association},
+  url       = {https://www.usenix.org/conference/fast21/presentation/dong},
+}
+
+@misc{google2011leveldb,
+  author       = {Jeff Dean and Sanjay Ghemawat},
+  title        = {{LevelDB}: A Fast Key-Value Storage Library},
+  year         = {2011},
+  howpublished = {\url{https://github.com/google/leveldb}},
+  note         = {Accessed: 2026},
+}
+
+@inproceedings{lu2016wisckey,
+  author    = {Lanyue Lu and Thanumalayan Sankaranarayana Pillai and Andrea C. Arpaci-Dusseau and Remzi H. Arpaci-Dusseau},
+  title     = {{WiscKey}: Separating Keys from Values in {SSD}-Conscious Storage},
+  booktitle = {14th {USENIX} Conference on File and Storage Technologies ({FAST} 16)},
+  pages     = {133--148},
+  year      = {2016},
+  publisher = {{USENIX} Association},
+  url       = {https://www.usenix.org/conference/fast16/technical-sessions/presentation/lu},
+}
+
+% ---------------------------------------------------------------------------
+% 4. FUSE and User-Space Filesystem
+% ---------------------------------------------------------------------------
+
+@misc{szeredi2005fuse,
+  author       = {Miklos Szeredi},
+  title        = {{FUSE}: Filesystem in Userspace},
+  year         = {2005},
+  howpublished = {\url{https://github.com/libfuse/libfuse}},
+  note         = {Linux kernel module since version 2.6.14},
+}
+
+@inproceedings{vangoor2017fuse,
+  author    = {Bharath Kumar Reddy Vangoor and Vasily Tarasov and Erez Zadok},
+  title     = {To {FUSE} or Not to {FUSE}: Performance of User-Space File Systems},
+  booktitle = {15th {USENIX} Conference on File and Storage Technologies ({FAST} 17)},
+  pages     = {59--72},
+  year      = {2017},
+  publisher = {{USENIX} Association},
+  address   = {Santa Clara, CA},
+  url       = {https://www.usenix.org/conference/fast17/technical-sessions/presentation/vangoor},
+}
+
+% ---------------------------------------------------------------------------
+% 5. Recent Related Work (2023-2026)
+% ---------------------------------------------------------------------------
+
+@inproceedings{dong2023duplex,
+  author    = {Chao Dong and Fang Wang and Yuxin Yang and Mengya Lei and Jianshun Zhang and Dan Feng},
+  title     = {Low-Latency and Scalable Full-path Indexing Metadata Service for Distributed File Systems},
+  booktitle = {Proceedings of the 41st {IEEE} International Conference on Computer Design ({ICCD} 2023)},
+  year      = {2023},
+  publisher = {{IEEE}},
+  doi       = {10.1109/ICCD58817.2023.00051},
+}
+
+@inproceedings{xu2026switchfs,
+  author    = {Jingwei Xu and Mingkai Dong and Qiulin Tian and Ziyi Tian and Tong Xin and Haibo Chen},
+  title     = {{SwitchFS}: Asynchronous Metadata Updates for Distributed Filesystems with In-Network Coordination},
+  booktitle = {Proceedings of the 21st European Conference on Computer Systems ({EuroSys} '26)},
+  year      = {2026},
+  publisher = {{ACM}},
+  doi       = {10.1145/3767295.3769349},
+}
+
+@article{xu2014drop,
+  author    = {Quanqing Xu and Rajesh Vellore Arumugam and Khai Leong Yong and Sridhar Mahadevan},
+  title     = {Efficient and Scalable Metadata Management in {EB}-Scale File Systems},
+  journal   = {{IEEE} Transactions on Parallel and Distributed Systems},
+  volume    = {25},
+  number    = {11},
+  pages     = {2840--2850},
+  year      = {2014},
+  publisher = {{IEEE}},
+  doi       = {10.1109/TPDS.2013.293},
+}
+
+% ---------------------------------------------------------------------------
+% 6. Industry Systems and Software
+% ---------------------------------------------------------------------------
+
+@misc{juicefs2021,
+  author       = {{Juicedata, Inc.}},
+  title        = {{JuiceFS}: A {POSIX}-Compatible Shared Filesystem for Cloud},
+  year         = {2021},
+  howpublished = {\url{https://juicefs.com}},
+  note         = {Open-source, available at \url{https://github.com/juicedata/juicefs}},
+}
+
+@misc{apache2021ozone,
+  author       = {{Apache Software Foundation}},
+  title        = {Apache Ozone: A Scalable, Redundant, Distributed Object Store for {Hadoop}},
+  year         = {2021},
+  howpublished = {\url{https://ozone.apache.org}},
+  note         = {Accessed: 2026},
+}
+
+% ---------------------------------------------------------------------------
+% 7. Programming Language and Standards
+% ---------------------------------------------------------------------------
+
+@misc{klabnik2023rust,
+  author       = {Steve Klabnik and Carol Nichols},
+  title        = {The Rust Programming Language},
+  year         = {2023},
+  edition      = {2nd},
+  howpublished = {\url{https://doc.rust-lang.org/book/}},
+  note         = {Also published by No Starch Press, ISBN 978-1-7185-0310-6},
+}
+
+@techreport{ieee2017posix,
+  author       = {{IEEE} and {The Open Group}},
+  title        = {{IEEE} Std 1003.1-2017 --- {POSIX}.1-2017: Standard for Information Technology --- Portable Operating System Interface ({POSIX})},
+  institution  = {{IEEE}},
+  year         = {2017},
+  type         = {Standard},
+  url          = {https://pubs.opengroup.org/onlinepubs/9699919799/},
+}
+
+@misc{rocksdb2023wiki,
+  author       = {{Meta Platforms, Inc.}},
+  title        = {{RocksDB} Wiki},
+  year         = {2023},
+  howpublished = {\url{https://github.com/facebook/rocksdb/wiki}},
+  note         = {Accessed: 2026},
+}
+
+% ---------------------------------------------------------------------------
+% 8. Supplementary References
+% ---------------------------------------------------------------------------
+
+@misc{fuser2023crate,
+  author       = {Christopher Berner},
+  title        = {fuser: Filesystem in Userspace ({FUSE}) for {Rust}},
+  year         = {2023},
+  howpublished = {\url{https://github.com/cberner/fuser}},
+  note         = {Rust crate for FUSE, version 0.15},
+}
+
+@inproceedings{decandia2007dynamo,
+  author    = {Giuseppe DeCandia and Deniz Hastorun and Madan Jampani and Gunavardhan Kakulapati and
+               Avinash Lakshman and Alex Pilchin and Swaminathan Sivasubramanian and Peter Vosshall and Werner Vogels},
+  title     = {Dynamo: {Amazon}'s Highly Available Key-Value Store},
+  booktitle = {Proceedings of the 21st {ACM} Symposium on Operating Systems Principles ({SOSP} '07)},
+  pages     = {205--220},
+  year      = {2007},
+  publisher = {{ACM}},
+  doi       = {10.1145/1294261.1294281},
+}
+
+@inproceedings{rosenblum1992lfs,
+  author    = {Mendel Rosenblum and John K. Ousterhout},
+  title     = {The Design and Implementation of a Log-Structured File System},
+  booktitle = {Proceedings of the 13th {ACM} Symposium on Operating Systems Principles ({SOSP} '91)},
+  pages     = {1--15},
+  year      = {1992},
+  publisher = {{ACM}},
+  doi       = {10.1145/121132.121137},
+  note      = {Also published in ACM Transactions on Computer Systems, 10(1):26--52, 1992},
+}
+
+@misc{ior2024mdtest,
+  author    = {{IOR/mdtest Development Team}},
+  title     = {mdtest: {HPC} Metadata Benchmark},
+  year      = {2024},
+  url       = {https://github.com/hpc/ior},
+  note      = {Part of the IOR project, used by IO500 for storage system ranking},
+}
+
+@misc{pjdfstest2013nectec,
+  author    = {Pawel Jakub Dawidek},
+  title     = {pjdfstest: {POSIX} File System Test Suite},
+  year      = {2013},
+  url       = {https://github.com/pjd/pjdfstest},
+  note      = {Comprehensive POSIX compliance test suite for file systems},
+}

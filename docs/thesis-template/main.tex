@@ -1,0 +1,41 @@
+\documentclass[thesis,biblatex]{template/hust}
+
+\addbibresource{ref.bib}
+\usepackage{macros}
+\usepackage{booktabs}
+
+\title{采用元数据键值对存储的文件操作设计与实现}
+
+\author{岳云鹏}
+\school{计算机科学与技术}
+\classnum{计科 2104}
+\stunum{U202112345}
+\instructor{郭德纲}
+\date{2025年13月32日}
+
+
+% 毕业论文模板
+\begin{document}
+    \maketitle                              % 封面
+    \newpage
+    \authorization                          % 原创页（不保密）
+    % \authorization[x]                     % 原创页（保密 x 年）
+    
+    \pagenumbering{Roman}
+    \include{body/abstract-ch}              % 中文摘要
+    \include{body/abstract-en}              % 英文摘要
+    \tableofcontents                        % 目录
+    \newpage
+    \pagenumbering{arabic}
+    \include{body/introduction}                 % 正文
+    \include{body/related_works}
+    \include{body/method}
+    \include{body/experiments}
+    \include{body/conclusion}
+    
+    \include{body/acknowledgement}          % 致谢
+    \include{body/references}               % 参考文献
+    % \appendix                               % 附录
+    % \include{body/appendices}
+
+\end{document}

@@ -1,0 +1,11 @@
+\abstracten
+
+As data volumes continue to grow, file system metadata management faces severe performance challenges. Traditional file systems organize metadata using B+ trees, where each mutation requires a read-modify-write cycle that causes substantial write amplification under high concurrency. Key-value stores based on the Log-Structured Merge-tree (LSM-tree) offer a promising alternative for metadata management due to their sequential write characteristics.
+
+This work designs and implements RucksFS, a FUSE (Filesystem in Userspace) file system backed by RocksDB as its storage engine. The system employs a four-column-family architecture to separate metadata storage: the inodes column family stores inode attributes, dir\_entries maintains directory structure, delta\_entries records incremental logs, and system manages global state. InodeValue uses a fixed-length 57-byte big-endian encoding to ensure byte order matches numeric order, enabling efficient prefix scans. To address frequent directory modifications, a delta update and lazy folding mechanism is proposed: mutation operations append DeltaOp entries to record parent directory attribute changes instead of the conventional read-modify-write pattern, reducing WAL (Write-Ahead Log) writes from two to one per operation. A background compaction thread triggers folding automatically when the accumulated delta log exceeds a threshold of 32 entries. Concurrency control adopts a PCC (Pessimistic Concurrency Control) transaction model, using WriteBatch atomic commits with TOCTOU (Time-of-Check to Time-of-Use) guards to ensure directory operation consistency. The system implements FUSE mounting through the fuse3 asynchronous interface and the tokio runtime, supporting concurrent multi-client access.
+
+Benchmark results using mdtest on a 4-node cluster show that RucksFS achieves a file creation throughput of 9,917 operations per second under 64 concurrent processes, which is 2.4 times that of JuiceFS+MySQL and 1.5 times that of JuiceFS+TiKV. In standalone mode, metadata operation performance approaches that of ext4, with create reaching 0.98x and unlink reaching 1.17x of ext4 performance.
+
+\vspace{5pt}
+
+\keywordsen File System, Metadata Management, Key-Value Storage, Delta Update, Filesystem in Userspace

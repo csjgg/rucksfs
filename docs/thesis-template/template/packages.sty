@@ -1,0 +1,94 @@
+%==================== 标题 ====================%
+\RequirePackage{fontspec}
+
+%==================== 图片 ====================%
+\RequirePackage[small]{subfigure}
+\RequirePackage{graphicx}
+\RequirePackage{color}
+\RequirePackage{xcolor}
+
+%==================== 算法 ====================%
+\RequirePackage{algorithm}
+\RequirePackage{algorithmicx}
+\RequirePackage[noEnd=false,indLines=false]{algpseudocodex}
+\RequirePackage{algorithm, multirow}
+
+%==================== 代码 ====================%
+\RequirePackage[outputdir=.build,section]{minted}
+\RequirePackage{xcolor}
+\RequirePackage{color}
+
+%==================== 画图 ====================%
+\RequirePackage{tabu}
+\RequirePackage{tikz}
+\RequirePackage{etoolbox}
+\RequirePackage{pgfplots}
+\RequirePackage{tikz}
+\RequirePackage{tikz-3dplot}
+\RequirePackage[inkscapelatex=false]{svg}
+
+%==================== 数学 ====================%
+\RequirePackage{amsthm}
+\RequirePackage{amsmath}
+\RequirePackage{amssymb}
+\RequirePackage{amsfonts}
+\RequirePackage{mathrsfs}            % 英文花体字体
+\RequirePackage{bm}                  % 数学公式中的黑斜体
+\RequirePackage{bbding,manfnt}       % 一些图标，如 \dbend
+
+%==================== 排版 ====================%
+\RequirePackage{newclude}
+\RequirePackage{caption}
+\RequirePackage{geometry}
+\RequirePackage{setspace}
+\RequirePackage{fancyhdr}
+
+%==================== 杂项 ====================%
+\RequirePackage{xifthen}
+\RequirePackage{etoolbox}
+
+\RequirePackage{hyperref}
+\RequirePackage{pdfpages}
+\RequirePackage[toc,page]{appendix}
+\RequirePackage{longtable}
+
+\RequirePackage{booktabs}
+\RequirePackage{shorttoc}
+\RequirePackage[subfigure]{tocloft}
+\RequirePackage{float}
+\RequirePackage{multirow}
+\RequirePackage{ifthen}
+\RequirePackage{graphicx}
+\RequirePackage{pfnote}     % 每页重新计数的 footnote
+\RequirePackage{enumitem}
+\RequirePackage[sorting=none,style=gb7714-2015,gbfieldtype=true]{biblatex}
+
+%==================== 代码 ====================%
+\RequirePackage[section]{minted}
+\RequirePackage{xcolor}
+\RequirePackage{color}
+\RequirePackage{listings}
+\definecolor{codebg}{rgb}{0.95,0.95,0.95}   % 灰色背景
+\definecolor{codegray}{rgb}{0.4,0.4,0.4}    % 深灰文字
+
+\lstset{
+    language=Python,                  % Default language (still useful for potential future use)
+    backgroundcolor=\color{codebg},   % Background color
+    basicstyle=\footnotesize\itshape\rmfamily, % Font: small, ITALIC, MONOSPACED for CODE
+    % keywordstyle=\color{blue}\bfseries,
+    % commentstyle=\color{green!60!black},
+    % stringstyle=\color{purple},
+    % numbers=left,
+    % numberstyle=\tiny\color{gray},
+    % numbersep=5pt,
+    % frame=single,
+    % --- Kept other formatting options ---
+    tabsize=4,                        % Tab width
+    breaklines=true,                  % Enable automatic line breaking
+    breakatwhitespace=true,           % Break lines only at whitespace
+    captionpos=b,                     % Caption position (b=bottom, t=top)
+    showstringspaces=false,           % Don't put special marks for spaces in strings
+    columns=flexible,                 % More flexible column alignment
+    keepspaces=true,                  % Preserve spaces, important for indentation
+    escapeinside={(*@}{@*)}           % Allows LaTeX commands inside listings: (*@ \LaTeX @*)
+}

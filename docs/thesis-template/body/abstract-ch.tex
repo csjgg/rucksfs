@@ -1,0 +1,11 @@
+\abstractch
+
+随着数据规模的持续增长，文件系统元数据管理面临严峻的性能挑战。传统文件系统基于 B+ 树组织元数据，每次变异操作需经历读--修改--写流程，在高并发场景下产生严重的写放大问题。基于 LSM-tree（Log-Structured Merge-tree）的键值存储凭借其顺序写入特性，为元数据管理提供了新的技术路径。
+
+本课题设计并实现了 RucksFS，一个以 RocksDB 为存储引擎的 FUSE（Filesystem in Userspace）文件系统。系统采用四层列族架构将元数据分离存储：inodes 列族存放 inode 属性，dir\_entries 列族维护目录结构，delta\_entries 列族记录增量日志，system 列族管理全局状态。InodeValue 采用 57 字节定长大端序编码，使字节序与数值序一致，支持前缀扫描。针对高频目录变更场景，提出增量更新与懒折叠机制：变异操作通过追加写 DeltaOp 记录父目录属性变化，替代传统的读--修改--写模式，将 WAL（Write-Ahead Log）写入次数从 2 次减少到 1 次；后台压缩线程在增量日志累积超过 32 条阈值时自动触发折叠。并发控制采用 PCC（Pessimistic Concurrency Control）事务模型，通过 WriteBatch 原子提交与 TOCTOU（Time-of-Check to Time-of-Use）防护保证目录操作的一致性。系统基于 fuse3 异步接口与 tokio 运行时实现 FUSE 挂载，支持多并发客户端访问。
+
+在 4 节点集群上使用 mdtest 进行基准测试，RucksFS 在 64 并发进程下文件创建吞吐量达到 9,917 次/秒，是 JuiceFS+MySQL 的 2.4 倍、JuiceFS+TiKV 的 1.5 倍。单机模式下元数据操作性能接近 ext4，其中 create 达到 ext4 的 0.98 倍，unlink 达到 1.17 倍。
+
+\vspace{5pt}
+
+\keywordsch 文件系统；元数据管理；键值存储；增量更新；用户态文件系统

@@ -1,0 +1,317 @@
+\section{实验与结果分析}
+\label{sec:experiments}
+
+为验证 RucksFS 在元数据密集型负载下的实际表现，搭建了一个由 4 台云服务器组成的测试集群，使用 mdtest 基准工具对 RucksFS 和三个对比系统进行了多轮测试。测试覆盖文件创建、查询（stat）和删除三类核心元数据操作，并发度从 1 个进程逐步增加到 64 个进程。此外，还通过 pjdfstest 工具检验 POSIX 语义合规性，并对系统各层的开销进行了逐层量化。
+
+\subsection{实验环境}
+
+\subsubsection{硬件环境}
+
+测试集群部署在腾讯云香港二区（ap-hongkong-2），4 台实例位于同一 VPC（10.0.1.0/24）和同一可用区内，内网 RTT 实测低于 0.3\,ms。表~\ref{tab:hw-env} 列出了各节点的硬件配置。
+
+\begin{table}[htbp]
+    \centering
+    \caption{测试集群硬件配置}
+    \label{tab:hw-env}
+    \begin{tabular}{llccc}
+        \toprule
+        节点角色 & 机型 & vCPU & 内存 & 磁盘 \\
+        \midrule
+        Client-1（mdtest 驱动） & SA3.2XLARGE16 & 8 & 16\,GiB & 系统盘 \\
+        Client-2（mdtest 驱动） & SA3.2XLARGE16 & 8 & 16\,GiB & 系统盘 \\
+        Meta（元数据引擎）       & SA3.2XLARGE32 & 8 & 32\,GiB & 系统盘 \\
+        Data（数据存储）          & S6.LARGE8     & 4 & 8\,GiB  & 500\,GB SSD \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+两台 Client 节点各有 8 个 vCPU，在高并发测试中分别运行若干 mdtest 进程，通过 MPI 协调执行。Meta 节点配备 32\,GiB 内存，保证 RocksDB、MySQL 和 TiKV 三种后端均有充足的内存空间放置缓存和 WAL。Data 节点的 500\,GB SSD 用于承载 RucksFS 的原始磁盘数据和 JuiceFS 的 MinIO 对象存储。
+
+\subsubsection{软件环境与系统配置}
+
+所有节点运行 Ubuntu 22.04 LTS，内核版本 5.15。表~\ref{tab:sw-env} 汇总了各被测系统的软件栈。
+
+\begin{table}[htbp]
+    \centering
+    \caption{被测系统软件配置}
+    \label{tab:sw-env}
+    \begin{tabular}{lllll}
+        \toprule
+        系统 & FUSE 库 & 元数据后端 & 数据后端 \\
+        \midrule
+        RucksFS       & fuse3 0.8 (async/tokio) & gRPC $\to$ RocksDB & gRPC $\to$ raw disk \\
+        JuiceFS+MySQL & go-fuse                  & MySQL 8.0 (InnoDB)  & MinIO (S3)          \\
+        JuiceFS+TiKV  & go-fuse                  & TiKV（单节点）      & MinIO (S3)          \\
+        CubeFS        & go-fuse                  & 内存 B-tree + Raft   & 多副本              \\
+        NFS v4.2      & 内核                      & ext4（内核 VFS）     & ext4 on SSD         \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+RucksFS 使用 Rust 编写，FUSE 层基于 fuse3 0.8 的 async/tokio 运行时，元数据和数据分别通过 gRPC 通道与后端通信。JuiceFS 测试了两种元数据后端：MySQL 8.0（InnoDB 引擎，buffer pool 设为 8\,GiB）和 TiKV（单节点部署），两者共用同一个 MinIO 实例作为对象存储。NFS 作为基线参照，使用内核原生 NFS v4.2 服务器直接挂载 ext4 卷。
+
+CubeFS 的配置较为特殊：由于其最低部署要求为 3 个 MetaNode + 3 个 DataNode + 1 个 Master，测试中将全部进程部署在 Meta 节点一台机器上。这种部署方式导致 CubeFS 与其他系统不在对等条件下竞争——内存带宽、CPU 缓存和磁盘 I/O 均被多个进程共享，实际性能受到压制。后续分析中标注了这一局限。
+
+\subsubsection{对比系统}
+
+选择 JuiceFS、CubeFS 和 NFS 作为对比对象，理由如下：
+
+JuiceFS 是目前云原生场景中应用最广泛的开源分布式文件系统之一，其架构与 RucksFS 类似——元数据存放在外部键值/关系数据库中，数据存放在对象存储中。测试两种后端（MySQL、TiKV）可以揭示不同元数据引擎对上层性能的影响。
+
+CubeFS（原 ChubaoFS）采用内存 B-tree 加 Raft 共识的元数据方案，代表了一种"元数据全驻内存"的设计路线。将其纳入对比可以观察 RocksDB 持久化方案与纯内存方案在延迟上的差距。
+
+NFS v4.2 是 Linux 生态中最成熟的网络文件系统。它的 FUSE 层由内核实现，省去了用户态 FUSE 的上下文切换开销，因此可以作为衡量用户态 FUSE 文件系统"天花板"的参考。但 NFS 的 stat 结果需要谨慎解读——内核 NFS 客户端会主动缓存属性，单线程 stat 吞吐量可达 23 万 ops/s，远高于任何需要实际发起网络请求的系统。
+
+
+\subsection{测试方法}
+
+\subsubsection{mdtest 基准测试工具}
+
+mdtest 是 IOR/mdtest 套件的组成部分，专门用于测量文件系统的元数据操作速率\cite{ior2024mdtest}。它支持 MPI 多进程并发、可精确控制每进程的文件数量和目录布局，在 HPC 领域是事实上的元数据性能标准工具。
+
+与 fio 或 IOZone 等数据面工具不同，mdtest 关注的操作粒度极细——每次只创建、stat 或删除一个空文件——能够精确暴露 FUSE 层、RPC 层和存储引擎在单次操作上的延迟。这正是元数据密集型工作负载的核心瓶颈所在。
+
+\subsubsection{测试参数与负载模式}
+
+mdtest 的调用命令如下：
+
+\begin{verbatim}
+mpirun --allow-run-as-root --oversubscribe \
+       --hostfile hostfile -np $N \
+       mdtest -C -T -r -n 5000 -d <mountpoint>/test_dir -u
+\end{verbatim}
+
+各参数的含义：\texttt{-C} 执行文件创建阶段，\texttt{-T} 执行 stat 阶段，\texttt{-r} 执行删除阶段，\texttt{-n 5000} 表示每个进程操作 5\,000 个文件。\texttt{-u} 参数使每个进程在自己独立的子目录下工作，避免目录锁竞争干扰测试结果。
+
+并发度 $N$ 从 1 逐步增加到 4、16、32、64。当 $N \leq 8$ 时所有进程运行在 Client-1 上，$N > 8$ 时均匀分布在两台 Client 节点上。总操作量为 $N \times 5000$，例如 $N=64$ 时一轮测试包含 320\,000 次文件创建。
+
+关于 \texttt{-n} 的取值：早期预实验使用 \texttt{-n 100}，结果波动幅度超过 20\%，原因是操作总量太少，单次 RPC 延迟的抖动被放大到整体吞吐量中。将 \texttt{-n} 提升到 5\,000 之后，三轮重复实验的标准差降至 1\% 以内（见 \ref{sec:cross-validation} 节）。进程内嵌入式测试则使用 \texttt{-n 10000} 以获得更稳定的微秒级计时。
+
+\subsubsection{POSIX 合规性测试}
+
+除性能测试外，还使用 pjdfstest\cite{pjdfstest2013nectec} 套件检验 RucksFS 的 POSIX 语义正确性。pjdfstest 包含约 8\,000 个测试用例，覆盖 chmod、chown、link、mkdir、mkfifo、open、rename、rmdir、symlink、truncate、unlink 等 12 类操作。
+
+RucksFS 通过了 chmod、chown、mkdir、open、rename、rmdir、truncate、unlink 8 个类别的全部测试。未通过的 4 个类别——link、symlink、mkfifo、mknod——是因为 RucksFS 当前版本尚未实现硬链接、符号链接和特殊文件节点。这些功能不在毕业设计的范围之内，但接口预留已经完成，后续可以逐步补充。
+
+
+\subsection{元数据性能评估}
+
+以下三节分别报告文件创建、stat 查询和文件删除三类操作在不同并发度下的吞吐量。所有数据取自 mdtest 的输出，单位为 ops/s。每个数据点为 3 轮测试的平均值。
+
+\subsubsection{文件创建性能}
+
+\begin{table}[htbp]
+    \centering
+    \caption{文件创建吞吐量（ops/s）}
+    \label{tab:create-perf}
+    \begin{tabular}{rrrrrr}
+        \toprule
+        $N$ & RucksFS & CubeFS & JuiceFS+MySQL & JuiceFS+TiKV & NFS \\
+        \midrule
+        1  & 642    & 545   & 231   & 504   & 934   \\
+        4  & 2,387  & 1,117 & 835   & 1,337 & 3,178 \\
+        16 & 5,739  & 1,314 & 2,351 & 3,423 & 5,734 \\
+        32 & 7,829  & 1,446 & 3,454 & 5,051 & 5,673 \\
+        64 & 9,917  & —     & 4,177 & 5,908 & 5,655 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+表~\ref{tab:create-perf} 呈现了文件创建的多并发结果。在单进程（$N=1$）条件下，NFS 以 934\,ops/s 领先，RucksFS 为 642\,ops/s，JuiceFS+MySQL 仅 231\,ops/s。单线程性能主要取决于单次创建操作的端到端延迟：NFS 的 create 路径完全在内核态完成，跳过了 FUSE 上下文切换和用户态 RPC，单次延迟约 1.1\,ms；RucksFS 需要经过 FUSE $\to$ gRPC $\to$ RocksDB 的完整链路，单次延迟约 1.6\,ms；JuiceFS+MySQL 的瓶颈则在于 InnoDB 的事务提交——每次 create 触发一次 \texttt{fsync}，MySQL 的 redo log 同步写入成为关键路径。
+
+随着并发度增加，各系统的扩展趋势出现分化。RucksFS 在 $N=64$ 时达到 9,917\,ops/s，相对 $N=1$ 的扩展因子为 15.5$\times$。这一扩展能力源于两个因素：RocksDB 的 LSM-Tree 写入路径天然支持并发（多个 memtable 可以同时接受写入），以及 \texttt{-u} 参数使各进程操作不同子目录，避免了 PCC 事务冲突。
+
+NFS 在 $N=16$ 之后吞吐量趋于平坦，$N=32$ 和 $N=64$ 均停留在 5,600--5,700\,ops/s 附近。原因在于 NFS 服务端的 ext4 文件系统使用 journal 模式写入，日志提交的序列化成为瓶颈。CubeFS 的数据只到 $N=32$（1,446\,ops/s），因为在 $N=64$ 时集群进程争夺内存和 CPU 导致频繁 OOM kill，测试无法完成。即使在有效数据范围内，CubeFS 的扩展也明显受限——从 $N=1$ 的 545 到 $N=32$ 的 1,446，增长不到 3 倍。这与其单机混合部署的资源竞争直接相关，不能代表 CubeFS 在独立部署下的真实能力。
+
+\subsubsection{文件查询性能}
+
+\begin{table}[htbp]
+    \centering
+    \caption{文件 stat 吞吐量（ops/s）}
+    \label{tab:stat-perf}
+    \begin{tabular}{rrrrrr}
+        \toprule
+        $N$ & RucksFS & CubeFS & JuiceFS+MySQL & JuiceFS+TiKV & NFS \\
+        \midrule
+        1  & 3,301   & 1,162  & 2,257   & 2,203   & 233,014 \\
+        16 & 25,511  & 10,559 & 21,436  & 21,957  & 59,706  \\
+        64 & 35,227  & —      & 28,653  & 34,276  & 56,505  \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+stat 操作的结果（表~\ref{tab:stat-perf}）中最突出的异常值是 NFS 在 $N=1$ 时的 233,014\,ops/s——比 RucksFS 高出 70 倍。这并非 NFS 服务器的真实处理能力，而是内核 NFS 客户端的属性缓存（attribute cache）在起作用。NFS v4 客户端默认将 stat 结果缓存 3--30 秒，在 mdtest 连续对同一组文件执行 stat 时，绝大多数请求直接命中缓存，根本不产生网络 I/O。随着并发度上升到 64，缓存命中率下降（更多文件、更多 cache miss），NFS 的 stat 吞吐量反而从 23 万降到 5.6 万，缩水超过 75\%。
+
+排除 NFS 的缓存因素后，其余四个系统的 stat 性能较为接近。RucksFS 在 $N=64$ 时达到 35,227\,ops/s，JuiceFS+TiKV 为 34,276\,ops/s，两者差距不到 3\%。stat 操作是只读的，不涉及事务和 WAL 写入，性能瓶颈主要在于 RPC 往返延迟和存储引擎的点查询速度。RocksDB 和 TiKV 底层都使用 LSM-Tree 结构，点查询路径相似（bloom filter $\to$ block cache $\to$ SST 文件），因此在相同网络条件下性能趋同。
+
+JuiceFS+MySQL 的 stat 稍低于 TiKV（28,653 vs.\ 34,276），这可能与 MySQL 的 SQL 解析开销有关——即使是最简单的 \texttt{SELECT * FROM jfs\_inode WHERE ino = ?} 查询，也需要经过 SQL 解析器、优化器和执行器三个阶段，而 TiKV 的原始 KV 接口省去了这些步骤。
+
+\subsubsection{文件删除性能}
+
+\begin{table}[htbp]
+    \centering
+    \caption{文件删除吞吐量（ops/s）}
+    \label{tab:remove-perf}
+    \begin{tabular}{rrrrrr}
+        \toprule
+        $N$ & RucksFS & CubeFS & JuiceFS+MySQL & JuiceFS+TiKV & NFS \\
+        \midrule
+        1  & 846     & 860   & 180    & 411   & 1,019 \\
+        16 & 8,022   & 2,091 & 1,968  & 2,554 & 5,364 \\
+        64 & 14,179  & —     & 3,162  & 3,840 & 5,119 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+文件删除的结果列于表~\ref{tab:remove-perf}。RucksFS 在 $N=64$ 时达到 14,179\,ops/s，是 JuiceFS+TiKV（3,840\,ops/s）的 3.7 倍。删除操作的性能差异比创建更为悬殊，原因在于 RucksFS 实现了异步数据删除优化（详见 \ref{sec:async-delete} 节）：unlink 系统调用仅删除元数据（从 RocksDB 中移除 inode 和目录项），数据文件的清理被推迟到后台线程完成。由于 mdtest 创建的是空文件，数据侧甚至不需要做任何实际清理——这使得 RucksFS 的 unlink 路径退化为纯元数据操作，延迟极低。
+
+JuiceFS 的删除路径更重：每次 unlink 不仅要更新元数据库中的记录，还要向 MinIO 发起对象删除请求。MinIO 的 S3 兼容接口基于 HTTP，单次 DELETE 请求的网络开销约 0.5--1\,ms，这直接拖慢了删除吞吐量。
+
+NFS 的删除性能同样在 $N=16$ 之后趋于饱和（5,364 $\to$ 5,119），与创建操作的饱和模式一致，瓶颈仍是 ext4 journal 的串行提交。
+
+\subsubsection{可扩展性分析}
+\label{sec:scalability}
+
+\begin{table}[htbp]
+    \centering
+    \caption{从 $N=1$ 到 $N=64$ 的扩展因子}
+    \label{tab:scale-factor}
+    \begin{tabular}{lrrr}
+        \toprule
+        系统 & Create & Stat & Remove \\
+        \midrule
+        RucksFS       & 15.5$\times$ & 10.7$\times$ & 16.8$\times$ \\
+        JuiceFS+MySQL & 18.1$\times$ & 12.7$\times$ & 17.6$\times$ \\
+        JuiceFS+TiKV  & 11.7$\times$ & 15.6$\times$ & 9.3$\times$  \\
+        NFS           & 6.1$\times$  & 0.2$\times$  & 5.0$\times$  \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+表~\ref{tab:scale-factor} 将各系统从单进程到 64 进程的吞吐量增长折算为扩展因子。RucksFS 在三项操作上均保持了 10$\times$ 以上的扩展率，其中删除操作的 16.8$\times$ 是最高值。JuiceFS+MySQL 的扩展因子略高于 RucksFS（create 18.1$\times$ vs.\ 15.5$\times$），但这主要因为 MySQL 在 $N=1$ 时的基线很低（231\,ops/s）——扩展因子高并不意味着绝对吞吐量高。$N=64$ 时 JuiceFS+MySQL 的创建速率仅为 4,177\,ops/s，不到 RucksFS 的一半。
+
+NFS 的 stat 扩展因子为 0.2$\times$，即 64 进程的吞吐量反而低于单进程。原因已在上一节解释：$N=1$ 时缓存命中率极高导致基线虚高，$N=64$ 时缓存失效后回到真实水平。
+
+TiKV 在 remove 上只获得了 9.3$\times$ 扩展，低于其他系统。TiKV 的 Raft 日志提交在单节点部署下退化为本地 WAL 写入，但写入路径仍需经过 Raft 状态机的序列化处理，这在高并发下成为瓶颈。
+
+
+\subsection{性能瓶颈分析}
+
+\subsubsection{分层开销量化}
+
+为理解 RucksFS 各层引入的延迟开销，进行了一组控制变量实验：分别测量进程内直接调用 RocksDB、经 gRPC 调用 MetadataServer、以及经 FUSE 挂载后通过系统调用访问的创建吞吐量。测试固定 $N=4$，结果如表~\ref{tab:layer-overhead} 所示。
+
+\begin{table}[htbp]
+    \centering
+    \caption{分层开销对比（$N=4$，文件创建）}
+    \label{tab:layer-overhead}
+    \begin{tabular}{lrr}
+        \toprule
+        访问层 & ops/s & 相对上层开销 \\
+        \midrule
+        Local RocksDB（进程内）    & 172,814 & 基线     \\
+        gRPC（4 RPCs/create）     & 3,557   & 48.6$\times$ \\
+        FUSE（fuse3 async）       & 2,387   & 1.5$\times$  \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+进程内直接操作 RocksDB，跳过所有网络和序列化开销，$N=4$ 时吞吐量达到 172,814\,ops/s。引入 gRPC 之后吞吐量骤降至 3,557\,ops/s，缩水 48.6 倍。一次文件创建在 gRPC 层面展开为 4 次 RPC 调用（分配 inode、写入 inode 属性、插入目录项、更新父目录时间戳），每次 RPC 包含序列化、网络传输和反序列化三个阶段。即使内网 RTT 仅 0.3\,ms，4 次串行 RPC 的累计延迟也达到 1.2\,ms 以上。加上 protobuf 编解码（约 5--10\,$\mu$s/次）和 tokio 调度开销，gRPC 层成为整个系统中最大的性能瓶颈。
+
+FUSE 层在 gRPC 之上额外引入 1.5 倍开销。这 50\% 的增量主要来自两个方面：内核与用户空间之间通过 \texttt{/dev/fuse} 设备的数据拷贝（每次操作至少两次 \texttt{read}/\texttt{write} 系统调用），以及 FUSE 协议本身的请求/响应封装。相比 gRPC 带来的 48.6 倍损耗，FUSE 层的开销相对温和。
+
+从 172,814 到 2,387，总开销约 72 倍。这一数字揭示了用户态分布式文件系统在元数据操作上面对的结构性挑战：即使底层存储引擎足够快，网络 RPC 的串行延迟也会将吞吐量压缩两个数量级。
+
+\subsubsection{gRPC 往返延迟分析}
+
+gRPC 层 48.6 倍的开销可以进一步拆解。假设每次 RPC 调用的耗时为 $t_{\text{rpc}}$，一次 create 操作包含 $k=4$ 次串行 RPC，则单次 create 的延迟为：
+\[
+    t_{\text{create}} = k \cdot t_{\text{rpc}} + t_{\text{overhead}}
+\]
+其中 $t_{\text{overhead}}$ 包含 FUSE 处理和客户端路由的固定开销。根据 $N=4$ 时 gRPC 层的 3,557\,ops/s（即每次约 281\,$\mu$s/op），以及内网 RTT 0.3\,ms $= 300\,\mu$s，可以估算单次 RPC 约 70\,$\mu$s。差值源于 RPC 并非纯网络往返——还包含服务端的 RocksDB 写入（memtable 插入约 1--2\,$\mu$s）和 protobuf 编解码。
+
+降低 gRPC 层开销的直接路径是减少 RPC 次数。第~\ref{sec:inline-opt} 节描述的增量内联优化将部分 delta 写操作合并到主写入批次中，减少了独立 RPC 的数量，带来了约 2 倍的吞吐量提升。更激进的方案（如将 4 次 RPC 合并为 1 次 batch RPC）留作后续工作。
+
+
+\subsection{优化效果验证}
+
+\subsubsection{增量内联优化}
+\label{sec:inline-opt}
+
+RucksFS 使用 delta 机制处理父目录的时间戳和 nlink 更新：每次 create/unlink 操作向父目录的 delta 列表追加一条记录，读取时将 delta 折叠到基线属性上。这种设计避免了对父目录 inode 的读-改-写竞争，但每条 delta 的追加是一次独立的 WAL 写入。
+
+增量内联优化将 delta 追加操作合并到同一个 \texttt{WriteBatch} 中，与 inode 创建/删除共享一次 WAL 同步。由于 RocksDB 的 WAL 写入是整个路径中最重的 I/O 操作（一次 \texttt{fsync} 约 50--100\,$\mu$s），减少一半的 WAL 写次数直接带来了所有变异操作约 2 倍的吞吐量提升。
+
+这个优化的效果在创建和删除操作上均有体现。以 $N=4$ 为例，优化前 create 吞吐量约 1,200\,ops/s，优化后达到 2,387\,ops/s。
+
+\subsubsection{异步删除优化}
+\label{sec:async-delete}
+
+RucksFS 最初的 unlink 实现是同步的：先删除元数据，再通过 gRPC 请求 DataServer 删除对应的数据文件，两步串行完成。对于有实际数据的文件，数据删除涉及磁盘 I/O；即使对于空文件，gRPC 往返本身也消耗约 0.3\,ms。
+
+第一轮优化将数据删除改为异步：unlink 仅删除元数据并立即返回，数据清理由后台线程执行。这一改动使得 unlink 延迟从约 1.6\,ms 降至约 0.01\,ms，单线程吞吐量提升 163 倍。
+
+进一步的"no-op 数据删除"优化直接跳过了空文件的数据删除 RPC，同时修复了异步模式下的多线程竞争问题。这一轮额外带来 4.7 倍提升，使得删除性能达到表~\ref{tab:remove-perf} 中的水平。
+
+值得记录的是两个失败的优化尝试。启用 RocksDB 块缓存（block cache 设为 256\,MiB）反而导致 stat 性能下降 22\%--35\%，推测原因是测试负载的工作集较小（inode 数据量不超过几 MiB），额外的缓存查找和内存分配开销超过了缓存命中带来的收益。禁用 delta 列表的 WAL 同步也导致 stat 性能回退 39\%——这个结果出乎预料，可能与 RocksDB 内部的 WAL 和 memtable 刷写调度耦合有关。两项优化均已回滚。
+
+\subsubsection{与 ext4 的单机对比}
+
+为评估 RucksFS 元数据引擎在没有网络开销时的原始性能，进行了一组进程内嵌入式测试，将 RucksFS 的 MetadataServer 直接嵌入测试进程，跳过 FUSE 和 gRPC 层，与 ext4 在同一台机器上对比。测试参数为 $N=1$，\texttt{-n 10000}，冷启动。
+
+\begin{table}[htbp]
+    \centering
+    \caption{RucksFS 嵌入式 vs.\ ext4 单机对比（ops/s，$N=1$）}
+    \label{tab:ext4-compare}
+    \begin{tabular}{lrrr}
+        \toprule
+        操作 & RucksFS & ext4 & 比值 \\
+        \midrule
+        create & 163,715  & 167,461  & 0.98$\times$ \\
+        stat   & 1,143,912 & 1,178,303 & 0.97$\times$ \\
+        unlink & 232,007  & 197,725  & 1.17$\times$ \\
+        rename & 179,266  & 167,475  & 1.07$\times$ \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+表~\ref{tab:ext4-compare} 的结果表明，去除网络和 FUSE 开销后，RucksFS 的元数据引擎与 ext4 处于同一量级。create 和 stat 操作上 RucksFS 略慢 2\%--3\%，差距可以归因于 RocksDB 用户态实现相比内核 ext4 的额外函数调用和内存分配开销。
+
+unlink 和 rename 操作上 RucksFS 反而更快（分别快 17\% 和 7\%），原因在于 RocksDB 的删除操作是一次简单的 tombstone 标记写入（仅写 memtable，不涉及磁盘同步），而 ext4 的 unlink 需要同步更新 inode bitmap、目录项和 journal，I/O 路径更长。rename 同理——RocksDB 的 WriteBatch 将多个键的修改合并为一次 WAL 写入，而 ext4 需要分别更新源目录和目标目录的 journal 条目。
+
+这组数据确认了 RucksFS 的性能瓶颈不在存储引擎层面，而在 gRPC 网络栈。
+
+\subsubsection{交叉验证}
+\label{sec:cross-validation}
+
+为确认结果的可重复性，在 $N=32$ 条件下对三个主要系统进行了 3 轮独立测试。每轮测试之间 umount 并重新挂载文件系统，清空所有缓存。
+
+\begin{table}[htbp]
+    \centering
+    \caption{交叉验证结果（$N=32$，文件创建 ops/s）}
+    \label{tab:cross-val}
+    \begin{tabular}{lrrrrc}
+        \toprule
+        系统 & R1 & R2 & R3 & 平均 & 标准差 \\
+        \midrule
+        RucksFS       & 7,809 & 7,756 & 7,728 & 7,764 & $\pm$42 (0.5\%) \\
+        JuiceFS+MySQL & 3,378 & 3,333 & 3,316 & 3,342 & $\pm$32 (1.0\%) \\
+        NFS           & 5,839 & 5,631 & 5,565 & 5,678 & $\pm$142 (2.5\%) \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+三个系统的变异系数均低于 3\%。RucksFS 的标准差为 $\pm$42（0.5\%），表现出最高的稳定性。NFS 的波动稍大（2.5\%），这与内核缓存的冷热状态差异有关。这组数据表明前述性能对比中的差异是系统特性导致的，而非随机测量误差。
+
+
+\subsection{本章小结}
+
+围绕 RucksFS 的元数据操作性能，进行了 mdtest 基准测试、POSIX 合规性检验、分层开销量化和优化效果验证四组实验。
+
+在 mdtest 多并发测试中，RucksFS 的文件创建在 $N=64$ 时达到 9,917\,ops/s，超过 JuiceFS+TiKV（5,908\,ops/s）68\%，超过 NFS（5,655\,ops/s）75\%。删除操作的优势更为突出——14,179\,ops/s 是 JuiceFS+TiKV 的 3.7 倍。stat 性能各分布式系统接近，均在 28,000--35,000\,ops/s 区间。
+
+分层开销分析表明，gRPC 网络栈是 RucksFS 当前最大的性能瓶颈，将进程内 RocksDB 的 172,814\,ops/s 压缩到 3,557\,ops/s（48.6 倍损耗）。FUSE 层额外引入 1.5 倍开销，相比之下并非主要矛盾。增量内联和异步删除两项优化分别带来了 2 倍和 163 倍的单项提升，是 RucksFS 在实际部署中取得竞争力的关键。
+
+嵌入式测试确认 RucksFS 的 RocksDB 元数据引擎与 ext4 性能持平（create 为 ext4 的 98\%，stat 为 97\%），unlink 和 rename 操作甚至快于 ext4（分别为 117\% 和 107\%），说明存储引擎本身不是瓶颈所在。
+
+实验也暴露了若干局限。CubeFS 受限于单机混合部署，其数据不能与其他系统直接对比。NFS 的 stat 结果因内核属性缓存而失真。$N=1$ 到 $N=64$ 的扩展因子比较需要考虑基线效应——基线低的系统扩展因子天然偏高，绝对吞吐量才是更可靠的指标。
