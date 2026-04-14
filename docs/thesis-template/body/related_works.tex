@@ -102,6 +102,9 @@ LevelDB\cite{google2011leveldb}开发的嵌入式键值存储引擎，
 RocksDB 的底层数据结构为 LSM-tree（Log-Structured Merge-tree），
 最早由 O'Neil 等人\cite{oneil1996lsmtree}于 1996 年提出。
 其核心思想是将随机写转化为顺序写，以适应磁盘和 SSD 的 I/O 特性。
+这一思想的渊源可以追溯到更早的日志结构文件系统（Log-Structured File System, LFS）\cite{rosenblum1992lfs}，
+Rosenblum 和 Ousterhout 在 1991 年提出将所有写入——包括元数据——以日志追加的方式顺序写入磁盘，
+LSM-tree 继承了这种"先写后整理"的策略并将其应用于索引结构。
 
 写入路径如下：数据首先写入内存中的 MemTable（RocksDB 默认使用 SkipList 实现），
 同时追加一条 WAL（Write-Ahead Log）记录以保证持久性。
@@ -303,6 +306,8 @@ FUSE 框架提供了 \texttt{default\_permissions} 挂载选项。
 仅在提交时检测是否与其他已提交事务发生冲突。
 若检测到冲突，事务回滚并重试。
 OCC 在冲突率较低的场景下性能更好，因为省去了加锁等待的时间。
+Amazon Dynamo\cite{decandia2007dynamo}即采用了基于向量时钟的乐观冲突检测机制，
+在多数读写不冲突的 KV 工作负载下取得了良好的延迟表现。
 
 PCC 的适用场景与冲突概率直接相关。
 以 \texttt{mkdir} 为例：多个线程可能同时在同一父目录下创建子目录，
