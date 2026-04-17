@@ -22,3 +22,6 @@ rucksfs-client = { path = "../client" }
 rucksfs-dataserver = { path = "../dataserver" }
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
 tempfile = { workspace = true }
+
+[features]
+no_delta = []

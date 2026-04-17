@@ -357,9 +357,15 @@ where
     /// Write delta operations for a parent directory inside the transaction
     /// batch.  Each delta is stored as a `PutDelta` operation using the
     /// shared `delta_store`'s sequence allocator.
+    ///
+    /// When the `no_delta` feature is enabled, this falls back to
+    /// read-modify-write: load the parent inode, apply deltas in-place,
+    /// and write it back via `PutInode`.
+    #[cfg(not(feature = "no_delta"))]
     fn batch_parent_deltas(
         batch: &mut dyn AtomicWriteBatch,
         delta_store: &dyn DeltaStore,
+        _metadata: &dyn MetadataStore,
         parent: Inode,
         deltas: &[DeltaOp],
     ) {
@@ -370,6 +376,28 @@ where
                 key: key.to_vec(),
                 value: delta.serialize(),
             });
+        }
+    }
+
+    #[cfg(feature = "no_delta")]
+    fn batch_parent_deltas(
+        batch: &mut dyn AtomicWriteBatch,
+        _delta_store: &dyn DeltaStore,
+        metadata: &dyn MetadataStore,
+        parent: Inode,
+        deltas: &[DeltaOp],
+    ) {
+        // Traditional read-modify-write: load parent inode, apply deltas,
+        // write back.  This path exists only for ablation experiments.
+        let key = encode_inode_key(parent);
+        if let Ok(Some(bytes)) = metadata.get(&key) {
+            if let Ok(mut iv) = InodeValue::deserialize(&bytes) {
+                delta::fold_deltas(&mut iv, deltas);
+                batch.push(BatchOp::PutInode {
+                    key: key.to_vec(),
+                    value: iv.serialize(),
+                });
+            }
         }
     }
 
@@ -589,6 +617,7 @@ where
             Self::batch_parent_deltas(
                 batch.as_mut(),
                 self.delta_store.as_ref(),
+                self.metadata.as_ref(),
                 parent,
                 &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
             );
@@ -650,6 +679,7 @@ where
             Self::batch_parent_deltas(
                 batch.as_mut(),
                 self.delta_store.as_ref(),
+                self.metadata.as_ref(),
                 parent,
                 &[DeltaOp::IncrementNlink(1), DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
             );
@@ -740,6 +770,7 @@ where
             Self::batch_parent_deltas(
                 batch.as_mut(),
                 self.delta_store.as_ref(),
+                self.metadata.as_ref(),
                 parent,
                 &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
             );
@@ -823,6 +854,7 @@ where
             Self::batch_parent_deltas(
                 batch.as_mut(),
                 self.delta_store.as_ref(),
+                self.metadata.as_ref(),
                 parent,
                 &[DeltaOp::IncrementNlink(-1), DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
             );
@@ -982,6 +1014,7 @@ where
                 Self::batch_parent_deltas(
                     batch.as_mut(),
                     self.delta_store.as_ref(),
+                    self.metadata.as_ref(),
                     new_parent,
                     &[DeltaOp::IncrementNlink(-1)],
                 );
@@ -990,12 +1023,14 @@ where
                 Self::batch_parent_deltas(
                     batch.as_mut(),
                     self.delta_store.as_ref(),
+                    self.metadata.as_ref(),
                     parent,
                     &[DeltaOp::IncrementNlink(-1)],
                 );
                 Self::batch_parent_deltas(
                     batch.as_mut(),
                     self.delta_store.as_ref(),
+                    self.metadata.as_ref(),
                     new_parent,
                     &[DeltaOp::IncrementNlink(1)],
                 );
@@ -1004,6 +1039,7 @@ where
             Self::batch_parent_deltas(
                 batch.as_mut(),
                 self.delta_store.as_ref(),
+                self.metadata.as_ref(),
                 parent,
                 &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
             );
@@ -1011,6 +1047,7 @@ where
                 Self::batch_parent_deltas(
                     batch.as_mut(),
                     self.delta_store.as_ref(),
+                    self.metadata.as_ref(),
                     new_parent,
                     &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
                 );
@@ -1190,6 +1227,7 @@ where
             Self::batch_parent_deltas(
                 batch.as_mut(),
                 self.delta_store.as_ref(),
+                self.metadata.as_ref(),
                 parent,
                 &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
             );
@@ -1260,6 +1298,7 @@ where
             Self::batch_parent_deltas(
                 batch.as_mut(),
                 self.delta_store.as_ref(),
+                self.metadata.as_ref(),
                 parent,
                 &[DeltaOp::SetMtime(ts), DeltaOp::SetCtime(ts)],
             );
