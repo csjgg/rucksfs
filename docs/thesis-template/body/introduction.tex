@@ -135,7 +135,11 @@
 \end{figure}
 
 \textbf{问题一：树形目录到扁平键空间的映射。}
-KV 引擎的数据模型是字节串到字节串的扁平映射，而文件系统的命名空间是以根目录为起点的层次化树。键编码方案需要同时满足两类查询需求：（1）\texttt{readdir} 要求同一父目录下的所有子项在键空间中连续排列，以便通过前缀迭代器一次扫出；（2）\texttt{lookup} 要求给定父 inode 号和文件名后，能在 $O(1)$ 时间内定位到对应的目录项。如果直接以全路径（如 \texttt{/a/b/c}）作为键，\texttt{rename} 操作就需要递归修改整棵子树的所有键，其开销随子树规模线性增长。TableFS\cite{ren2013tablefs}以"父 inode 号 + 文件名"拼接作为键，方向正确，但 inode 号使用原生字节序存储，导致同一目录下的条目在 LSM-tree 中未必物理相邻，无法利用前缀布隆过滤器。键编码还必须保持字节序与数值序的一致性（byte-order preserving），否则范围查询的结果将不符合预期。
+KV 引擎的数据模型是字节串到字节串的扁平映射，而文件系统的命名空间是以根目录为起点的层次化树。如何设计键编码，使得文件创建、查询和遍历都能高效完成，是首要的设计问题。
+
+以 \texttt{create} 为例。在 ext4 中，一次文件创建需要写入 6 个分散的磁盘区域（如 1.1.1 节所述）；而在 KV 存储中，如果将每条目录项建模为一个键值对，\texttt{create} 就简化为插入一条记录——一次内存追加即可完成，不涉及 bitmap、journal 或页结构维护。这正是 KV 方案能够在写入密集场景下超越 B+ 树的根本原因。但要实现这一简化，键的编码方式至关重要。
+
+键编码需要同时满足三类操作的需求：（1）\texttt{create} 和 \texttt{unlink} 要求插入和删除单条目录项的代价为 $O(1)$；（2）\texttt{readdir} 要求同一父目录下的所有子项在键空间中连续排列，以便通过前缀迭代器一次扫出；（3）\texttt{lookup} 要求给定父 inode 号和文件名后，能在 $O(1)$ 时间内定位到对应条目。如果直接以全路径（如 \texttt{/a/b/c}）作为键，\texttt{create} 虽然仍是 $O(1)$，但 \texttt{rename} 操作就需要递归修改整棵子树的所有键，开销随子树规模线性增长。TableFS\cite{ren2013tablefs}以"父 inode 号 + 文件名"拼接作为键，使 \texttt{create}、\texttt{lookup}、\texttt{rename} 均为 $O(1)$，但 inode 号使用原生字节序存储，导致同一目录下的条目在 LSM-tree 中未必物理相邻，无法利用前缀布隆过滤器加速 \texttt{readdir}。键编码还必须保持字节序与数值序的一致性（byte-order preserving），否则范围查询的结果将不符合预期。
 
 \textbf{问题二：父目录更新引发的写放大。}
 POSIX 语义\cite{ieee2017posix}要求每次创建或删除文件时，同步更新父目录的 \texttt{mtime} 和 \texttt{nlink}。在 KV 存储中，这意味着每次 \texttt{create} 或 \texttt{unlink} 都需要对父目录 inode 执行一次读取-修改-写回。对于热点目录（如 \texttt{/tmp}、CI 构建输出目录、模型训练的 checkpoint 目录），假设 1 秒内发生 1{,}000 次文件创建，父目录 inode 就要被读写 1{,}000 次，其中绝大部分读取到的值在写回前就已过期。在 RocksDB 中，对同一 key 的密集 \texttt{Get+Put} 序列还会加速 MemTable 填满和 L0 文件堆积，触发额外的 compaction，形成写放大的连锁效应。
