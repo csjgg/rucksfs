@@ -45,13 +45,13 @@
     \node[disk] (pino) at (9.7, 3.8) {父目录\\[-1pt]inode};
     \node[disk] (jnl2) at (12, 3.8)  {Journal\\[-1pt]commit};
 
-    % 步骤编号
-    \node[font=\scriptsize\bfseries] at (0.5, 4.65) {\ding{172}};
-    \node[font=\scriptsize\bfseries] at (2.8, 4.65) {\ding{173}};
-    \node[font=\scriptsize\bfseries] at (5.1, 4.65) {\ding{174}};
-    \node[font=\scriptsize\bfseries] at (7.4, 4.65) {\ding{175}};
-    \node[font=\scriptsize\bfseries] at (9.7, 4.65) {\ding{176}};
-    \node[font=\scriptsize\bfseries] at (12,  4.65) {\ding{177}};
+    % 步骤编号（带圈数字）
+    \node[font=\scriptsize\bfseries] at (0.5, 4.65) {\textcircled{\scriptsize 1}};
+    \node[font=\scriptsize\bfseries] at (2.8, 4.65) {\textcircled{\scriptsize 2}};
+    \node[font=\scriptsize\bfseries] at (5.1, 4.65) {\textcircled{\scriptsize 3}};
+    \node[font=\scriptsize\bfseries] at (7.4, 4.65) {\textcircled{\scriptsize 4}};
+    \node[font=\scriptsize\bfseries] at (9.7, 4.65) {\textcircled{\scriptsize 5}};
+    \node[font=\scriptsize\bfseries] at (12,  4.65) {\textcircled{\scriptsize 6}};
 
     % 箭头
     \draw[arr] (call.south) -- (jnl1.north);
@@ -97,63 +97,9 @@ LSM-tree\cite{oneil1996lsmtree}（Log-Structured Merge-tree）的写入模型从
 
 
 
-% ===== Figure 1: 研究背景与趋势 =====
-\begin{figure}[htbp]
-    \centering
-    \begin{tikzpicture}[
-        x=1cm, y=1cm,
-        sys/.style={draw, rounded corners=2pt, minimum height=0.55cm, align=center,
-                     font=\scriptsize, fill=black!5},
-        year/.style={font=\footnotesize, text=black!70},
-        era/.style={font=\footnotesize\bfseries, text=black!50},
-        arr/.style={->, >=stealth, thick, dashed, black!30}
-    ]
-    % 时间轴
-    \draw[very thick] (0, 0) -- (13, 0);
-    \foreach \x/\y in {0/2003, 3/2011, 5.5/2013, 8/2019, 11/2025} {
-        \draw (\x, 0) -- (\x, -0.2);
-        \node[year] at (\x, -0.5) {\y};
-    }
-
-    % 时代标注
-    \node[era] at (1.5, 2.8) {B+ 树时代};
-    \node[era] at (4.2, 2.8) {LSM-tree 工程化};
-    \node[era] at (7, 2.8) {KV 元数据};
-    \node[era] at (9.5, 2.8) {云原生};
-    \node[era] at (12, 2.8) {单机优化};
-
-    % 系统节点
-    \node[sys, minimum width=1.8cm] (e1) at (1.5, 1.8) {ext4 / XFS};
-    \node[sys, minimum width=1.8cm] (e2) at (1.5, 1.0) {B+ 树就地修改};
-
-    \node[sys, minimum width=1.8cm] (l1) at (4.2, 1.8) {LevelDB};
-    \node[sys, minimum width=1.8cm] (l2) at (4.2, 1.0) {RocksDB};
-
-    \node[sys, minimum width=1.8cm] (t1) at (7, 1.8) {TableFS};
-    \node[sys, minimum width=1.8cm] (t2) at (7, 1.0) {IndexFS};
-
-    \node[sys, minimum width=1.8cm] (c1) at (9.5, 1.8) {JuiceFS};
-    \node[sys, minimum width=1.8cm] (c2) at (9.5, 1.0) {CubeFS / Ozone};
-
-    \node[sys, minimum width=1.8cm, fill=black!12, thick] (r1) at (12, 1.8) {\textbf{RucksFS}};
-    \node[sys, minimum width=1.8cm] (r2) at (12, 1.0) {SingularFS};
-
-    % 演进箭头
-    \draw[arr] (e1.east) -- (l1.west);
-    \draw[arr] (l2.east) -- (t1.west);
-    \draw[arr] (t1.east) -- (c1.west);
-    \draw[arr] (c1.east) -- (r1.west);
-
-    \end{tikzpicture}
-    \caption{文件系统元数据管理技术演进。从 B+ 树就地修改到 LSM-tree 顺序写入，再到 KV 元数据引擎、云原生分布式系统，最后到追求单机深度优化的方向。}
-    \label{fig:fs_evolution}
-\end{figure}
-
 \subsubsection{面临的问题和挑战}
 
-用 KV 引擎替换 B+ 树并非接口层面的简单适配，背后存在三个需要专门设计才能解决的技术难点。
-
-\textbf{树形目录到扁平键空间的映射。}
+将 KV 引擎用于文件系统元数据管理，需要解决三个核心设计问题（图~\ref{fig:three_challenges}）。
 
 \begin{figure}[htbp]
     \centering
@@ -188,27 +134,31 @@ LSM-tree\cite{oneil1996lsmtree}（Log-Structured Merge-tree）的写入模型从
     \caption{本课题面临的三个设计问题及对应解决方案。}
     \label{fig:three_challenges}
 \end{figure}
-KV 引擎的数据模型是从字节串到字节串的扁平映射，而文件系统是一棵以根目录为起点的层次化树。键编码方案必须同时满足两类需求：一是 \texttt{readdir}——同一父目录下的所有子项在键空间中要连续排列，以便用前缀迭代器一次性扫出；二是 \texttt{lookup}——给定父 inode 号和文件名，能在 $O(1)$ 时间内定位到对应的目录项。如果直接用全路径（如 \texttt{/a/b/c}）做键，\texttt{rename} 就不得不递归修改整棵子树的所有键——代价不可接受。TableFS\cite{ren2013tablefs}的方案以"父 inode 号 + 文件名"拼接作为键，方向正确，但 inode 号使用原生字节序存储，导致同一目录下的条目在 LSM-tree 中未必相邻，无法利用前缀布隆过滤器。键编码还必须保持字节序与数值序的一致性（byte-order preserving），否则范围查询的语义会出错。
 
-\textbf{父目录更新引发的写放大。}
-POSIX 语义\cite{ieee2017posix}要求：每创建或删除一个文件，父目录的 \texttt{mtime}（修改时间）和 \texttt{nlink}（链接计数）必须随之更新。在 KV 存储中，这意味着每次 \texttt{create} 或 \texttt{unlink} 都要对父目录 inode 记录执行一次读取-修改-写回。对于低频访问的目录这不构成问题；但一旦某个目录成为热点——\texttt{/tmp}、CI 构建输出目录、模型训练的 checkpoint 目录都属于此类——开销会急剧膨胀。设想一个目录在 1 秒内发生 1,000 次文件创建，父目录 inode 就要被读写 1,000 次，绝大部分读取到的值在写回前就已过期。更深层的问题在于，RocksDB 中对同一 key 的密集 \texttt{Get+Put} 序列会加速 MemTable 填满和 L0 文件堆积，触发不必要的 compaction，形成写放大的连锁反应。
+\textbf{问题一：树形目录到扁平键空间的映射。}
+KV 引擎的数据模型是字节串到字节串的扁平映射，而文件系统的命名空间是以根目录为起点的层次化树。键编码方案需要同时满足两类查询需求：（1）\texttt{readdir} 要求同一父目录下的所有子项在键空间中连续排列，以便通过前缀迭代器一次扫出；（2）\texttt{lookup} 要求给定父 inode 号和文件名后，能在 $O(1)$ 时间内定位到对应的目录项。如果直接以全路径（如 \texttt{/a/b/c}）作为键，\texttt{rename} 操作就需要递归修改整棵子树的所有键，其开销随子树规模线性增长。TableFS\cite{ren2013tablefs}以"父 inode 号 + 文件名"拼接作为键，方向正确，但 inode 号使用原生字节序存储，导致同一目录下的条目在 LSM-tree 中未必物理相邻，无法利用前缀布隆过滤器。键编码还必须保持字节序与数值序的一致性（byte-order preserving），否则范围查询的结果将不符合预期。
 
-\textbf{并发目录操作的正确性。}
-多个线程（或未来的多个客户端）同时操作同一目录时，TOCTOU（Time-of-Check-to-Time-of-Use）竞态几乎不可避免。一个典型场景：线程 A 在执行 \texttt{rename} 时确认目标路径尚不存在，但写入新目录项之前，线程 B 已经在该路径上创建了同名文件——结果要么丢失 B 的文件，要么目录项出现重复。传统内核文件系统用 VFS 层的 inode 互斥锁串行化目录操作；KV 引擎上没有这层保护，需要依赖存储层自身的事务机制。RocksDB 提供悲观和乐观两种事务模式，但事务粒度怎么选——锁整个目录还是只锁涉及的 key——直接影响并发度和实现复杂度之间的权衡。
+\textbf{问题二：父目录更新引发的写放大。}
+POSIX 语义\cite{ieee2017posix}要求每次创建或删除文件时，同步更新父目录的 \texttt{mtime}（修改时间）和 \texttt{nlink}（链接计数）。在 KV 存储中，这意味着每次 \texttt{create} 或 \texttt{unlink} 都需要对父目录 inode 执行一次读取-修改-写回。对于访问频率不高的目录，这一开销可以接受；但对于热点目录（如 \texttt{/tmp}、CI 构建输出目录、模型训练的 checkpoint 目录），问题会迅速放大。假设某个目录在 1 秒内发生 1{,}000 次文件创建，父目录 inode 就要被读写 1{,}000 次，其中绝大部分读取到的值在写回前就已过期。在 RocksDB 中，对同一 key 的密集 \texttt{Get+Put} 序列还会加速 MemTable 填满和 L0 文件堆积，触发额外的 compaction，形成写放大的连锁效应。
+
+\textbf{问题三：并发目录操作的正确性。}
+多个线程同时操作同一目录时，检查条件与执行操作之间的时间窗口会引发 TOCTOU（Time-of-Check-to-Time-of-Use）竞态。例如，线程 A 在执行 \texttt{rename} 时确认目标路径不存在，但在写入新目录项之前，线程 B 已在该路径上创建了同名文件，导致目录项冲突或数据丢失。传统内核文件系统通过 VFS 层的 inode 互斥锁串行化目录操作来规避此问题。在 KV 引擎上没有这层保护，需要依赖存储层自身的事务机制。RocksDB 提供悲观和乐观两种事务模式，但事务的锁粒度——锁整个目录还是只锁涉及的 key——直接影响并发度与实现复杂度之间的取舍。
 
 \subsubsection{课题目的与意义}
 
-选择这个题目做毕业设计，有一个比较朴素的出发点：文件系统是操作系统课程中最容易"看得见、摸得着"的子系统之一，但课堂上讲的始终是 ext4、XFS 这些已经定型的内核实现，学生很难有机会从头思考"如果重新设计元数据存储层，应该怎么做"。RocksDB 提供了这样一个切入口——它的 API 足够简单（put/get/delete/iterate），工程成熟度有保障（TiKV、CockroachDB 等生产系统背书），同时 LSM-tree 与传统 B+ 树在写入路径上的差异又足够大，能让设计者重新审视文件系统元数据的组织方式。将文件系统的目录树"拍平"成键值对，听起来直觉上可行，但实际动手会发现一系列非显然的设计问题：键怎么编码才能同时支持点查和前缀扫描？父目录的 mtime 在高并发下怎么更新才不会成为瓶颈？rename 跨目录移动时如何保证原子性？这些问题的每一个都需要具体的工程回答，不是读几篇论文就能解决的。一个毕业设计的合适定位，恰好是把这些问题逐一落地、用代码和实验数据给出答案。
+本课题旨在设计并实现一个以 RocksDB 为元数据引擎的用户态文件系统 RucksFS，针对上述三个问题——键编码、写放大、并发一致性——提出完整的解决方案，并通过 FUSE 接口将其落地为可运行的 POSIX 文件系统加以验证。该工作具有以下现实意义和技术价值。
 
-基于上述考虑，本课题的目标是：设计并实现一个以 RocksDB 为元数据引擎的用户态文件系统 RucksFS，围绕上述三个问题——键编码、写放大、并发一致性——给出一套完整的解决方案，并通过 FUSE 接口将其落地为可运行的 POSIX 文件系统加以验证。
+在技术层面，本课题填补了 TableFS\cite{ren2013tablefs}以来在"单机 KV 元数据引擎 + 完整事务保障"方向上的空缺。TableFS 基于 LevelDB 且不具备事务能力，IndexFS\cite{ren2014indexfs}侧重分布式扩展而非单机优化。RocksDB 自 6.0 版本起已提供成熟的悲观事务接口，但尚未有公开工作将其系统性地应用于文件系统元数据操作。本课题通过 PCC 事务、DeltaOp 增量更新和以边为中心的键编码三项设计，为基于 KV 存储的元数据管理提供了一套可复现的工程参考。
 
-键编码方面，系统采用多列族架构，将 inode 属性与目录项分置于独立列族，各自配置适用的布隆过滤器与压缩策略。目录项列族的键遵循"以边为中心"的思路：以父 inode 号与子文件名的大端序拼接作为键，每条目录项直接对应目录树中一条父子边。文件操作由此转化为对边的增删——\texttt{create} 插入一条边，\texttt{unlink} 删除一条边，\texttt{rename} 删旧边、插新边——代价均为常数时间。全路径方案在 \texttt{rename} 时需递归改写子树中每条键，开销随子树规模线性增长。大端序保证字节序与数值序一致，使得同一父目录的全部子边在键空间中自然相邻，\texttt{readdir} 和 \texttt{lookup} 均可高效完成。
+在工程层面，系统使用 Rust 编写，其所有权和生命周期机制在编译期排除了内存安全问题，对文件系统这类可靠性要求极高的基础设施具有切实价值。FUSE 接口使系统可在用户态运行，降低了开发和调试成本，同时与 JuiceFS、CubeFS 等主流系统的接入方式一致。
 
-写放大方面，本课题提出增量更新（delta-based update）机制。文件创建或删除时不直接改写父目录 inode，而是将变化量（nlink $+1$、mtime 更新等）作为独立的增量记录（DeltaOp）追加到专用列族。读取 inode 时再将基值与所有增量在线合并。后台压缩线程在增量条目超过 32 条时执行折叠，将累积变更写入一条新的基值。热目录的写路径因此从一次随机 \texttt{Get+Put} 变为一次顺序 \texttt{Put}。
+具体的技术方案如下。键编码方面，系统采用多列族架构，将 inode 属性与目录项分置于独立列族，各自配置适用的布隆过滤器与压缩策略。目录项列族的键遵循"以边为中心"的思路：以父 inode 号与子文件名的大端序拼接作为键，每条目录项直接对应目录树中一条父子边。文件操作由此转化为对边的增删——\texttt{create} 插入一条边，\texttt{unlink} 删除一条边，\texttt{rename} 删旧边、插新边——代价均为常数时间。
+
+写放大方面，本课题引入增量更新（delta-based update）机制。文件创建或删除时不直接改写父目录 inode，而是将变化量（nlink $+1$、mtime 更新等）作为独立的增量记录（DeltaOp）追加到专用列族。读取 inode 时将基值与所有增量在线合并。后台压缩线程在增量条目超过 32 条时执行折叠，将累积变更写入新的基值。
 
 一致性方面，系统采用 RocksDB 悲观事务（PCC）为 \texttt{create}、\texttt{mkdir}、\texttt{unlink}、\texttt{rmdir}、\texttt{rename} 提供原子性保证——事务在读取阶段即获取行级锁，封堵 TOCTOU 窗口。锁冲突时以 \texttt{EAGAIN} 语义自动重试，上限 3 次。
 
-预期交付物是一个以 Rust\cite{klabnik2023rust}编写的单二进制程序，在同等硬件条件下与 JuiceFS、CubeFS、NFS 做元数据吞吐量和延迟的对比。学术层面上，本课题填补了 TableFS\cite{ren2013tablefs}之后在"单机 KV 元数据引擎 + 完整事务保障"方向上的空缺——TableFS 基于 LevelDB 且不具备事务能力，IndexFS\cite{ren2014indexfs}侧重分布式扩展而非单机深度优化。工程层面上，Rust 的所有权和生命周期机制在编译期排除内存安全问题，对于文件系统这类可靠性要求极高的基础设施有切实价值。
+预期交付物是一个以 Rust\cite{klabnik2023rust}编写的单二进制程序，在同等硬件条件下与 JuiceFS、CubeFS、NFS 做元数据吞吐量和延迟的对比评测。
 
 
 \subsection{国内外研究现状}
@@ -250,6 +200,28 @@ Yang 等人\cite{yang2020batchfile}在 2020 年从实用角度分析了大规模
 MetaHive\cite{heidari2024metahive}在 2024 年针对 KV 存储引擎在元数据场景下的缓存效率问题展开研究。通用 KV 存储的缓存替换策略（如 LRU）未考虑文件系统的访问局部性——同一目录下的 inode 被连续访问的概率远高于随机 key。MetaHive 据此设计了元数据感知的缓存分区方案。这一发现与 RucksFS 的 InodeFoldedCache 设计动机一致：系统在应用层维护了专门的 LRU 缓存来存储折叠后的 inode 值，而非依赖 RocksDB 的通用块缓存。
 
 在国内，龚拓宇\cite{gong2020rocksmeta}在 2020 年的清华大学硕士论文中结合 RDMA 技术与 RocksDB 设计了分布式元数据服务原型 RocksMeta，在单节点上实现了超过 10 万 IOPS 的元数据操作吞吐量。其键编码方案与本课题有相似之处，但侧重网络传输优化（RDMA 旁路内核协议栈），而本课题侧重存储层的写放大优化。范立衡等人\cite{fan2014kvmetadata}较早探索了键值存储用于元数据集群副本一致性的管理策略。吴雨飞等人\cite{wu2025dfscache}在 2025 年针对基于 TiKV 的分布式文件系统元数据缓存一致性问题，提出了并发广播与惰性删除相结合的轻量级维护机制。
+
+表~\ref{tab:related_contribution} 汇总了上述相关工作对本课题的具体参考价值。
+
+\begin{table}[!ht]
+    \centering
+    \caption{相关工作对本课题的参考价值}
+    \label{tab:related_contribution}
+    \begin{tabular}{llp{6.5cm}}
+    \toprule
+        \textbf{工作} & \textbf{类别} & \textbf{对本课题的参考} \\ \midrule
+        TableFS\cite{ren2013tablefs} & KV 元数据 & 验证了 KV 存储用于元数据的可行性；暴露了键编码、readdir 效率和事务缺失三个问题，本课题逐一给出改进方案 \\
+        IndexFS\cite{ren2014indexfs} & KV 元数据 & 列式目录布局思路启发了本课题的 readdirplus 设计；其分布式架构的复杂性反证了单机深度优化的价值 \\
+        SingularFS\cite{li2022singularfs} & 单机 MDS & 证明单台服务器可支撑十亿级文件，验证了"单机优化优先于分布式扩展"这一技术路线 \\
+        CFS\cite{wang2023cfs} & 并发控制 & 细粒度临界区分析方法影响了本课题的 PCC 事务设计——只锁涉及的 key 而非整个目录 \\
+        Yang 等\cite{yang2020batchfile} & 批量优化 & 批量文件操作的合并思路直接体现在 RucksFS 的 readdirplus 实现中 \\
+        FetchBPF\cite{mishler2024fetchbpf} & 系统优化 & 展示了 eBPF 内核预取的可能性，为本课题的 FUSE 通道优化提供了未来方向 \\
+        FBMM\cite{tabatabai2024fbmm} & 系统优化 & "文件系统即抽象层"的理念与本课题使用 FUSE 暴露 KV 存储为 POSIX 接口的思路一致 \\
+        JuiceFS\cite{juicefs2021} & 对比基线 & 实验对比对象；其外部数据库方案的性能瓶颈验证了嵌入式 KV 引擎的优势 \\
+        CubeFS\cite{liu2019cubefs} & 对比基线 & 实验对比对象；其内存 B-tree 方案的内存限制验证了 LSM-tree 持久化方案的可扩展性 \\
+    \bottomrule
+    \end{tabular}
+\end{table}
 
 \subsubsection{现有研究不足与本课题定位}
 
