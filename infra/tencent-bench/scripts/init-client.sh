@@ -1,6 +1,7 @@
 #!/bin/bash
 # cloud-init script for Machine A (Client / Test Driver)
-# Installs: OpenMPI, mdtest, FUSE, JuiceFS, NFS client
+# Installs: OpenMPI, mdtest, FUSE, NFS client
+# Controlled benchmark setup: no JuiceFS, single client node.
 set -euo pipefail
 exec > /var/log/bench-init.log 2>&1
 
@@ -40,9 +41,8 @@ apt-get install -y \
   automake autoconf libtool \
   fuse3 libfuse3-dev \
   nfs-common \
-  iperf3 \
+  iperf3 sysstat \
   pkg-config libssl-dev \
-  linux-tools-common linux-tools-generic \
   perl
 
 # Enable FUSE allow_other
@@ -50,44 +50,30 @@ grep -q "^user_allow_other" /etc/fuse.conf 2>/dev/null || \
   echo "user_allow_other" >> /etc/fuse.conf
 
 # -------------------------------------------------------
-# 3. SSH key for MPI cross-node communication
+# 3. SSH key for MPI (single-node, but needed for mpirun)
 # -------------------------------------------------------
-echo "=== Setting up SSH for MPI ==="
-UBUNTU_HOME="/home/ubuntu"
-mkdir -p "$UBUNTU_HOME/.ssh"
+echo "=== Setting up SSH ==="
+for HOME_DIR in /home/ubuntu /root; do
+  mkdir -p "$HOME_DIR/.ssh"
 
-# Generate SSH key pair (no passphrase)
-ssh-keygen -t ed25519 -f "$UBUNTU_HOME/.ssh/id_ed25519" -N "" -q
+  if [ ! -f "$HOME_DIR/.ssh/id_ed25519" ]; then
+    ssh-keygen -t ed25519 -f "$HOME_DIR/.ssh/id_ed25519" -N "" -q
+  fi
 
-# Authorize own key (for single-node mpirun too)
-cat "$UBUNTU_HOME/.ssh/id_ed25519.pub" >> "$UBUNTU_HOME/.ssh/authorized_keys"
+  cat "$HOME_DIR/.ssh/id_ed25519.pub" >> "$HOME_DIR/.ssh/authorized_keys"
 
-# SSH config: disable strict host checking for VPC hosts
-cat > "$UBUNTU_HOME/.ssh/config" <<'SSHCONF'
+  cat > "$HOME_DIR/.ssh/config" <<'SSHCONF'
 Host 10.0.*
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
   LogLevel ERROR
 SSHCONF
 
-chmod 700 "$UBUNTU_HOME/.ssh"
-chmod 600 "$UBUNTU_HOME/.ssh/id_ed25519" "$UBUNTU_HOME/.ssh/config"
-chmod 644 "$UBUNTU_HOME/.ssh/id_ed25519.pub" "$UBUNTU_HOME/.ssh/authorized_keys"
-chown -R ubuntu:ubuntu "$UBUNTU_HOME/.ssh"
-
-# Also set up for root (mpirun often runs as root for FUSE)
-mkdir -p /root/.ssh
-cp "$UBUNTU_HOME/.ssh/id_ed25519" /root/.ssh/
-cp "$UBUNTU_HOME/.ssh/id_ed25519.pub" /root/.ssh/
-cat /root/.ssh/id_ed25519.pub >> /root/.ssh/authorized_keys
-cat > /root/.ssh/config <<'SSHCONF'
-Host 10.0.*
-  StrictHostKeyChecking no
-  UserKnownHostsFile /dev/null
-  LogLevel ERROR
-SSHCONF
-chmod 700 /root/.ssh
-chmod 600 /root/.ssh/id_ed25519 /root/.ssh/config
+  chmod 700 "$HOME_DIR/.ssh"
+  chmod 600 "$HOME_DIR/.ssh/id_ed25519" "$HOME_DIR/.ssh/config"
+  chmod 644 "$HOME_DIR/.ssh/id_ed25519.pub"
+done
+chown -R ubuntu:ubuntu /home/ubuntu/.ssh
 
 # -------------------------------------------------------
 # 4. mdtest (IOR project, built with OpenMPI)
@@ -103,22 +89,15 @@ make install
 echo "mdtest version: $(mdtest -V 2>&1 | head -1 || true)"
 
 # -------------------------------------------------------
-# 5. JuiceFS client
-# -------------------------------------------------------
-echo "=== Installing JuiceFS ==="
-curl -sSL https://d.juicefs.com/install | sh -
-
-# -------------------------------------------------------
-# 6. Create mount point directories
+# 5. Create mount point directories
 # -------------------------------------------------------
 mkdir -p /mnt/rucksfs-dist
-mkdir -p /mnt/juicefs-mysql
-mkdir -p /mnt/juicefs-tikv
 mkdir -p /mnt/nfs
+mkdir -p /mnt/nfs-ac
 mkdir -p "$DATA_MNT/test-results"
 
 # -------------------------------------------------------
-# 7. Record environment info
+# 6. Record environment info
 # -------------------------------------------------------
 {
   echo "=== Machine A Environment ==="
@@ -136,7 +115,7 @@ mkdir -p "$DATA_MNT/test-results"
 } > "$DATA_MNT/env-info-client.txt"
 
 # -------------------------------------------------------
-# 8. Performance tuning
+# 7. Performance tuning
 # -------------------------------------------------------
 systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
 

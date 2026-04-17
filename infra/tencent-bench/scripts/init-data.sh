@@ -1,6 +1,7 @@
 #!/bin/bash
-# cloud-init script for Machine C (Data Server)
-# Installs: MinIO, NFS server, iperf3
+# cloud-init script for Machine C (Data / NFS Server)
+# Installs: NFS server, iperf3
+# Controlled benchmark setup: no MinIO, configurable nfsd threads.
 set -euo pipefail
 exec > /var/log/bench-init.log 2>&1
 
@@ -36,59 +37,10 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y \
   build-essential git curl wget \
-  iperf3
+  iperf3 sysstat
 
 # -------------------------------------------------------
-# 3. MinIO (S3-compatible object storage for JuiceFS)
-# -------------------------------------------------------
-echo "=== Installing MinIO ==="
-mkdir -p "$DATA_MNT/minio"
-
-wget -q https://dl.min.io/server/minio/release/linux-amd64/minio -O /usr/local/bin/minio
-chmod +x /usr/local/bin/minio
-
-# Create systemd service
-cat > /etc/systemd/system/minio.service <<'MINIO_SVC'
-[Unit]
-Description=MinIO Object Storage
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-Environment="MINIO_ROOT_USER=minioadmin"
-Environment="MINIO_ROOT_PASSWORD=minioadmin"
-ExecStart=/usr/local/bin/minio server /data/minio --address :9000 --console-address :9001
-Restart=always
-RestartSec=5
-LimitNOFILE=65536
-
-[Install]
-WantedBy=multi-user.target
-MINIO_SVC
-
-systemctl daemon-reload
-systemctl enable --now minio
-
-# Wait for MinIO to start
-for i in $(seq 1 30); do
-  curl -sf http://127.0.0.1:9000/minio/health/live && break
-  echo "Waiting for MinIO ($i/30)..."
-  sleep 2
-done
-
-# Install mc (MinIO client) and create buckets
-wget -q https://dl.min.io/client/mc/release/linux-amd64/mc -O /usr/local/bin/mc
-chmod +x /usr/local/bin/mc
-mc alias set local http://127.0.0.1:9000 minioadmin minioadmin
-mc mb local/jfs-mysql --ignore-existing
-mc mb local/jfs-redis --ignore-existing
-
-echo "MinIO ready. Buckets: jfs-mysql, jfs-redis."
-
-# -------------------------------------------------------
-# 4. NFS Server (kernel nfsd + ext4)
+# 3. NFS Server (kernel nfsd + ext4)
 # -------------------------------------------------------
 echo "=== Installing NFS Server ==="
 apt-get install -y nfs-kernel-server
@@ -99,14 +51,40 @@ chmod 777 "$DATA_MNT/nfs-export"
 # Export to all (within VPC, security group provides access control)
 echo "/data/nfs-export *(rw,sync,no_subtree_check,no_root_squash)" >> /etc/exports
 exportfs -rav
+
+# Configure nfsd thread count: start with 64 (max for thread scan experiment).
+# Can be adjusted at runtime with: rpc.nfsd <N>
+NFSD_THREADS=64
+sed -i "s/^RPCNFSDCOUNT=.*/RPCNFSDCOUNT=$NFSD_THREADS/" /etc/default/nfs-kernel-server 2>/dev/null || \
+  echo "RPCNFSDCOUNT=$NFSD_THREADS" >> /etc/default/nfs-kernel-server
 systemctl restart nfs-kernel-server
 
-echo "NFS server ready. Exporting /data/nfs-export."
+echo "NFS server ready. Exporting /data/nfs-export. nfsd threads: $NFSD_THREADS"
+
+# Verify thread count
+echo "Actual nfsd threads: $(cat /proc/fs/nfsd/threads 2>/dev/null || echo 'unknown')"
 
 # -------------------------------------------------------
-# 5. RucksFS DataServer data directory
+# 4. RucksFS DataServer data directory
 # -------------------------------------------------------
 mkdir -p "$DATA_MNT/rucksfs-data"
+
+# -------------------------------------------------------
+# 5. Helper script to change nfsd thread count at runtime
+# -------------------------------------------------------
+cat > /usr/local/bin/set-nfsd-threads <<'HELPER'
+#!/bin/bash
+# Usage: set-nfsd-threads <N>
+# Changes nfsd thread count without restarting the NFS server.
+if [ -z "$1" ]; then
+  echo "Current threads: $(cat /proc/fs/nfsd/threads)"
+  echo "Usage: set-nfsd-threads <N>"
+  exit 1
+fi
+rpc.nfsd "$1"
+echo "nfsd threads set to: $(cat /proc/fs/nfsd/threads)"
+HELPER
+chmod +x /usr/local/bin/set-nfsd-threads
 
 # -------------------------------------------------------
 # 6. Record environment info
@@ -120,12 +98,12 @@ mkdir -p "$DATA_MNT/rucksfs-data"
   lsblk
   df -h
   ip -4 addr show
-  echo "--- MinIO status ---"
-  systemctl status minio --no-pager || true
   echo "--- NFS status ---"
   systemctl status nfs-kernel-server --no-pager || true
   echo "--- NFS exports ---"
   exportfs -v || true
+  echo "--- nfsd threads ---"
+  cat /proc/fs/nfsd/threads || true
 } > "$DATA_MNT/env-info-data.txt"
 
 # Disable apt auto-updates

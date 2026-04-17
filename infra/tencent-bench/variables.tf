@@ -44,13 +44,13 @@ variable "instance_type_client" {
 variable "instance_type_meta" {
   description = "CVM instance type for metadata server (Machine B)"
   type        = string
-  default     = "SA3.2XLARGE32" # 8C32G
+  default     = "SA3.2XLARGE16" # 8C16G — unified with client/data for controlled comparison
 }
 
 variable "instance_type_data" {
   description = "CVM instance type for data server (Machine C)"
   type        = string
-  default     = "S6.LARGE8" # 4C8G
+  default     = "SA3.2XLARGE16" # 8C16G — unified with client/meta for controlled comparison
 }
 
 # ---------- Disk sizes (GB) ----------
@@ -70,7 +70,7 @@ variable "data_disk_size_meta" {
 variable "data_disk_size_data" {
   description = "Data disk size in GB for Machine C"
   type        = number
-  default     = 500
+  default     = 200
 }
 
 # ---------- Image ----------
