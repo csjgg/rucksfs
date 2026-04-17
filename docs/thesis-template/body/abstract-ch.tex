@@ -10,8 +10,8 @@
 
 并发安全方面，多线程同时操作同一目录时，检查与修改之间存在固有的竞态窗口——create 需先确认无同名文件再插入，rmdir 需先确认目录为空再删除，rename 还涉及跨目录的多键原子修改。本课题采用 RocksDB 悲观事务（PCC），对涉及的键逐一加锁，将检查与修改封装在同一原子操作中，消除上述竞态。
 
-正确性方面，系统通过 pjdfstest 测试套件验证了 chmod、chown、mkdir、rename、unlink 等 8 类操作的 POSIX 合规性。性能方面，在 4 节点集群上以 mdtest 进行多并发基准测试，64 进程下 RucksFS 的文件创建吞吐量为 9,917 ops/s，是 JuiceFS+MySQL 的 2.4 倍、JuiceFS+TiKV 的 1.7 倍。删除吞吐量达 14,179 ops/s，差距更大。去除 FUSE 和网络开销的单机嵌入式测试中，create 达到 ext4 的 0.98 倍，unlink 达到 1.17 倍——说明性能瓶颈不在元数据引擎本身，而在用户态与内核之间的通信路径上。
+正确性方面，系统通过 pjdfstest 测试套件验证了 chmod、chown、mkdir、rename、unlink 等 8 类操作的 POSIX 合规性。性能方面，在 4 节点集群上以 mdtest 进行多并发基准测试，64 进程下 RucksFS 的文件创建吞吐量为 9,917 ops/s，是 JuiceFS+MySQL 的 2.4 倍、JuiceFS+TiKV 的 1.7 倍。删除吞吐量达 14,179 ops/s，差距更大。分层开销量化显示，进程内直接操作 RocksDB 可达 172,814 ops/s，gRPC 网络栈造成 48.6 倍损耗——当前性能瓶颈不在元数据引擎本身，而在网络通信路径上。
 
 \vspace{5pt}
 
-\keywordsch 文件系统；元数据管理；键值存储；增量更新；用户态文件系统
+\keywordsch 文件系统；元数据管理；键值存储；LSM-tree；增量更新；悲观并发控制；用户态文件系统

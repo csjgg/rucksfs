@@ -23,7 +23,7 @@ RucksFS 是一个基于 RocksDB 的用户态 FUSE 文件系统，使用 Rust 编
     % Top layers (full width)
     \node[bigbox] (app) at (0, 4.5) {Application};
     \node[bigbox] (vfs) at (0, 3.3) {Linux Kernel VFS + FUSE 内核模块};
-    \node[bigbox] (fuse) at (0, 2.1) {FuseClient (fuser)};
+    \node[bigbox] (fuse) at (0, 2.1) {FuseClient (fuse3/tokio)};
     \node[bigbox] (vfscore) at (0, 0.9) {VfsCore (VfsOps trait)};
     % Split layers
     \node[box] (meta) at (-2.85, -0.4) {MetadataServer\\{\scriptsize (MetadataOps)}};
@@ -47,7 +47,7 @@ RucksFS 是一个基于 RocksDB 的用户态 FUSE 文件系统，使用 Rust 编
     \label{fig:architecture}
 \end{figure}
 
-FUSE 客户端使用 Rust 的 fuser 库\cite{fuser2023crate}实现，配置了 \texttt{force\_readdir\_plus}、\texttt{allow\_other} 和 \texttt{default\_permissions} 三个挂载选项。\texttt{default\_permissions} 将 POSIX 权限检查下放给内核 VFS，避免在用户空间重复实现 uid/gid 权限判断逻辑。FUSE 属性缓存的 TTL 设为 1 秒，MAX\_WRITE 设为 128\,KiB。
+FUSE 客户端使用 Rust 的 fuse3 库（版本 0.8，集成 tokio 异步运行时）实现，配置了 \texttt{force\_readdir\_plus}、\texttt{allow\_other} 和 \texttt{default\_permissions} 三个挂载选项。\texttt{default\_permissions} 将 POSIX 权限检查下放给内核 VFS，避免在用户空间重复实现 uid/gid 权限判断逻辑。FUSE 属性缓存的 TTL 设为 1 秒，MAX\_WRITE 设为 128\,KiB。
 
 \subsubsection{模块划分与依赖关系}
 
@@ -867,7 +867,7 @@ Bloom 过滤器设为 10 bit/key，对应约 1\% 的假阳性率\cite{dong2021ro
 
 \subsubsection{异步 FUSE 处理}
 
-FuseClient 使用 fuser 库的多线程模式，每个 FUSE 请求由线程池中的一个线程处理。VfsCore 的所有方法签名使用 \texttt{async fn}（通过 \texttt{async\_trait} 宏），在 tokio 运行时上执行。FUSE 线程通过 \texttt{block\_on} 将异步调用桥接到同步的 fuser 回调接口。
+FuseClient 使用 fuse3 库的异步模式，将 \texttt{/dev/fuse} 的读写操作注册到 tokio 的 epoll 事件循环中，单个线程即可处理大量并发请求。VfsCore 的所有方法签名使用 \texttt{async fn}（通过 \texttt{async\_trait} 宏），在 tokio 运行时上执行。
 
 这种设计允许 MetadataServer 和 DataServer 在未来替换为远程 gRPC 服务时，客户端代码不需要修改——只需要将 EmbeddedClient（进程内直接调用）替换为 gRPC 客户端即可，VfsOps trait 的接口保持不变。
 
