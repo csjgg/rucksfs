@@ -29,10 +29,9 @@
 
 %====================== 字体 ======================%
 \setCJKmainfont[
-    BoldFont={SimHei},
-    BoldFeatures={FakeBold=2},
-    ItalicFont={KaiTi}
-]{SimSun}
+    BoldFont={FandolHei},
+    ItalicFont={FandolKai}
+]{FandolSong}
 \setmainfont{Times New Roman}
 
 %====================== 参数 ======================%
