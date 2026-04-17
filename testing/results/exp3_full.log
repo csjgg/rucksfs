@@ -1,0 +1,100 @@
+=== Variant: with-delta ===
+with-delta mounted OK
+[17:58:19] with-delta N=1 run1
+   File creation                7162.502       7162.502       7162.502          0.000
+   File stat                  388714.204     388714.204     388714.204          0.000
+   File removal                12049.295      12049.295      12049.295          0.000
+[17:58:22] with-delta N=1 run2
+   File creation                6985.377       6985.377       6985.377          0.000
+   File stat                  386578.923     386578.923     386578.923          0.000
+   File removal                12128.505      12128.505      12128.505          0.000
+[17:58:26] with-delta N=1 run3
+   File creation                7250.716       7250.716       7250.716          0.000
+   File stat                  384086.738     384086.738     384086.738          0.000
+   File removal                12090.056      12090.056      12090.056          0.000
+[17:58:29] with-delta N=4 run1
+   File creation                8106.815       8106.815       8106.815          0.000
+   File stat                  123135.169     123135.169     123135.169          0.000
+   File removal                 9673.879       9673.879       9673.879          0.000
+[17:58:41] with-delta N=4 run2
+   File creation                8192.525       8192.525       8192.525          0.000
+   File stat                  124301.639     124301.639     124301.639          0.000
+   File removal                 9587.985       9587.985       9587.985          0.000
+[17:58:52] with-delta N=4 run3
+   File creation                8061.695       8061.695       8061.695          0.000
+   File stat                  121060.836     121060.836     121060.836          0.000
+   File removal                 9248.867       9248.867       9248.867          0.000
+[17:59:03] with-delta N=16 run1
+   File creation                7960.681       7960.681       7960.681          0.000
+   File stat                  151975.383     151975.383     151975.383          0.000
+   File removal                 8416.638       8416.638       8416.638          0.000
+[17:59:53] with-delta N=16 run2
+   File creation                7999.331       7999.331       7999.331          0.000
+   File stat                  154452.629     154452.629     154452.629          0.000
+   File removal                 8407.702       8407.702       8407.702          0.000
+[18:00:41] with-delta N=16 run3
+   File creation                7802.811       7802.811       7802.811          0.000
+   File stat                  152009.463     152009.463     152009.463          0.000
+   File removal                 8112.657       8112.657       8112.657          0.000
+=== Variant: no-delta ===
+no-delta mounted OK
+[18:01:35] no-delta N=1 run1
+   File creation                7271.174       7271.174       7271.174          0.000
+   File stat                  388440.608     388440.608     388440.608          0.000
+   File removal                12261.272      12261.272      12261.272          0.000
+[18:01:38] no-delta N=1 run2
+   File creation                6795.093       6795.093       6795.093          0.000
+   File stat                  391639.650     391639.650     391639.650          0.000
+   File removal                12069.655      12069.655      12069.655          0.000
+[18:01:42] no-delta N=1 run3
+   File creation                7175.113       7175.113       7175.113          0.000
+   File stat                  389284.229     389284.229     389284.229          0.000
+   File removal                12299.976      12299.976      12299.976          0.000
+[18:01:45] no-delta N=4 run1
+   File creation                8214.284       8214.284       8214.284          0.000
+   File stat                  124510.492     124510.492     124510.492          0.000
+   File removal                 9632.905       9632.905       9632.905          0.000
+[18:01:56] no-delta N=4 run2
+   File creation                8054.104       8054.104       8054.104          0.000
+   File stat                  121878.372     121878.372     121878.372          0.000
+   File removal                 9349.346       9349.346       9349.346          0.000
+[18:02:07] no-delta N=4 run3
+   File creation                8315.679       8315.679       8315.679          0.000
+   File stat                  126098.593     126098.593     126098.593          0.000
+   File removal                 9736.264       9736.264       9736.264          0.000
+[18:02:17] no-delta N=16 run1
+   File creation                7955.133       7955.133       7955.133          0.000
+   File stat                  176616.031     176616.031     176616.031          0.000
+   File removal                 9126.398       9126.398       9126.398          0.000
+[18:02:57] no-delta N=16 run2
+   File creation                8067.031       8067.031       8067.031          0.000
+   File stat                  167852.477     167852.477     167852.477          0.000
+   File removal                 9209.281       9209.281       9209.281          0.000
+[18:03:37] no-delta N=16 run3
+   File creation                7814.904       7814.904       7814.904          0.000
+   File stat                  177400.858     177400.858     177400.858          0.000
+   File removal                 8996.712       8996.712       8996.712          0.000
+
+=== EXPERIMENT 3 COMPLETE ===
+Results: 18 files
+total 80
+drwxr-xr-x 2 root root 4096 Apr 17 18:03 .
+drwxrwxrwx 5 root root 4096 Apr 17 17:58 ..
+-rw-r--r-- 1 root root 1492 Apr 17 18:02 no-delta_N16_run1.txt
+-rw-r--r-- 1 root root 1492 Apr 17 18:03 no-delta_N16_run2.txt
+-rw-r--r-- 1 root root 1492 Apr 17 18:04 no-delta_N16_run3.txt
+-rw-r--r-- 1 root root 1474 Apr 17 18:01 no-delta_N1_run1.txt
+-rw-r--r-- 1 root root 1474 Apr 17 18:01 no-delta_N1_run2.txt
+-rw-r--r-- 1 root root 1474 Apr 17 18:01 no-delta_N1_run3.txt
+-rw-r--r-- 1 root root 1478 Apr 17 18:01 no-delta_N4_run1.txt
+-rw-r--r-- 1 root root 1478 Apr 17 18:02 no-delta_N4_run2.txt
+-rw-r--r-- 1 root root 1478 Apr 17 18:02 no-delta_N4_run3.txt
+-rw-r--r-- 1 root root 1492 Apr 17 17:59 with-delta_N16_run1.txt
+-rw-r--r-- 1 root root 1492 Apr 17 18:00 with-delta_N16_run2.txt
+-rw-r--r-- 1 root root 1492 Apr 17 18:01 with-delta_N16_run3.txt
+-rw-r--r-- 1 root root 1474 Apr 17 17:58 with-delta_N1_run1.txt
+-rw-r--r-- 1 root root 1474 Apr 17 17:58 with-delta_N1_run2.txt
+-rw-r--r-- 1 root root 1474 Apr 17 17:58 with-delta_N1_run3.txt
+-rw-r--r-- 1 root root 1478 Apr 17 17:58 with-delta_N4_run1.txt
+-rw-r--r-- 1 root root 1478 Apr 17 17:58 with-delta_N4_run2.txt
+-rw-r--r-- 1 root root 1478 Apr 17 17:59 with-delta_N4_run3.txt
