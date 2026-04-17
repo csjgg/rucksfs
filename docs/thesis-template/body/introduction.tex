@@ -105,30 +105,35 @@ LSM-tree\cite{oneil1996lsmtree}（Log-Structured Merge-tree）的写入模型从
     \centering
     \begin{tikzpicture}[
         x=1cm, y=1cm,
-        prob/.style={draw, rounded corners=2pt, fill=black!6, minimum width=3.2cm,
+        prob/.style={draw, rounded corners=2pt, fill=black!6, minimum width=3.6cm,
                       minimum height=0.7cm, align=center, font=\small},
-        sol/.style={draw, rounded corners=2pt, fill=black!3, minimum width=3.2cm,
+        sol/.style={draw, rounded corners=2pt, fill=black!3, minimum width=3.6cm,
                      minimum height=0.7cm, align=center, font=\small},
         arr/.style={->, >=stealth, thick, black!50},
         lbl/.style={font=\scriptsize, text=black!55}
     ]
 
     % 列标题
-    \node[font=\small\bfseries] at (2, 4.2) {设计问题};
-    \node[font=\small\bfseries] at (8, 4.2) {本课题方案};
+    \node[font=\small\bfseries] at (1.8, 5.8) {设计问题};
+    \node[font=\small\bfseries] at (10.2, 5.8) {本课题方案};
 
-    % 问题 → 方案
-    \node[prob] (p1) at (2, 3.3) {树 $\to$ 扁平键空间};
-    \node[sol]  (s1) at (8, 3.3) {以边为中心 + 大端序};
-    \draw[arr]  (p1) -- (s1) node[midway, above, lbl] {$O(1)$ lookup / readdir / rename};
+    % 第一行
+    \node[prob] (p1) at (1.8, 4.8) {树 $\to$ 扁平键空间};
+    \node[sol]  (s1) at (10.2, 4.8) {以边为中心 + 大端序};
+    \draw[arr]  (p1) -- (s1);
+    \node[lbl]  at (6, 5.15) {$O(1)$ lookup / readdir / rename};
 
-    \node[prob] (p2) at (2, 2.1) {父目录写放大};
-    \node[sol]  (s2) at (8, 2.1) {DeltaOp 增量追加};
-    \draw[arr]  (p2) -- (s2) node[midway, above, lbl] {写路径无需读取基值};
+    % 第二行
+    \node[prob] (p2) at (1.8, 3.2) {父目录写放大};
+    \node[sol]  (s2) at (10.2, 3.2) {DeltaOp 增量追加};
+    \draw[arr]  (p2) -- (s2);
+    \node[lbl]  at (6, 3.55) {写路径无需读取基值};
 
-    \node[prob] (p3) at (2, 0.9) {并发 TOCTOU 竞态};
-    \node[sol]  (s3) at (8, 0.9) {PCC 事务 + 行级锁};
-    \draw[arr]  (p3) -- (s3) node[midway, above, lbl] {检查与操作在同一事务内};
+    % 第三行
+    \node[prob] (p3) at (1.8, 1.6) {并发 TOCTOU 竞态};
+    \node[sol]  (s3) at (10.2, 1.6) {PCC 事务 + 行级锁};
+    \draw[arr]  (p3) -- (s3);
+    \node[lbl]  at (6, 1.95) {检查与操作在同一事务内};
 
     \end{tikzpicture}
     \caption{本课题面临的三个设计问题及对应解决方案。}
