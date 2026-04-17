@@ -45,3 +45,6 @@ path = "src/bin/client.rs"
 [[bin]]
 name = "rucksfs-bench"
 path = "src/bin/bench.rs"
+
+[features]
+no_delta = ["rucksfs-server/no_delta"]
