@@ -10,6 +10,69 @@
 
 现有的本地文件系统（ext4、XFS）采用 B+ 树或其变体（如 ext4 的 H-tree）组织目录项和 inode 索引。B+ 树的写入方式是就地修改（in-place update），每次变更直接改写磁盘上对应数据页的内容。这种方式在顺序扫描和读密集负载下表现稳健，但面对高频写入存在两个固有瓶颈。其一，每次写入都是随机 I/O——即便实际只修改几十字节的目录项，也要完整写出一个数据页外加一条 journal 日志。其二，目录级锁把同一目录下的并发写入串行化了：XFS 在单目录下连续创建数万文件时，日志区域的锁竞争足以将吞吐量压到明显低于理论峰值的水平。
 
+\begin{figure}[htbp]
+    \centering
+    \begin{tikzpicture}[
+        x=1cm, y=0.8cm,
+        box/.style={draw, minimum width=1.2cm, minimum height=0.6cm, font=\scriptsize, align=center},
+        disk/.style={draw, rounded corners=1pt, fill=gray!10, minimum width=5cm, minimum height=0.6cm, font=\scriptsize, align=center},
+        arr/.style={->, >=stealth, thick},
+        note/.style={font=\scriptsize, text=black!60},
+        title/.style={font=\small\bfseries}
+    ]
+
+    % ===== 左：B+ 树就地修改 =====
+    \node[title] at (2.5, 5) {B+ 树：就地修改};
+
+    % 写入操作
+    \node[box, fill=red!15] (w1) at (0.5, 3.8) {write};
+    \node[box, fill=red!15] (w2) at (2.0, 3.8) {write};
+    \node[box, fill=red!15] (w3) at (3.5, 3.8) {write};
+
+    % 磁盘页
+    \node[disk] (pg) at (2.5, 2.3) {磁盘页（4\,KB）};
+    \node[disk] (jn) at (2.5, 1.3) {journal 日志};
+
+    % 箭头：随机写
+    \draw[arr, red!60] (w1) -- (pg) node[midway, left, note] {随机 I/O};
+    \draw[arr, red!60] (w2) -- (pg);
+    \draw[arr, red!60] (w3) -- (pg);
+    \draw[arr, red!60] (pg) -- (jn);
+
+    % 标注
+    \node[note] at (2.5, 0.5) {每次修改 $\to$ 整页写出 + journal};
+    \node[note, text=red!60] at (2.5, 0) {串行化：目录级锁};
+
+    % ===== 右：LSM-tree 追加写 =====
+    \node[title] at (9.5, 5) {LSM-tree：追加写};
+
+    % 写入操作
+    \node[box, fill=green!15] (lw1) at (7.5, 3.8) {write};
+    \node[box, fill=green!15] (lw2) at (9.0, 3.8) {write};
+    \node[box, fill=green!15] (lw3) at (10.5, 3.8) {write};
+
+    % MemTable
+    \node[disk, fill=green!8] (mem) at (9.5, 2.3) {MemTable（内存）};
+    \node[disk, fill=blue!8] (sst) at (9.5, 1.3) {SSTable（磁盘，顺序写）};
+
+    % 箭头：顺序追加
+    \draw[arr, green!60!black] (lw1) -- (mem);
+    \draw[arr, green!60!black] (lw2) -- (mem);
+    \draw[arr, green!60!black] (lw3) -- (mem);
+    \draw[arr, blue!60] (mem) -- (sst) node[midway, right, note] {批量刷盘};
+
+    % 标注
+    \node[note] at (9.5, 0.5) {多次写入 $\to$ 内存聚合 $\to$ 一次顺序写};
+    \node[note, text=green!50!black] at (9.5, 0) {并行化：无目录级锁};
+
+    % 中间分隔
+    \draw[dashed, gray!40] (5.8, 5.3) -- (5.8, -0.3);
+
+    \end{tikzpicture}
+    \caption{B+ 树就地修改 vs.\ LSM-tree 追加写模型。B+ 树每次写入产生随机 I/O 并受目录级锁串行化；LSM-tree 将随机写转化为内存追加，再批量顺序刷盘，消除了目录级锁的瓶颈。}
+    \label{fig:bptree-vs-lsm}
+\end{figure}
+
 LSM-tree\cite{oneil1996lsmtree}（Log-Structured Merge-tree）的写入模型与此截然不同。写入操作先顺序追加到内存中的 MemTable；MemTable 积累到一定容量后，由后台线程排序并批量刷出为磁盘上的 SSTable 文件；多层 SSTable 之间再通过 compaction 消除冗余。随机写入被转化为顺序写入，这一特性对于大量小粒度写操作——正是文件创建和删除所产生的负载类型——有天然的优势。工业界的实践印证了这一判断：Google 的 LevelDB\cite{google2011leveldb}在 2011 年将 LSM-tree 工程化；Facebook 在此基础上开发的 RocksDB\cite{dong2021rocksdb}增加了列族、事务和前缀布隆过滤器，现已成为 CockroachDB、TiKV 等数十个系统的底层存储引擎。在文件系统领域，TableFS\cite{ren2013tablefs}在 2013 年率先将全部元数据存入 LevelDB 并通过 FUSE 挂载，小文件创建速度达到了同期 ext4 的 2--3 倍。此后 Apache Ozone\cite{apache2021ozone}和 Facebook Tectonic\cite{pan2021tectonic}先后在 EB 级生产环境中部署了以 RocksDB 为核心的元数据引擎。从 2013 年的学术原型到 2021 年的 EB 级工业系统，KV 元数据方案的可行性和竞争力已无需证明，但其在键编码设计、写放大控制和事务保障等方面仍有开放的设计问题。
 
 本课题聚焦的正是这些问题。具体而言，核心研究内容是元数据的 KV 存储设计——如何将 inode 属性、目录项和属性变更日志高效地映射到键值引擎中，并据此实现 create、unlink、rename、readdir 等 POSIX 文件操作。存储方案决定了操作的性能上限，文件操作则是检验方案是否可行的载体。系统通过 FUSE\cite{szeredi2005fuse}框架对外暴露标准 POSIX 接口。选择 FUSE 是出于工程上的务实考量——用户态开发迭代更快，与 JuiceFS\cite{juicefs2021}和 CubeFS\cite{liu2019cubefs}等主流系统的接入方式一致，且 FUSE 层的文件操作逻辑在本质上等价于内核 VFS 接口，必要时可平滑迁移到内核态。
