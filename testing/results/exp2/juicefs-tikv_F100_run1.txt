@@ -1,0 +1,24 @@
+-- started at 04/17/2026 17:21:06 --
+
+mdtest-4.1.0+dev was launched with 16 total task(s) on 1 node(s)
+Command line used: mdtest '-C' '-T' '-r' '-n' '100' '-d' '/mnt/juicefs-tikv/test_dir' '-u'
+Nodemap: 1111111111111111
+Path                : /mnt/juicefs-tikv/test_dir
+FS                  : 1024.0 TiB   Used FS: 0.0%   Inodes: 11.0 Mi   Used Inodes: 9.3%
+16 tasks, 1600 files/directories
+
+SUMMARY rate (in ops/sec): (of 1 iterations)
+   Operation                     Max            Min           Mean        Std Dev
+   ---------                     ---            ---           ----        -------
+   Directory creation           2067.934       2067.934       2067.934          0.000
+   Directory stat             628183.694     628183.694     628183.694          0.000
+   Directory rename                0.000          0.000          0.000          0.000
+   Directory removal            1855.875       1855.875       1855.875          0.000
+   File creation                3064.630       3064.630       3064.630          0.000
+   File stat                  193425.174     193425.174     193425.174          0.000
+   File read                       0.000          0.000          0.000          0.000
+   File removal                 2614.640       2614.640       2614.640          0.000
+   Tree creation                  19.201         19.201         19.201          0.000
+   Tree removal                   11.050         11.050         11.050          0.000
+-- finished at 04/17/2026 17:21:09 --
+

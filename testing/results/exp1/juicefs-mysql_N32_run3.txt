@@ -1,0 +1,24 @@
+-- started at 04/17/2026 16:51:40 --
+
+mdtest-4.1.0+dev was launched with 32 total task(s) on 1 node(s)
+Command line used: mdtest '-C' '-T' '-r' '-n' '5000' '-d' '/mnt/juicefs-mysql/test_dir' '-u'
+Nodemap: 11111111111111111111111111111111
+Path                : /mnt/juicefs-mysql/test_dir
+FS                  : 1024.0 TiB   Used FS: 0.0%   Inodes: 10.7 Mi   Used Inodes: 6.8%
+32 tasks, 160000 files/directories
+
+SUMMARY rate (in ops/sec): (of 1 iterations)
+   Operation                     Max            Min           Mean        Std Dev
+   ---------                     ---            ---           ----        -------
+   Directory creation           2828.039       2828.039       2828.039          0.000
+   Directory stat              28440.981      28440.981      28440.981          0.000
+   Directory rename                0.000          0.000          0.000          0.000
+   Directory removal            2091.470       2091.470       2091.470          0.000
+   File creation                3416.867       3416.867       3416.867          0.000
+   File stat                   28856.979      28856.979      28856.979          0.000
+   File read                       0.000          0.000          0.000          0.000
+   File removal                 2696.608       2696.608       2696.608          0.000
+   Tree creation                   5.099          5.099          5.099          0.000
+   Tree removal                    2.446          2.446          2.446          0.000
+-- finished at 04/17/2026 16:55:52 --
+
