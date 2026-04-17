@@ -20,42 +20,40 @@
     \item \textbf{父目录 inode}。更新父目录的 \texttt{mtime}（修改时间）和 \texttt{ctime}（状态变更时间），如果创建的是子目录还要递增 \texttt{nlink}（链接计数）。父目录 inode 与新文件 inode 可能不在同一个块组中。
 \end{enumerate}
 
+
 最后，ext4 将上述所有修改的元数据块写入 journal 区域，追加一条 commit 块，调用 \texttt{fsync} 确保日志落盘，然后才将实际数据写回原位（称为 checkpoint）。单次文件创建总共产生至少 6 次磁盘写入，分布在 inode bitmap、inode 表、目录数据块、父目录 inode 和 journal 等互不相邻的磁盘区域上——每一次都是随机 I/O。图~\ref{fig:ext4-create-path} 展示了这一过程。
 
 \begin{figure}[htbp]
     \centering
     \begin{tikzpicture}[
-        x=1cm, y=0.75cm,
-        op/.style={draw, rounded corners=2pt, minimum height=0.65cm, align=center, font=\scriptsize},
-        disk/.style={draw, fill=gray!8, minimum width=1.6cm, minimum height=0.65cm, align=center, font=\scriptsize},
-        arr/.style={->, >=stealth, thick, red!60},
-        note/.style={font=\scriptsize, text=black!60},
-        title/.style={font=\small\bfseries}
+        x=1cm, y=0.8cm,
+        disk/.style={draw, fill=black!5, minimum width=1.5cm, minimum height=0.7cm,
+                      align=center, font=\scriptsize},
+        arr/.style={->, >=stealth, thick, black!50},
+        lbl/.style={font=\footnotesize, text=black!60}
     ]
 
-    % 标题
-    \node[title] at (5.5, 7.2) {ext4 \texttt{create("/mnt/dir/newfile")} 磁盘写入路径};
+    % 入口
+    \node[draw, rounded corners=2pt, fill=black!8, minimum width=4cm, minimum height=0.6cm,
+          font=\small] (call) at (5.5, 6) {\texttt{create("/mnt/dir/newfile")}};
 
-    % 用户调用
-    \node[op, fill=blue!15, minimum width=3cm] (call) at (5.5, 6.2) {\texttt{create()} 系统调用};
-
-    % 磁盘区域（从左到右排列，强调"分散"）
-    \node[disk, fill=orange!15] (jnl1) at (0.5, 3.8) {Journal\\描述符块};
-    \node[disk, fill=red!12] (bmp)   at (2.8, 3.8) {inode\\bitmap};
-    \node[disk, fill=red!12] (itbl)  at (5.1, 3.8) {inode 表\\(新文件)};
-    \node[disk, fill=red!12] (dblk)  at (7.4, 3.8) {目录\\数据块};
-    \node[disk, fill=red!12] (pino)  at (9.7, 3.8) {父目录\\inode};
-    \node[disk, fill=orange!15] (jnl2) at (12, 3.8) {Journal\\commit};
+    % 6 个磁盘写入区域
+    \node[disk] (jnl1) at (0.5, 3.8) {Journal\\[-1pt]描述符};
+    \node[disk] (bmp)  at (2.8, 3.8) {inode\\[-1pt]bitmap};
+    \node[disk] (itbl) at (5.1, 3.8) {inode 表\\[-1pt]（新文件）};
+    \node[disk] (dblk) at (7.4, 3.8) {目录\\[-1pt]数据块};
+    \node[disk] (pino) at (9.7, 3.8) {父目录\\[-1pt]inode};
+    \node[disk] (jnl2) at (12, 3.8)  {Journal\\[-1pt]commit};
 
     % 步骤编号
-    \node[font=\scriptsize\bfseries, text=orange!70!black] at (0.5, 4.6) {\ding{172}};
-    \node[font=\scriptsize\bfseries, text=red!70!black] at (2.8, 4.6) {\ding{173}};
-    \node[font=\scriptsize\bfseries, text=red!70!black] at (5.1, 4.6) {\ding{174}};
-    \node[font=\scriptsize\bfseries, text=red!70!black] at (7.4, 4.6) {\ding{175}};
-    \node[font=\scriptsize\bfseries, text=red!70!black] at (9.7, 4.6) {\ding{176}};
-    \node[font=\scriptsize\bfseries, text=orange!70!black] at (12, 4.6) {\ding{177}};
+    \node[font=\scriptsize\bfseries] at (0.5, 4.65) {\ding{172}};
+    \node[font=\scriptsize\bfseries] at (2.8, 4.65) {\ding{173}};
+    \node[font=\scriptsize\bfseries] at (5.1, 4.65) {\ding{174}};
+    \node[font=\scriptsize\bfseries] at (7.4, 4.65) {\ding{175}};
+    \node[font=\scriptsize\bfseries] at (9.7, 4.65) {\ding{176}};
+    \node[font=\scriptsize\bfseries] at (12,  4.65) {\ding{177}};
 
-    % 从 create() 到各磁盘区域的箭头
+    % 箭头
     \draw[arr] (call.south) -- (jnl1.north);
     \draw[arr] (call.south) -- (bmp.north);
     \draw[arr] (call.south) -- (itbl.north);
@@ -63,32 +61,29 @@
     \draw[arr] (call.south) -- (pino.north);
     \draw[arr] (call.south) -- (jnl2.north);
 
-    % 磁盘条带示意
-    \node[draw, fill=gray!5, minimum width=12.5cm, minimum height=0.6cm] (stripe) at (6.25, 2.2) {};
-    \node[note] at (0.5, 2.2) {磁盘};
+    % 磁盘示意条
+    \draw[fill=black!3] (0, 2.0) rectangle (12.5, 2.5);
+    \node[lbl, anchor=east] at (-0.2, 2.25) {磁盘};
 
-    % 标记各写入位置在磁盘上的分散分布
-    \fill[orange!50] (0.8, 2.0) rectangle (1.3, 2.4);
-    \fill[red!40] (3.0, 2.0) rectangle (3.5, 2.4);
-    \fill[red!40] (5.5, 2.0) rectangle (6.0, 2.4);
-    \fill[red!40] (7.8, 2.0) rectangle (8.3, 2.4);
-    \fill[red!40] (9.5, 2.0) rectangle (10.0, 2.4);
-    \fill[orange!50] (11.2, 2.0) rectangle (11.7, 2.4);
+    % 写入位置标记
+    \fill[black!25] (0.5, 2.05) rectangle (1.1, 2.45);
+    \fill[black!25] (2.8, 2.05) rectangle (3.4, 2.45);
+    \fill[black!25] (5.1, 2.05) rectangle (5.7, 2.45);
+    \fill[black!25] (7.4, 2.05) rectangle (8.0, 2.45);
+    \fill[black!25] (9.4, 2.05) rectangle (10.0, 2.45);
+    \fill[black!25] (11.4, 2.05) rectangle (12.0, 2.45);
 
-    % 磁头跳转标记
-    \draw[<->, thick, gray!50] (1.3, 1.5) -- (3.0, 1.5);
-    \draw[<->, thick, gray!50] (3.5, 1.5) -- (5.5, 1.5);
-    \draw[<->, thick, gray!50] (6.0, 1.5) -- (7.8, 1.5);
-    \draw[<->, thick, gray!50] (8.3, 1.5) -- (9.5, 1.5);
-    \draw[<->, thick, gray!50] (10.0, 1.5) -- (11.2, 1.5);
-    \node[note, text=red!60] at (6.25, 1.0) {$\geq$ 6 次随机 I/O，分布在互不相邻的磁盘区域};
+    % 跳转箭头
+    \draw[<->, black!30] (1.1, 1.6) -- (2.8, 1.6);
+    \draw[<->, black!30] (3.4, 1.6) -- (5.1, 1.6);
+    \draw[<->, black!30] (5.7, 1.6) -- (7.4, 1.6);
+    \draw[<->, black!30] (8.0, 1.6) -- (9.4, 1.6);
+    \draw[<->, black!30] (10.0, 1.6) -- (11.4, 1.6);
 
-    % 底部标注
-    \node[note] at (6.25, 0.3) {每创建一个文件，ext4 至少写入 6 个分散的磁盘位置；};
-    \node[note] at (6.25, -0.2) {并发创建时，目录数据块的 B+ 树锁使所有线程串行等待。};
+    \node[lbl] at (6.25, 1.0) {$\geq 6$ 次随机 I/O，分布在互不相邻的磁盘区域};
 
     \end{tikzpicture}
-    \caption{ext4 中一次 \texttt{create} 操作的磁盘写入路径。单次文件创建至少触及 6 个分散的磁盘区域（journal 描述符、inode bitmap、inode 表、目录数据块、父目录 inode、journal commit），每次写入都是随机 I/O。}
+    \caption{ext4 中一次 \texttt{create} 操作的磁盘写入路径。单次文件创建至少触及 6 个分散的磁盘区域，每次写入都是随机 I/O。}
     \label{fig:ext4-create-path}
 \end{figure}
 
@@ -107,10 +102,11 @@ LSM-tree\cite{oneil1996lsmtree}（Log-Structured Merge-tree）的写入模型从
     \centering
     \begin{tikzpicture}[
         x=1cm, y=1cm,
-        sys/.style={draw, rounded corners=2pt, minimum height=0.55cm, align=center, font=\scriptsize},
+        sys/.style={draw, rounded corners=2pt, minimum height=0.55cm, align=center,
+                     font=\scriptsize, fill=black!5},
         year/.style={font=\footnotesize, text=black!70},
-        era/.style={font=\small\bfseries, text=black!50},
-        arr/.style={->, >=stealth, thick, dashed, gray!60}
+        era/.style={font=\footnotesize\bfseries, text=black!50},
+        arr/.style={->, >=stealth, thick, dashed, black!30}
     ]
     % 时间轴
     \draw[very thick] (0, 0) -- (13, 0);
@@ -127,20 +123,20 @@ LSM-tree\cite{oneil1996lsmtree}（Log-Structured Merge-tree）的写入模型从
     \node[era] at (12, 2.8) {单机优化};
 
     % 系统节点
-    \node[sys, fill=blue!10, minimum width=1.8cm] (e1) at (1.5, 1.8) {ext4 / XFS};
-    \node[sys, fill=blue!10, minimum width=1.8cm] (e2) at (1.5, 1.0) {B+ 树就地修改};
+    \node[sys, minimum width=1.8cm] (e1) at (1.5, 1.8) {ext4 / XFS};
+    \node[sys, minimum width=1.8cm] (e2) at (1.5, 1.0) {B+ 树就地修改};
 
-    \node[sys, fill=orange!10, minimum width=1.8cm] (l1) at (4.2, 1.8) {LevelDB};
-    \node[sys, fill=orange!10, minimum width=1.8cm] (l2) at (4.2, 1.0) {RocksDB};
+    \node[sys, minimum width=1.8cm] (l1) at (4.2, 1.8) {LevelDB};
+    \node[sys, minimum width=1.8cm] (l2) at (4.2, 1.0) {RocksDB};
 
-    \node[sys, fill=green!10, minimum width=1.8cm] (t1) at (7, 1.8) {TableFS};
-    \node[sys, fill=green!10, minimum width=1.8cm] (t2) at (7, 1.0) {IndexFS};
+    \node[sys, minimum width=1.8cm] (t1) at (7, 1.8) {TableFS};
+    \node[sys, minimum width=1.8cm] (t2) at (7, 1.0) {IndexFS};
 
-    \node[sys, fill=purple!10, minimum width=1.8cm] (c1) at (9.5, 1.8) {JuiceFS};
-    \node[sys, fill=purple!10, minimum width=1.8cm] (c2) at (9.5, 1.0) {CubeFS / Ozone};
+    \node[sys, minimum width=1.8cm] (c1) at (9.5, 1.8) {JuiceFS};
+    \node[sys, minimum width=1.8cm] (c2) at (9.5, 1.0) {CubeFS / Ozone};
 
-    \node[sys, fill=red!15, minimum width=1.8cm, thick] (r1) at (12, 1.8) {\textbf{RucksFS}};
-    \node[sys, fill=red!8, minimum width=1.8cm] (r2) at (12, 1.0) {Mantle};
+    \node[sys, minimum width=1.8cm, fill=black!12, thick] (r1) at (12, 1.8) {\textbf{RucksFS}};
+    \node[sys, minimum width=1.8cm] (r2) at (12, 1.0) {SingularFS};
 
     % 演进箭头
     \draw[arr] (e1.east) -- (l1.west);
@@ -163,28 +159,30 @@ LSM-tree\cite{oneil1996lsmtree}（Log-Structured Merge-tree）的写入模型从
     \centering
     \begin{tikzpicture}[
         x=1cm, y=1cm,
-        prob/.style={draw, rounded corners=2pt, fill=red!10, minimum width=3cm, minimum height=0.8cm, align=center, font=\small},
-        sol/.style={draw, rounded corners=2pt, fill=green!10, minimum width=3cm, minimum height=0.8cm, align=center, font=\small},
-        arr/.style={->, >=stealth, thick},
-        note/.style={font=\scriptsize, text=black!60}
+        prob/.style={draw, rounded corners=2pt, fill=black!6, minimum width=3.2cm,
+                      minimum height=0.7cm, align=center, font=\small},
+        sol/.style={draw, rounded corners=2pt, fill=black!3, minimum width=3.2cm,
+                     minimum height=0.7cm, align=center, font=\small},
+        arr/.style={->, >=stealth, thick, black!50},
+        lbl/.style={font=\scriptsize, text=black!55}
     ]
 
-    % 问题列
-    \node[font=\small\bfseries] at (2, 4.5) {设计问题};
-    \node[prob] (p1) at (2, 3.5) {树 $\to$ 扁平键空间};
-    \node[prob] (p2) at (2, 2.2) {父目录写放大};
+    % 列标题
+    \node[font=\small\bfseries] at (2, 4.2) {设计问题};
+    \node[font=\small\bfseries] at (8, 4.2) {本课题方案};
+
+    % 问题 → 方案
+    \node[prob] (p1) at (2, 3.3) {树 $\to$ 扁平键空间};
+    \node[sol]  (s1) at (8, 3.3) {以边为中心 + 大端序};
+    \draw[arr]  (p1) -- (s1) node[midway, above, lbl] {$O(1)$ lookup / readdir / rename};
+
+    \node[prob] (p2) at (2, 2.1) {父目录写放大};
+    \node[sol]  (s2) at (8, 2.1) {DeltaOp 增量追加};
+    \draw[arr]  (p2) -- (s2) node[midway, above, lbl] {写路径无需读取基值};
+
     \node[prob] (p3) at (2, 0.9) {并发 TOCTOU 竞态};
-
-    % 方案列
-    \node[font=\small\bfseries] at (8, 4.5) {本课题方案};
-    \node[sol] (s1) at (8, 3.5) {以边为中心 + 大端序};
-    \node[sol] (s2) at (8, 2.2) {DeltaOp 增量追加};
-    \node[sol] (s3) at (8, 0.9) {PCC 事务 + 行级锁};
-
-    % 箭头
-    \draw[arr] (p1) -- (s1) node[midway, above, note] {$O(1)$ lookup/readdir/rename};
-    \draw[arr] (p2) -- (s2) node[midway, above, note] {写路径无需读取基值};
-    \draw[arr] (p3) -- (s3) node[midway, above, note] {检查+操作在同一事务内};
+    \node[sol]  (s3) at (8, 0.9) {PCC 事务 + 行级锁};
+    \draw[arr]  (p3) -- (s3) node[midway, above, lbl] {检查与操作在同一事务内};
 
     \end{tikzpicture}
     \caption{本课题面临的三个设计问题及对应解决方案。}
