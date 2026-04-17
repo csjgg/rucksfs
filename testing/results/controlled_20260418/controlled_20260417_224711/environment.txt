@@ -1,0 +1,222 @@
+=== Benchmark Environment ===
+Timestamp: 2026-04-17T22:47:11+08:00
+
+--- Client (local) ---
+Linux VM-1-6-ubuntu 5.15.0-171-generic #181-Ubuntu SMP Fri Feb 6 22:44:50 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+Architecture:                            x86_64
+CPU op-mode(s):                          32-bit, 64-bit
+Address sizes:                           52 bits physical, 48 bits virtual
+Byte Order:                              Little Endian
+CPU(s):                                  8
+On-line CPU(s) list:                     0-7
+Vendor ID:                               AuthenticAMD
+Model name:                              AMD EPYC 9754 128-Core Processor
+CPU family:                              25
+Model:                                   160
+Thread(s) per core:                      2
+Core(s) per socket:                      4
+Socket(s):                               1
+Stepping:                                2
+BogoMIPS:                                4500.07
+Flags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm rep_good nopl cpuid extd_apicid tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext perfctr_core invpcid_single ibpb vmmcall fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 avx512_bf16 clzero xsaveerptr wbnoinvd arat avx512vbmi umip avx512_vbmi2 vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid fsrm
+Hypervisor vendor:                       KVM
+Virtualization type:                     full
+L1d cache:                               128 KiB (4 instances)
+L1i cache:                               128 KiB (4 instances)
+               total        used        free      shared  buff/cache   available
+Mem:            15Gi       349Mi        13Gi       2.0Mi       1.4Gi        14Gi
+Swap:             0B          0B          0B
+
+--- Mounts ---
+rucksfs on /mnt/rucksfs-dist type fuse (rw,nosuid,nodev,relatime,user_id=0,group_id=0,default_permissions,allow_other)
+10.0.1.12:/data/nfs-export on /mnt/nfs type nfs4 (rw,relatime,sync,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,acregmin=0,acregmax=0,acdirmin=0,acdirmax=0,hard,noac,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=10.0.1.6,local_lock=none,addr=10.0.1.12)
+
+--- Network to Meta ---
+rtt min/avg/max/mdev = 0.142/0.171/0.218/0.030 ms
+--- Network to Data ---
+rtt min/avg/max/mdev = 0.140/0.163/0.193/0.020 ms
+
+--- Meta machine ---
+Architecture:                            x86_64
+CPU op-mode(s):                          32-bit, 64-bit
+Address sizes:                           52 bits physical, 48 bits virtual
+Byte Order:                              Little Endian
+CPU(s):                                  8
+               total        used        free      shared  buff/cache   available
+Mem:            15Gi       328Mi        13Gi       2.0Mi       1.1Gi        14Gi
+Swap:             0B          0B          0B
+=== Machine B Environment ===
+Fri Apr 17 10:41:16 PM CST 2026
+Linux VM-1-17-ubuntu 5.15.0-171-generic #181-Ubuntu SMP Fri Feb 6 22:44:50 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+Architecture:                            x86_64
+CPU op-mode(s):                          32-bit, 64-bit
+Address sizes:                           52 bits physical, 48 bits virtual
+Byte Order:                              Little Endian
+CPU(s):                                  8
+On-line CPU(s) list:                     0-7
+Vendor ID:                               AuthenticAMD
+Model name:                              AMD EPYC 9754 128-Core Processor
+CPU family:                              25
+Model:                                   160
+Thread(s) per core:                      2
+Core(s) per socket:                      4
+Socket(s):                               1
+Stepping:                                2
+BogoMIPS:                                4500.08
+Flags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm rep_good nopl cpuid extd_apicid tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext perfctr_core invpcid_single ibpb vmmcall fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 avx512_bf16 clzero xsaveerptr wbnoinvd arat avx512vbmi umip avx512_vbmi2 vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid fsrm
+Hypervisor vendor:                       KVM
+Virtualization type:                     full
+L1d cache:                               128 KiB (4 instances)
+L1i cache:                               128 KiB (4 instances)
+L2 cache:                                4 MiB (4 instances)
+L3 cache:                                16 MiB (1 instance)
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-7
+Vulnerability Gather data sampling:      Not affected
+Vulnerability Indirect target selection: Not affected
+Vulnerability Itlb multihit:             Not affected
+Vulnerability L1tf:                      Not affected
+Vulnerability Mds:                       Not affected
+Vulnerability Meltdown:                  Not affected
+Vulnerability Mmio stale data:           Not affected
+Vulnerability Reg file data sampling:    Not affected
+Vulnerability Retbleed:                  Not affected
+Vulnerability Spec rstack overflow:      Mitigation; safe RET, no microcode
+Vulnerability Spec store bypass:         Vulnerable
+Vulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization
+Vulnerability Spectre v2:                Mitigation; Retpolines; IBPB conditional; STIBP disabled; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected
+Vulnerability Srbds:                     Not affected
+Vulnerability Tsa:                       Vulnerable: Clear CPU buffers attempted, no microcode
+Vulnerability Tsx async abort:           Not affected
+Vulnerability Vmscape:                   Not affected
+               total        used        free      shared  buff/cache   available
+Mem:            15Gi       375Mi        13Gi       2.0Mi       1.0Gi        14Gi
+Swap:             0B          0B          0B
+NAME   MAJ:MIN RM   SIZE RO TYPE MOUNTPOINTS
+loop0    7:0    0  63.8M  1 loop /snap/core20/2599
+loop1    7:1    0  63.8M  1 loop /snap/core20/2669
+loop2    7:2    0  91.4M  1 loop /snap/lxd/35819
+loop3    7:3    0  91.6M  1 loop /snap/lxd/37982
+loop4    7:4    0  50.8M  1 loop /snap/snapd/25202
+loop5    7:5    0  48.1M  1 loop /snap/snapd/25935
+sr0     11:0    1 135.8M  0 rom  
+vda    252:0    0    50G  0 disk 
+├─vda1 252:1    0     1M  0 part 
+└─vda2 252:2    0    50G  0 part /
+vdb    252:16   0   200G  0 disk /data
+Filesystem      Size  Used Avail Use% Mounted on
+tmpfs           1.6G  1.1M  1.6G   1% /run
+/dev/vda2        50G  4.5G   43G  10% /
+tmpfs           7.6G   24K  7.6G   1% /dev/shm
+tmpfs           5.0M     0  5.0M   0% /run/lock
+tmpfs           1.6G  4.0K  1.6G   1% /run/user/1000
+/dev/vdb        196G   36K  186G   1% /data
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 8500 qdisc mq state UP group default qlen 1000
+    altname enp0s5
+    altname ens5
+    inet 10.0.1.17/24 metric 100 brd 10.0.1.255 scope global eth0
+       valid_lft forever preferred_lft forever
+
+--- Data machine ---
+Architecture:                            x86_64
+CPU op-mode(s):                          32-bit, 64-bit
+Address sizes:                           52 bits physical, 48 bits virtual
+Byte Order:                              Little Endian
+CPU(s):                                  8
+               total        used        free      shared  buff/cache   available
+Mem:            15Gi       342Mi        13Gi       2.0Mi       1.1Gi        14Gi
+Swap:             0B          0B          0B
+8
+=== Machine C Environment ===
+Fri Apr 17 10:41:22 PM CST 2026
+Linux VM-1-12-ubuntu 5.15.0-171-generic #181-Ubuntu SMP Fri Feb 6 22:44:50 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+Architecture:                            x86_64
+CPU op-mode(s):                          32-bit, 64-bit
+Address sizes:                           52 bits physical, 48 bits virtual
+Byte Order:                              Little Endian
+CPU(s):                                  8
+On-line CPU(s) list:                     0-7
+Vendor ID:                               AuthenticAMD
+Model name:                              AMD EPYC 9754 128-Core Processor
+CPU family:                              25
+Model:                                   160
+Thread(s) per core:                      2
+Core(s) per socket:                      4
+Socket(s):                               1
+Stepping:                                2
+BogoMIPS:                                4500.10
+Flags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm rep_good nopl cpuid extd_apicid tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext perfctr_core invpcid_single ibpb vmmcall fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 avx512_bf16 clzero xsaveerptr wbnoinvd arat avx512vbmi umip avx512_vbmi2 vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid fsrm
+Hypervisor vendor:                       KVM
+Virtualization type:                     full
+L1d cache:                               128 KiB (4 instances)
+L1i cache:                               128 KiB (4 instances)
+L2 cache:                                4 MiB (4 instances)
+L3 cache:                                16 MiB (1 instance)
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-7
+Vulnerability Gather data sampling:      Not affected
+Vulnerability Indirect target selection: Not affected
+Vulnerability Itlb multihit:             Not affected
+Vulnerability L1tf:                      Not affected
+Vulnerability Mds:                       Not affected
+Vulnerability Meltdown:                  Not affected
+Vulnerability Mmio stale data:           Not affected
+Vulnerability Reg file data sampling:    Not affected
+Vulnerability Retbleed:                  Not affected
+Vulnerability Spec rstack overflow:      Mitigation; safe RET, no microcode
+Vulnerability Spec store bypass:         Vulnerable
+Vulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization
+Vulnerability Spectre v2:                Mitigation; Retpolines; IBPB conditional; STIBP disabled; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected
+Vulnerability Srbds:                     Not affected
+Vulnerability Tsa:                       Vulnerable: Clear CPU buffers attempted, no microcode
+Vulnerability Tsx async abort:           Not affected
+Vulnerability Vmscape:                   Not affected
+               total        used        free      shared  buff/cache   available
+Mem:            15Gi       389Mi        13Gi       2.0Mi       1.0Gi        14Gi
+Swap:             0B          0B          0B
+NAME   MAJ:MIN RM   SIZE RO TYPE MOUNTPOINTS
+loop0    7:0    0  63.8M  1 loop /snap/core20/2669
+loop1    7:1    0  63.8M  1 loop /snap/core20/2599
+loop2    7:2    0  91.4M  1 loop /snap/lxd/35819
+loop3    7:3    0  91.6M  1 loop /snap/lxd/37982
+loop4    7:4    0  50.8M  1 loop /snap/snapd/25202
+loop5    7:5    0  48.1M  1 loop /snap/snapd/25935
+sr0     11:0    1 135.8M  0 rom  
+vda    252:0    0    50G  0 disk 
+├─vda1 252:1    0     1M  0 part 
+└─vda2 252:2    0    50G  0 part /
+vdb    252:16   0   200G  0 disk /data
+Filesystem      Size  Used Avail Use% Mounted on
+tmpfs           1.6G  1.1M  1.6G   1% /run
+/dev/vda2        50G  4.5G   43G  10% /
+tmpfs           7.6G   24K  7.6G   1% /dev/shm
+tmpfs           5.0M     0  5.0M   0% /run/lock
+tmpfs           1.6G  4.0K  1.6G   1% /run/user/1000
+/dev/vdb        196G   40K  186G   1% /data
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 8500 qdisc mq state UP group default qlen 1000
+    altname enp0s5
+    altname ens5
+    inet 10.0.1.12/24 metric 100 brd 10.0.1.255 scope global eth0
+       valid_lft forever preferred_lft forever
+--- NFS status ---
+● nfs-server.service - NFS server and services
+     Loaded: loaded (/lib/systemd/system/nfs-server.service; enabled; vendor preset: enabled)
+     Active: active (exited) since Fri 2026-04-17 22:41:22 CST; 24ms ago
+    Process: 12494 ExecStartPre=/usr/sbin/exportfs -r (code=exited, status=0/SUCCESS)
+    Process: 12495 ExecStart=/usr/sbin/rpc.nfsd (code=exited, status=0/SUCCESS)
+   Main PID: 12495 (code=exited, status=0/SUCCESS)
+        CPU: 5ms
+
+Apr 17 22:41:22 VM-1-12-ubuntu systemd[1]: Starting NFS server and services...
+Apr 17 22:41:22 VM-1-12-ubuntu systemd[1]: Finished NFS server and services.
+--- NFS exports ---
+/data/nfs-export
+		<world>(sync,wdelay,hide,no_subtree_check,sec=sys,rw,secure,no_root_squash,no_all_squash)
+--- nfsd threads ---
+8

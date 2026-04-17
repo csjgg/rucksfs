@@ -1,0 +1,20 @@
+-- started at 04/18/2026 00:20:04 --
+
+mdtest-4.1.0+dev was launched with 16 total task(s) on 1 node(s)
+Command line used: mdtest '-d' '/mnt/rucksfs-dist/mdtest_run' '-n' '5000' '-F' '-C' '-T' '-r' '-u' '-i' '3'
+Nodemap: 1111111111111111
+Path                : /mnt/rucksfs-dist/mdtest_run
+FS                  : 3.8 GiB   Used FS: 50.0%   Inodes: 1.0 Mi   Used Inodes: 0.1%
+16 tasks, 80000 files
+
+SUMMARY rate (in ops/sec): (of 3 iterations)
+   Operation                     Max            Min           Mean        Std Dev
+   ---------                     ---            ---           ----        -------
+   File creation                5561.060       5549.756       5557.217          6.462
+   File stat                   25970.814      25760.043      25890.835        114.204
+   File read                       0.000          0.000          0.000          0.000
+   File removal                 7750.848       7680.883       7716.773         35.018
+   Tree creation                  66.247         35.338         54.685         16.861
+   Tree removal                    1.633          1.433          1.520          0.102
+-- finished at 04/18/2026 00:21:31 --
+

@@ -1,0 +1,41 @@
+=== iperf3: Client -> Meta ===
+Connecting to host 10.0.1.17, port 5201
+[  5] local 10.0.1.6 port 32770 connected to 10.0.1.17 port 5201
+[ ID] Interval           Transfer     Bitrate         Retr  Cwnd
+[  5]   0.00-1.00   sec   575 MBytes  4.82 Gbits/sec  5552   68.4 KBytes       
+[  5]   1.00-2.00   sec   380 MBytes  3.19 Gbits/sec  4606   83.7 KBytes       
+[  5]   2.00-3.00   sec  1.83 GBytes  15.7 Gbits/sec  8016    221 KBytes       
+[  5]   3.00-4.00   sec  1.24 GBytes  10.7 Gbits/sec  13530    228 KBytes       
+[  5]   4.00-5.00   sec  1.24 GBytes  10.6 Gbits/sec  14515    350 KBytes       
+[  5]   5.00-6.00   sec  1.24 GBytes  10.7 Gbits/sec  15876   1.06 MBytes       
+[  5]   6.00-7.00   sec  1.24 GBytes  10.7 Gbits/sec  16596    221 KBytes       
+[  5]   7.00-8.00   sec  1.24 GBytes  10.6 Gbits/sec  13183    221 KBytes       
+[  5]   8.00-9.00   sec  1.24 GBytes  10.7 Gbits/sec  16618    243 KBytes       
+[  5]   9.00-10.00  sec  1.24 GBytes  10.6 Gbits/sec  16006    228 KBytes       
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[ ID] Interval           Transfer     Bitrate         Retr
+[  5]   0.00-10.00  sec  11.4 GBytes  9.83 Gbits/sec  124498             sender
+[  5]   0.00-10.04  sec  11.4 GBytes  9.79 Gbits/sec                  receiver
+
+iperf Done.
+
+=== iperf3: Client -> Data ===
+Connecting to host 10.0.1.12, port 5201
+[  5] local 10.0.1.6 port 39894 connected to 10.0.1.12 port 5201
+[ ID] Interval           Transfer     Bitrate         Retr  Cwnd
+[  5]   0.00-1.00   sec   574 MBytes  4.81 Gbits/sec  4981   91.3 KBytes       
+[  5]   1.00-2.00   sec   381 MBytes  3.20 Gbits/sec  4027    106 KBytes       
+[  5]   2.00-3.00   sec   381 MBytes  3.20 Gbits/sec  4732   68.4 KBytes       
+[  5]   3.00-4.00   sec   380 MBytes  3.19 Gbits/sec  4860   60.8 KBytes       
+[  5]   4.00-5.00   sec   381 MBytes  3.20 Gbits/sec  5533    106 KBytes       
+[  5]   5.00-6.00   sec  1.60 GBytes  13.8 Gbits/sec  4594    190 KBytes       
+[  5]   6.00-7.00   sec  1.24 GBytes  10.7 Gbits/sec  13726    190 KBytes       
+[  5]   7.00-8.00   sec  1.24 GBytes  10.6 Gbits/sec  13889    289 KBytes       
+[  5]   8.00-9.00   sec  1.24 GBytes  10.6 Gbits/sec  13788    183 KBytes       
+[  5]   9.00-10.00  sec  1.24 GBytes  10.7 Gbits/sec  13318    342 KBytes       
+- - - - - - - - - - - - - - - - - - - - - - - - -
+[ ID] Interval           Transfer     Bitrate         Retr
+[  5]   0.00-10.00  sec  8.61 GBytes  7.40 Gbits/sec  83448             sender
+[  5]   0.00-10.04  sec  8.61 GBytes  7.36 Gbits/sec                  receiver
+
+iperf Done.

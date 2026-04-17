@@ -1,0 +1,20 @@
+-- started at 04/17/2026 22:59:09 --
+
+mdtest-4.1.0+dev was launched with 16 total task(s) on 1 node(s)
+Command line used: mdtest '-d' '/mnt/nfs/mdtest_run' '-n' '5000' '-F' '-C' '-T' '-r' '-u' '-i' '3'
+Nodemap: 1111111111111111
+Path                : /mnt/nfs/mdtest_run
+FS                  : 195.8 GiB   Used FS: 0.0%   Inodes: 12.5 Mi   Used Inodes: 0.0%
+16 tasks, 80000 files
+
+SUMMARY rate (in ops/sec): (of 3 iterations)
+   Operation                     Max            Min           Mean        Std Dev
+   ---------                     ---            ---           ----        -------
+   File creation                3159.404       3113.550       3138.093         23.097
+   File stat                    6448.576       6414.965       6430.743         16.899
+   File read                       0.000          0.000          0.000          0.000
+   File removal                 2764.618       2760.531       2763.161          2.282
+   Tree creation                  33.416         20.326         27.595          6.664
+   Tree removal                   13.280         10.981         12.372          1.224
+-- finished at 04/17/2026 23:02:31 --
+
