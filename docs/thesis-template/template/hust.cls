@@ -338,6 +338,7 @@
 \pgfplotsset{compat=1.17}
 \usetikzlibrary{quotes,angles}
 \usetikzlibrary{shapes,arrows,positioning}
+\usetikzlibrary{calc,fit,backgrounds,decorations.pathreplacing}
 
 \newlength\tikzboxwidth
 \newlength\tikzboxheight
