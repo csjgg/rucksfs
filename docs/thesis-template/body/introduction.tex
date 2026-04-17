@@ -4,7 +4,7 @@
 
 \subsection{课题背景、目的与意义}
 
-\subsubsection{研究背景与趋势}
+\subsubsection{研究背景}
 
 大规模模型训练、容器化微服务和云端数据湖等场景有一个共同特征：它们产生并消费海量小文件。一次分布式训练作业可能在 checkpoint 阶段写出数十亿个参数分片；Kubernetes 集群中的 Pod 在启动过程中需要创建和读取大量配置文件与临时卷。百度沧海存储团队在 Mantle\cite{li2025mantle}中给出了一组直观的数据：其云对象存储管理的文件对象数已达万亿量级，且元数据请求规模仍在逐年数倍增长。当文件数量攀升至这一量级时，系统的性能瓶颈通常不在数据传输带宽，而在元数据路径上。Ren 和 Gibson\cite{ren2013tablefs}的测量表明，\texttt{stat}、\texttt{open}、\texttt{readdir} 等元数据操作占文件系统全部 I/O 操作的 60\%--80\%。单个热点目录下的文件数一旦达到百万级，元数据查询与更新的延迟就会成为系统吞吐的天花板。
 
@@ -87,15 +87,9 @@
     \label{fig:ext4-create-path}
 \end{figure}
 
-问题的本质在于粒度不匹配。一次文件创建实际需要写入的有效数据不超过 300 字节（256 字节 inode + 几十字节目录项），但 ext4 的操作粒度是 4\,KiB 的磁盘页——即使只改了 256 字节的 inode，也要读出整个 4\,KiB 页、修改、写回。Journal 模式下这个页还要被写两遍（一次写 journal，一次写原位置）。如果目录的 H-tree 发生节点分裂，写入量还会翻倍。对单个操作而言这些开销可以容忍，但当每秒需要执行数万次 create 时，写放大的累积效应就不可忽视了。
+问题的本质在于粒度不匹配。一次文件创建实际需要写入的有效数据不超过 300 字节（256 字节 inode + 几十字节目录项），但 ext4 的操作粒度是 4\,KiB 的磁盘页——即使只改了 256 字节的 inode，也要读出整个 4\,KiB 页、修改、写回。Journal 模式下这个页还要被写两遍（一次写 journal，一次写原位置）。如果目录的 H-tree 发生节点分裂，写入量还会翻倍。对单个操作而言这些开销可以容忍，但当每秒需要执行数万次 create 时，写放大的累积效应就不可忽视了。并发场景下问题更严重：ext4 对目录数据块的修改受目录级互斥锁（\texttt{i\_rwsem}）保护，同一目录下的所有文件创建操作必须串行通过这把锁。即使底层存储设备（如 NVMe SSD）能提供数十万 IOPS，目录级锁也会将单目录下的创建吞吐量限制在远低于硬件能力的水平上。
 
-并发场景下问题更严重。ext4 对目录数据块的修改受目录级互斥锁（\texttt{i\_rwsem}）保护，同一目录下的所有文件创建操作必须串行通过这把锁。XFS 虽然在某些路径上使用了更细粒度的锁，但 journal 区域的日志提交仍然是全局串行的。结果是：即使底层存储设备（如 NVMe SSD）能提供数十万 IOPS，目录级锁也会将单目录下的创建吞吐量限制在远低于硬件能力的水平上。
-
-LSM-tree\cite{oneil1996lsmtree}（Log-Structured Merge-tree）的写入模型从根本上解决了上述粒度不匹配问题。键值存储将操作粒度从 4\,KiB 的磁盘页细化到单条记录：一个目录项就是一个键值对，写入时不触碰任何磁盘页结构，只做一次内存追加。具体而言，写入操作先顺序追加到内存中的 MemTable；MemTable 积累到一定容量后，由后台线程排序并批量刷出为磁盘上的 SSTable 文件；多层 SSTable 之间再通过 compaction 消除冗余。同样一次文件创建，在 KV 存储上只需插入一条目录项键值对、写入一条 inode 记录——两次内存追加，没有 bitmap 翻转、没有 journal 双写、没有 4\,KiB 对齐的页填充。等 MemTable 攒满后一次性顺序刷盘，将原本分散在 6 个磁盘位置的随机写，归并为一次连续的顺序 I/O。工业界的实践印证了这一判断：Google 的 LevelDB\cite{google2011leveldb}在 2011 年将 LSM-tree 工程化；Facebook 在此基础上开发的 RocksDB\cite{dong2021rocksdb}增加了列族、事务和前缀布隆过滤器，现已成为 CockroachDB、TiKV 等数十个系统的底层存储引擎。在文件系统领域，TableFS\cite{ren2013tablefs}在 2013 年率先将全部元数据存入 LevelDB 并通过 FUSE 挂载，小文件创建速度达到了同期 ext4 的 2--3 倍。此后 Apache Ozone\cite{apache2021ozone}和 Facebook Tectonic\cite{pan2021tectonic}先后在 EB 级生产环境中部署了以 RocksDB 为核心的元数据引擎。从 2013 年的学术原型到 2021 年的 EB 级工业系统，KV 元数据方案的可行性和竞争力已无需证明，但其在键编码设计、写放大控制和事务保障等方面仍有开放的设计问题。
-
-本课题聚焦的正是这些问题。具体而言，核心研究内容是元数据的 KV 存储设计——如何将 inode 属性、目录项和属性变更日志高效地映射到键值引擎中，并据此实现 create、unlink、rename、readdir 等 POSIX 文件操作。存储方案决定了操作的性能上限，文件操作则是检验方案是否可行的载体。系统通过 FUSE\cite{szeredi2005fuse}框架对外暴露标准 POSIX 接口。选择 FUSE 是出于工程上的务实考量——用户态开发迭代更快，与 JuiceFS\cite{juicefs2021}和 CubeFS\cite{liu2019cubefs}等主流系统的接入方式一致，且 FUSE 层的文件操作逻辑在本质上等价于内核 VFS 接口，必要时可平滑迁移到内核态。
-
-
+基于 LSM-tree（Log-Structured Merge-tree）\cite{oneil1996lsmtree}的键值（KV）存储为上述问题提供了一条不同的技术路线。KV 存储将操作粒度从 4\,KiB 的磁盘页细化到单条记录：一个目录项就是一个键值对，写入时只做一次内存追加，没有 bitmap 翻转、没有 journal 双写、没有 4\,KiB 对齐的页填充。MemTable 攒满后一次性顺序刷盘，将原本分散在多个磁盘位置的随机写归并为连续的顺序 I/O。TableFS\cite{ren2013tablefs}在 2013 年率先将全部元数据存入 LevelDB\cite{google2011leveldb}并通过 FUSE 挂载，小文件创建速度达到同期 ext4 的 2--3 倍，首次验证了这一方案的可行性。此后 RocksDB\cite{dong2021rocksdb}在 LevelDB 基础上增加了列族、事务和前缀布隆过滤器等关键特性，Apache Ozone\cite{apache2021ozone}和 Facebook Tectonic\cite{pan2021tectonic}先后在 EB 级生产环境中部署了以 RocksDB 为核心的元数据引擎。KV 元数据方案的可行性已得到充分验证，但其在键编码设计、写放大控制和事务保障等方面仍有开放的设计问题。
 
 \subsubsection{面临的问题和挑战}
 
@@ -144,18 +138,26 @@ LSM-tree\cite{oneil1996lsmtree}（Log-Structured Merge-tree）的写入模型从
 KV 引擎的数据模型是字节串到字节串的扁平映射，而文件系统的命名空间是以根目录为起点的层次化树。键编码方案需要同时满足两类查询需求：（1）\texttt{readdir} 要求同一父目录下的所有子项在键空间中连续排列，以便通过前缀迭代器一次扫出；（2）\texttt{lookup} 要求给定父 inode 号和文件名后，能在 $O(1)$ 时间内定位到对应的目录项。如果直接以全路径（如 \texttt{/a/b/c}）作为键，\texttt{rename} 操作就需要递归修改整棵子树的所有键，其开销随子树规模线性增长。TableFS\cite{ren2013tablefs}以"父 inode 号 + 文件名"拼接作为键，方向正确，但 inode 号使用原生字节序存储，导致同一目录下的条目在 LSM-tree 中未必物理相邻，无法利用前缀布隆过滤器。键编码还必须保持字节序与数值序的一致性（byte-order preserving），否则范围查询的结果将不符合预期。
 
 \textbf{问题二：父目录更新引发的写放大。}
-POSIX 语义\cite{ieee2017posix}要求每次创建或删除文件时，同步更新父目录的 \texttt{mtime}（修改时间）和 \texttt{nlink}（链接计数）。在 KV 存储中，这意味着每次 \texttt{create} 或 \texttt{unlink} 都需要对父目录 inode 执行一次读取-修改-写回。对于访问频率不高的目录，这一开销可以接受；但对于热点目录（如 \texttt{/tmp}、CI 构建输出目录、模型训练的 checkpoint 目录），问题会迅速放大。假设某个目录在 1 秒内发生 1{,}000 次文件创建，父目录 inode 就要被读写 1{,}000 次，其中绝大部分读取到的值在写回前就已过期。在 RocksDB 中，对同一 key 的密集 \texttt{Get+Put} 序列还会加速 MemTable 填满和 L0 文件堆积，触发额外的 compaction，形成写放大的连锁效应。
+POSIX 语义\cite{ieee2017posix}要求每次创建或删除文件时，同步更新父目录的 \texttt{mtime} 和 \texttt{nlink}。在 KV 存储中，这意味着每次 \texttt{create} 或 \texttt{unlink} 都需要对父目录 inode 执行一次读取-修改-写回。对于热点目录（如 \texttt{/tmp}、CI 构建输出目录、模型训练的 checkpoint 目录），假设 1 秒内发生 1{,}000 次文件创建，父目录 inode 就要被读写 1{,}000 次，其中绝大部分读取到的值在写回前就已过期。在 RocksDB 中，对同一 key 的密集 \texttt{Get+Put} 序列还会加速 MemTable 填满和 L0 文件堆积，触发额外的 compaction，形成写放大的连锁效应。
 
 \textbf{问题三：并发目录操作的正确性。}
-多个线程同时操作同一目录时，检查条件与执行操作之间的时间窗口会引发 TOCTOU（Time-of-Check-to-Time-of-Use）竞态。例如，线程 A 在执行 \texttt{rename} 时确认目标路径不存在，但在写入新目录项之前，线程 B 已在该路径上创建了同名文件，导致目录项冲突或数据丢失。传统内核文件系统通过 VFS 层的 inode 互斥锁串行化目录操作来规避此问题。在 KV 引擎上没有这层保护，需要依赖存储层自身的事务机制。RocksDB 提供悲观和乐观两种事务模式，但事务的锁粒度——锁整个目录还是只锁涉及的 key——直接影响并发度与实现复杂度之间的取舍。
+多个线程同时操作同一目录时，检查条件与执行操作之间的时间窗口会引发 TOCTOU（Time-of-Check-to-Time-of-Use）竞态。例如，线程 A 执行 \texttt{rename} 时确认目标路径不存在，但在写入新目录项之前，线程 B 已在该路径上创建了同名文件，导致目录项冲突或数据丢失。传统内核文件系统通过 VFS 层的 inode 互斥锁串行化目录操作来规避此问题；在 KV 引擎上没有这层保护，需要依赖存储层自身的事务机制。事务的锁粒度——锁整个目录还是只锁涉及的 key——直接影响并发度与实现复杂度之间的取舍。
 
 \subsubsection{课题目的与意义}
 
-本课题的目标是设计并实现一个以 RocksDB 为元数据引擎的用户态文件系统 RucksFS，针对上述三个问题——键编码、写放大、并发一致性——给出完整的解决方案，并通过 FUSE 接口将其落地为可运行的 POSIX 文件系统加以验证。
+本课题的目标是设计并实现一个基于 RocksDB 的用户态 FUSE 文件系统 RucksFS，针对上述三个问题给出完整的解决方案，并通过实验验证其正确性和性能。
 
-该工作具有以下意义。在技术层面，本课题填补了 TableFS\cite{ren2013tablefs}以来在"单机 KV 元数据引擎 + 完整事务保障"方向上的空缺。TableFS 基于 LevelDB 且不具备事务能力，IndexFS\cite{ren2014indexfs}侧重分布式扩展而非单机优化。RocksDB 自 6.0 版本起已提供成熟的悲观事务接口，但尚未有公开工作将其系统性地应用于文件系统元数据操作。在工程层面，系统使用 Rust\cite{klabnik2023rust}编写，其所有权和生命周期机制在编译期排除了内存安全问题，对文件系统这类可靠性要求极高的基础设施具有切实价值。FUSE 接口使系统可在用户态运行，降低了开发和调试成本，同时与 JuiceFS、CubeFS 等主流系统的接入方式一致。
+\textbf{技术选型。}
+选择 RocksDB 作为元数据存储引擎，是因为它的特性恰好对应上述三个问题的解决需求：Column Family 机制支持将不同类型的元数据（inode 属性、目录项、增量记录）隔离存储并独立配置；前缀迭代器和前缀 Bloom 过滤器为目录遍历提供了高效的前缀扫描能力；悲观事务接口（TransactionDB）提供行级锁和冲突检测，可用于封堵 TOCTOU 窗口。选择 FUSE 作为用户态接口框架，是出于工程上的务实考量——用户态开发迭代快，与 JuiceFS\cite{juicefs2021}、CubeFS\cite{liu2019cubefs}等主流系统的接入方式一致，且 FUSE 层的文件操作逻辑在本质上等价于内核 VFS 接口，必要时可平滑迁移到内核态。选择 Rust\cite{klabnik2023rust}作为实现语言，是因为其所有权和生命周期机制能在编译期排除内存安全问题，对文件系统这类可靠性要求极高的基础设施具有切实价值，同时 Rust 的 async/await 生态（tokio）与 FUSE 异步处理模式契合。
 
-预期交付物包括：（1）完整的 RucksFS 系统，由 FUSE 客户端、元数据服务（MetadataServer）和数据服务（DataServer）三个独立组件构成，支持多节点分布式部署，组件间通过 gRPC 通信；（2）在同等硬件条件下与 JuiceFS、CubeFS、NFS 的元数据吞吐量对比评测数据。
+\textbf{解决思路。}
+针对键编码问题，本课题采用"以边为中心"的设计——以父 inode 号与子文件名的大端序拼接作为目录项键，使文件操作转化为对边的常数时间增删。针对父目录写放大问题，引入增量更新（DeltaOp）机制——写入时只追加属性变化量，不触碰基础 inode 值，后台线程定期折叠积累的增量。针对并发正确性问题，使用 RocksDB 悲观事务将检查与修改封装在同一原子操作中，按 inode ID 排序加锁以预防死锁。这三项设计的细节将在第三章展开。
+
+\textbf{课题意义。}
+在技术层面，本课题填补了 TableFS\cite{ren2013tablefs}以来在"KV 元数据引擎 + 完整事务保障"方向上的空缺——TableFS 基于 LevelDB 且不具备事务能力，IndexFS\cite{ren2014indexfs}侧重分布式扩展而非单机深度优化。RocksDB 自 6.0 版本起已提供成熟的悲观事务接口，但尚未有公开工作将其系统性地应用于文件系统元数据操作。在工程层面，RucksFS 以 Rust 编写，提供了一套从存储层到 FUSE 层的完整实现，可作为后续研究（如分布式元数据分片、智能预取等方向）的基础平台。
+
+\textbf{预期交付物。}
+（1）完整的 RucksFS 系统，由 FUSE 客户端、元数据服务（MetadataServer）和数据服务（DataServer）三个独立组件构成，支持多节点分布式部署，组件间通过 gRPC 通信；（2）pjdfstest POSIX 合规性测试结果；（3）在同等硬件条件下与 JuiceFS、CubeFS、NFS 的元数据吞吐量对比评测数据。
 
 
 \subsection{国内外研究现状}
