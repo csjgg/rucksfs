@@ -13,12 +13,12 @@ output "client_private_ip" {
 }
 
 output "server_jfs_public_ip" {
-  description = "Server-JFS (JuiceFS+Redis) public IP — SSH target"
+  description = "Server (JuiceFS+TiKV) public IP — SSH target"
   value       = tencentcloud_instance.server_jfs.public_ip
 }
 
 output "server_jfs_private_ip" {
-  description = "Server-JFS (JuiceFS+Redis) private IP"
+  description = "Server (JuiceFS+TiKV) private IP"
   value       = tencentcloud_instance.server_jfs.private_ip
 }
 
