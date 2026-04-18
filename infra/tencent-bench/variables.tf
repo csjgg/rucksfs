@@ -36,39 +36,27 @@ variable "project_id" {
 # ---------- Instance types ----------
 
 variable "instance_type_client" {
-  description = "CVM instance type for client/test-driver (Machine A)"
+  description = "CVM instance type for client/test-driver"
   type        = string
   default     = "SA3.2XLARGE16" # 8C16G
 }
 
-variable "instance_type_meta" {
-  description = "CVM instance type for metadata server (Machine B)"
+variable "instance_type_server" {
+  description = "CVM instance type for both server-1 (RucksFS) and server-2 (NFS) — must be identical"
   type        = string
-  default     = "SA3.2XLARGE16" # 8C16G — unified with client/data for controlled comparison
-}
-
-variable "instance_type_data" {
-  description = "CVM instance type for data server (Machine C)"
-  type        = string
-  default     = "SA3.2XLARGE16" # 8C16G — unified with client/meta for controlled comparison
+  default     = "SA3.2XLARGE16" # 8C16G
 }
 
 # ---------- Disk sizes (GB) ----------
 
 variable "data_disk_size_client" {
-  description = "Data disk size in GB for Machine A"
+  description = "Data disk size in GB for client"
   type        = number
   default     = 200
 }
 
-variable "data_disk_size_meta" {
-  description = "Data disk size in GB for Machine B"
-  type        = number
-  default     = 200
-}
-
-variable "data_disk_size_data" {
-  description = "Data disk size in GB for Machine C"
+variable "data_disk_size_server" {
+  description = "Data disk size in GB for both servers — must be identical"
   type        = number
   default     = 200
 }
@@ -78,12 +66,10 @@ variable "data_disk_size_data" {
 variable "image_id" {
   description = "Ubuntu 22.04 LTS image ID. Use `tccli cvm DescribeImages` to find it for your region."
   type        = string
-  default     = "img-487zeit5" # Ubuntu Server 22.04 LTS 64bit (guangzhou)
+  default     = "img-487zeit5" # Ubuntu Server 22.04 LTS 64bit
 }
 
 # ---------- Network ----------
-# Set existing_vpc_id + existing_subnet_id to reuse existing VPC (e.g. when VPC quota is full).
-# Leave empty to create new VPC/subnet.
 
 variable "existing_vpc_id" {
   description = "Existing VPC ID to reuse. Leave empty to create a new VPC."

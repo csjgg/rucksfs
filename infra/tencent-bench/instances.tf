@@ -1,9 +1,8 @@
 # ============================================================
 # Machine A — Client / Test Driver (8C16G + 200GB SSD)
-# Single client node for controlled RucksFS vs NFS comparison.
 # ============================================================
 
-resource "tencentcloud_instance" "client1" {
+resource "tencentcloud_instance" "client" {
   instance_name              = "${var.name_prefix}-client"
   availability_zone          = var.availability_zone
   image_id                   = var.image_id
@@ -30,20 +29,20 @@ resource "tencentcloud_instance" "client1" {
   tags = {
     billing = "shunjiecui"
     app     = "rucksfs-bench"
-    role    = "client1"
+    role    = "client"
   }
 }
 
 # ============================================================
-# Machine B — Metadata Server (8C16G + 200GB SSD)
-# Runs ONLY RucksFS MetadataServer. No MySQL/TiKV.
+# Server-1 — RucksFS (MDS + DS all-in-one, 8C16G + 200GB SSD)
+# Dedicated machine. No NFS, no other services.
 # ============================================================
 
-resource "tencentcloud_instance" "meta" {
-  instance_name              = "${var.name_prefix}-meta"
+resource "tencentcloud_instance" "server1" {
+  instance_name              = "${var.name_prefix}-server1-rucksfs"
   availability_zone          = var.availability_zone
   image_id                   = var.image_id
-  instance_type              = var.instance_type_meta
+  instance_type              = var.instance_type_server
   instance_charge_type       = "POSTPAID_BY_HOUR"
   project_id                 = var.project_id
   vpc_id                     = local.vpc_id
@@ -58,28 +57,28 @@ resource "tencentcloud_instance" "meta" {
 
   data_disks {
     data_disk_type = "CLOUD_SSD"
-    data_disk_size = var.data_disk_size_meta
+    data_disk_size = var.data_disk_size_server
   }
 
-  user_data = base64encode(file("${path.module}/scripts/init-meta.sh"))
+  user_data = base64encode(file("${path.module}/scripts/init-server-rucksfs.sh"))
 
   tags = {
     billing = "shunjiecui"
     app     = "rucksfs-bench"
-    role    = "metadata"
+    role    = "server1-rucksfs"
   }
 }
 
 # ============================================================
-# Machine C — Data / NFS Server (8C16G + 200GB SSD)
-# Runs NFS server and RucksFS DataServer (not simultaneously).
+# Server-2 — NFS (nfsd + ext4, 8C16G + 200GB SSD)
+# Dedicated machine. No RucksFS, no other services.
 # ============================================================
 
-resource "tencentcloud_instance" "data" {
-  instance_name              = "${var.name_prefix}-data"
+resource "tencentcloud_instance" "server2" {
+  instance_name              = "${var.name_prefix}-server2-nfs"
   availability_zone          = var.availability_zone
   image_id                   = var.image_id
-  instance_type              = var.instance_type_data
+  instance_type              = var.instance_type_server
   instance_charge_type       = "POSTPAID_BY_HOUR"
   project_id                 = var.project_id
   vpc_id                     = local.vpc_id
@@ -94,14 +93,14 @@ resource "tencentcloud_instance" "data" {
 
   data_disks {
     data_disk_type = "CLOUD_SSD"
-    data_disk_size = var.data_disk_size_data
+    data_disk_size = var.data_disk_size_server
   }
 
-  user_data = base64encode(file("${path.module}/scripts/init-data.sh"))
+  user_data = base64encode(file("${path.module}/scripts/init-server-nfs.sh"))
 
   tags = {
     billing = "shunjiecui"
     app     = "rucksfs-bench"
-    role    = "data"
+    role    = "server2-nfs"
   }
 }
