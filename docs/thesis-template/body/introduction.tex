@@ -206,40 +206,72 @@ MetaHive\cite{heidari2024metahive}在 2024 年针对 KV 存储引擎在元数据
 
 在国内，龚拓宇\cite{gong2020rocksmeta}在 2020 年的清华大学硕士论文中结合 RDMA 技术与 RocksDB 设计了分布式元数据服务原型 RocksMeta，在单节点上实现了超过 10 万 IOPS 的元数据操作吞吐量。其键编码方案与本课题有相似之处，但侧重网络传输优化（RDMA 旁路内核协议栈），而本课题侧重存储层的写放大优化。范立衡等人\cite{fan2014kvmetadata}较早探索了键值存储用于元数据集群副本一致性的管理策略。吴雨飞等人\cite{wu2025dfscache}在 2025 年针对基于 TiKV 的分布式文件系统元数据缓存一致性问题，提出了并发广播与惰性删除相结合的轻量级维护机制。
 
-表~\ref{tab:related_contribution} 汇总了上述相关工作对本课题的具体参考价值。
+表~\ref{tab:related_contribution} 按"对本课题架构选择的直接影响程度"筛选并汇总了五项最具参考意义的相关工作。其余工作——JuiceFS、CubeFS 作为实验对比对象，CFS 作为细粒度临界区分析的思想来源，Yang 等人的批量接口对应 \texttt{readdirplus} 实现，FetchBPF 与 FBMM 作为面向操作系统层的周边借鉴——均已在前文正文中展开讨论，此处不再重复罗列，以保持表格清晰可读。
 
 \begin{table}[!ht]
     \centering
-    \caption{相关工作对本课题的参考价值}
+    \caption{五项最具参考意义的 KV 元数据相关工作}
     \label{tab:related_contribution}
     \begin{tabular}{llp{6.5cm}}
     \toprule
         \textbf{工作} & \textbf{类别} & \textbf{对本课题的参考} \\ \midrule
-        TableFS\cite{ren2013tablefs} & KV 元数据 & 验证了 KV 存储用于元数据的可行性；暴露了键编码、readdir 效率和事务缺失三个问题，本课题逐一给出改进方案 \\
-        IndexFS\cite{ren2014indexfs} & KV 元数据 & 列式目录布局思路启发了本课题的 readdirplus 设计；其分布式架构的复杂性反证了单机深度优化的价值 \\
-        Mantle\cite{li2025mantle} & KV 元数据 & 三列族设计和 Delta Record 机制直接启发了本课题的多列族架构和 DeltaOp 懒折叠方案；其工业级验证为增量更新路线提供了可信度 \\
-        SingularFS\cite{li2022singularfs} & 单机 MDS & 证明单台服务器可支撑十亿级文件，验证了"单机优化优先于分布式扩展"这一技术路线 \\
-        CFS\cite{wang2023cfs} & 并发控制 & 细粒度临界区分析方法影响了本课题的 PCC 事务设计——只锁涉及的 key 而非整个目录 \\
-        Yang 等\cite{yang2020batchfile} & 批量优化 & 批量文件操作的合并思路直接体现在 RucksFS 的 readdirplus 实现中 \\
-        FetchBPF\cite{mishler2024fetchbpf} & 系统优化 & 展示了 eBPF 内核预取的可能性，为本课题的 FUSE 通道优化提供了未来方向 \\
-        FBMM\cite{tabatabai2024fbmm} & 系统优化 & "文件系统即抽象层"的理念与本课题使用 FUSE 暴露 KV 存储为 POSIX 接口的思路一致 \\
-        JuiceFS\cite{juicefs2021} & 对比基线 & 实验对比对象；其外部数据库方案的性能瓶颈验证了嵌入式 KV 引擎的优势 \\
-        CubeFS\cite{liu2019cubefs} & 对比基线 & 实验对比对象；其内存 B-tree 方案的内存限制验证了 LSM-tree 持久化方案的可扩展性 \\
+        TableFS\cite{ren2013tablefs} & KV 元数据 & 验证了 KV 存储用于元数据的可行性；暴露键编码、\texttt{readdir} 效率和事务缺失三个问题，本课题逐一改进 \\
+        IndexFS\cite{ren2014indexfs} & KV 元数据 & 列式目录布局启发了 \texttt{readdirplus} 设计；其分布式架构的复杂性反证单机深度优化的价值 \\
+        Mantle\cite{li2025mantle} & KV 元数据 & 三列族设计和 Delta Record 机制直接启发本课题的多列族架构和 DeltaOp 懒折叠方案；工业级验证增强可信度 \\
+        SingularFS\cite{li2022singularfs} & 单机 MDS & 证明单台服务器可支撑十亿级文件，验证"单机优化优先于分布式扩展"这一路线 \\
+        CFS\cite{wang2023cfs} & 并发控制 & 细粒度临界区分析方法影响本课题的 PCC 事务设计——只锁涉及的 key 而非整个目录 \\
     \bottomrule
     \end{tabular}
 \end{table}
 
+上述工作各自解决了一部分问题，但它们的思路若要落地到一个"单机 + FUSE + RocksDB + 完整 POSIX"的最小可用系统上，仍有若干空白需要填补。下一节在把这些空白点明之后，再给出 RucksFS 与它们的具体定位对比。
+
 \subsubsection{现有研究不足与本课题定位}
 
-将上述工作放在一起审视，有几个问题尚未被充分回答。
+将上述工作放在一起审视，有几个问题尚未被充分回答。这些问题并非都是研究界完全忽视的盲点，
+而更像是"部分被解决、但没有在单机 + POSIX + 嵌入式 KV 的完整组合下被系统性回答"的空白。
+具体可以归纳为三点。
 
-第一，事务与并发控制薄弱。TableFS\cite{ren2013tablefs}所用的 LevelDB 没有任何事务语义，并发写入只能靠粗粒度互斥锁兜底。IndexFS\cite{ren2014indexfs}引入了 WriteBatch 保证单次操作的原子性，但 \texttt{rename} 需要同时修改源目录和目标目录的多条记录，WriteBatch 无法覆盖跨操作的一致性约束。RocksDB 从 6.0 版本起便提供了成熟的悲观事务（PessimisticTransactionDB），支持行级锁和冲突检测，然而目前尚未见到将其系统性地应用于文件系统元数据操作的公开工作。
+第一，事务与并发控制薄弱。TableFS\cite{ren2013tablefs}所用的 LevelDB 没有任何事务语义，
+并发写入只能靠粗粒度互斥锁兜底，这在单用户基准测试下没什么问题，
+一旦移植到真实多进程负载（make 并行构建、rsync 同步、并发日志写入）就会暴露出竞态和一致性问题。
+IndexFS\cite{ren2014indexfs}引入了 WriteBatch 保证单次操作的原子性，但 \texttt{rename}
+需要同时修改源目录和目标目录的多条记录，WriteBatch 无法覆盖跨操作的一致性约束——
+跨目录 rename 在 IndexFS 中仍需在上层自行加锁。
+RocksDB 从 6.0 版本起便提供了成熟的悲观事务（PessimisticTransactionDB），
+支持行级锁、\texttt{GetForUpdate} 和冲突检测，且借助大端键编码的前缀局部性可以把冲突范围限制在单个父目录内；
+然而目前尚未见到将其系统性地应用于文件系统元数据操作的公开工作。
 
-第二，父目录 inode 的写放大问题长期被忽视。TableFS、JuiceFS、CubeFS 在处理 \texttt{create} 或 \texttt{unlink} 时无一例外地采用读取-修改-写回模式。Mantle\cite{li2025mantle}的 Delta Record 机制是目前唯一在生产环境中系统性解决这一问题的方案，但其依赖的 TafDB 分布式事务数据库和 IndexNode 缓存一致性协议使得方案无法直接移植到单机环境。如何在单机 RocksDB 上以轻量方式实现类似的增量更新语义，并保证 POSIX 操作的原子性和读取一致性，仍需探索。
+第二，父目录 inode 的写放大问题长期被忽视。
+TableFS、JuiceFS、CubeFS 在处理 \texttt{create} 或 \texttt{unlink} 时无一例外地采用读取-修改-写回模式——
+每次子节点增删，父目录的 \texttt{nlink}、\texttt{mtime}、\texttt{ctime} 要被完整读出、修改、再写回。
+在热点目录（例如存放数十万文件的临时目录）上，这种模式会制造明显的写竞争：
+所有写入串行化到同一条父 inode 记录上，LSM-Tree 的优势无从发挥。
+Mantle\cite{li2025mantle}的 Delta Record 机制是目前唯一在生产环境中系统性解决这一问题的方案，
+但其依赖的 TafDB 分布式事务数据库和 IndexNode 缓存一致性协议使得方案无法直接移植到单机环境。
+如何在单机 RocksDB 上以轻量方式实现类似的增量更新语义，
+并保证 POSIX 操作的原子性和读取一致性，仍需探索。
 
-第三，现有系统偏重分布式可扩展性，对单机场景关注不足。IndexFS、CubeFS、Tectonic 引入了 Raft 共识、一致性哈希、分区迁移等重型机制；对于只需要一台或少量节点的场景，这些机制带来的额外延迟和运维复杂度反而成了负担。SingularFS 的实验数据已经表明，单机元数据引擎经过深度优化后的吞吐量，可以远超传统的多节点方案——学术界更倾向于发表大规模分布式系统，单机场景下的优化空间被低估了。
+第三，现有系统偏重分布式可扩展性，对单机场景关注不足。
+IndexFS、CubeFS、Tectonic 引入了 Raft 共识、一致性哈希、分区迁移等重型机制，
+这些机制在 EB 级规模下是必要的基础设施，但对于只需要一台或少量节点的场景，
+Raft 的多数派确认延迟、哈希环重平衡的运维成本反而成了净负担。
+SingularFS 的实验数据已经表明，单机元数据引擎经过深度优化后的吞吐量，
+可以远超很多传统的多节点方案——学术界更倾向于发表大规模分布式系统，
+单机场景下 POSIX 合规 + LSM 优化的组合空间被低估了。
+本课题所处的毕业设计原型场景，正是"小规模、但需要严格 POSIX 语义"的典型代表。
 
-综合以上分析，本课题定位于：在单机环境下，以 RocksDB 为基础构建面向 POSIX 语义的元数据引擎原型（RucksFS），利用多列族、悲观事务和前缀迭代器等特性，设计适配文件系统访问模式的键编码方案与增量更新机制。与已有工作的差异集中在三点：（1）系统性地使用 PCC 事务为所有目录变更操作提供原子性保证，而不是依赖外部锁或仅用 WriteBatch；（2）借鉴 Mantle 的 Delta Record 思路，通过 DeltaOp 增量日志与懒折叠解决父目录 inode 的写放大问题，但在单机 RocksDB 上以轻量方案实现，不依赖分布式事务和缓存一致性协议；（3）以 Rust 编写，基于 FUSE 异步运行时实现，在不修改内核、不依赖特殊硬件的前提下提升并发处理能力。表~\ref{tab:system_compare}给出了与相关系统的定位对比。
+综合以上分析，本课题定位于：在单机环境下，以 RocksDB 为基础构建面向 POSIX 语义的元数据引擎原型（RucksFS），
+利用多列族、悲观事务和前缀迭代器等特性，设计适配文件系统访问模式的键编码方案与增量更新机制。
+与已有工作的差异集中在三点：
+（1）系统性地使用 PCC 事务为所有目录变更操作提供原子性保证，
+而不是依赖外部锁或仅用 WriteBatch；
+（2）借鉴 Mantle 的 Delta Record 思路，通过 DeltaOp 增量日志与懒折叠解决父目录 inode 的写放大问题，
+但在单机 RocksDB 上以轻量方案实现，不依赖分布式事务和缓存一致性协议；
+（3）以 Rust 编写，基于 FUSE 异步运行时实现，
+在不修改内核、不依赖特殊硬件的前提下提升并发处理能力。
+表~\ref{tab:system_compare} 在四个关键维度——KV 引擎、事务支持、增量更新、用户态接口——上
+给出了与相关系统的定位对比。
 
 \begin{table}[!ht]
     \centering
