@@ -1,115 +1,48 @@
 \section{相关技术基础}
 
-实现一个用户态文件系统至少要回答四个问题：内核与用户空间如何交互？
-元数据如何持久化？文件操作应满足哪些语义约束？并发修改怎样保证一致性？
-RucksFS 的选择分别是 FUSE 框架、RocksDB 存储引擎、POSIX 语义规范和悲观并发控制。
+RucksFS 的设计建立在三组基础技术之上：FUSE 负责把 Linux VFS 请求转交给用户态客户端，RocksDB 提供适合元数据工作负载的持久化引擎及其事务能力，POSIX 语义约束了文件系统操作应满足的行为边界。本章只讨论与后续设计直接相关的部分，不追求对这些主题做百科式铺陈。
 
 \subsection{FUSE 用户态文件系统框架}
 
-传统文件系统（如 ext4、XFS、Btrfs）以内核模块的形式运行，
-开发和调试需要修改内核源码、编译模块、重启系统，迭代周期长且内核 bug 可能导致整机崩溃。
-FUSE（Filesystem in Userspace）\cite{szeredi2005fuse} 提供了一种将文件系统逻辑搬到用户空间的替代方案。
-自 Linux 2.6.14 起，FUSE 被纳入内核主线，成为用户态文件系统开发的事实标准。
-JuiceFS\cite{juicefs2021}、CubeFS\cite{liu2019cubefs}、GlusterFS、SSHFS 等主流分布式或网络文件系统均通过 FUSE 对外提供 POSIX 接口。
-本课题选择 FUSE 作为 RucksFS 的对外接入层，正是看重其"内核桥接 + 用户态逻辑"的分层模式——
-可以用 Rust 这类对内核开发不友好的语言实现核心逻辑，
-同时复用 Linux VFS 已经标准化的 POSIX 语义框架。
+传统文件系统如 ext4、XFS 和 Btrfs 运行在内核态，调用路径短，但开发、调试和故障定位都必须直接面对内核环境。FUSE（Filesystem in Userspace）\cite{szeredi2005fuse}把这一问题拆开处理：内核只保留请求转发、进程阻塞与唤醒、权限协作等基础机制，具体的文件系统逻辑则放到用户空间实现。自 Linux 2.6.14 起，FUSE 已进入主线内核，并逐渐成为用户态文件系统的标准接口。JuiceFS\cite{juicefs2021}、CubeFS\cite{liu2019cubefs}、GlusterFS 和 SSHFS 等系统都通过 FUSE 对外提供 POSIX 接口。
 
-\subsubsection{架构与工作原理}
+RucksFS 采用 FUSE，并不是为了回避性能问题，而是为了获得清晰的系统边界。Linux VFS 继续承担系统调用入口与权限框架，用户态客户端只负责协议解析、请求路由以及与元数据服务、数据服务的交互。这种分工与本文的三段式分布式架构是匹配的。
 
-FUSE 的工作可以拆成两段来看：一段是\textbf{内核把文件系统调用路由到 \texttt{/dev/fuse}}，
-另一段是\textbf{用户态守护进程从 \texttt{/dev/fuse} 读取请求并写回响应}。
-图~\ref{fig:fuse_architecture} 以 \texttt{/dev/fuse} 为分界，将这两段并列呈现。
+\subsubsection{工作机制}
 
-\begin{figure}[htbp]
-    \centering
-    \begin{tikzpicture}[
-        font=\small,
-        box/.style={draw, rounded corners=2pt, minimum width=3.2cm, minimum height=0.8cm,
-                     align=center},
-        kern/.style={box, fill=black!6},
-        user/.style={box, fill=white},
-        bridge/.style={draw, rounded corners=2pt, minimum width=2.0cm, minimum height=0.8cm,
-                       align=center, fill=black!12, font=\small\ttfamily},
-        arr/.style={->, >=Stealth, thick},
-        lbl/.style={font=\scriptsize, text=black!65},
-    ]
-
-    % ======== 左侧通路：内核路由 ========
-    \node[user] (app)     at (-4.2, 4.6) {应用程序};
-    \node[kern] (vfs)     at (-4.2, 3.3) {Linux VFS};
-    \node[kern] (fusemod) at (-4.2, 2.0) {FUSE 内核模块};
-
-    \draw[arr] (app)     -- node[right, lbl] {syscall} (vfs);
-    \draw[arr] (vfs)     -- node[right, lbl] {转发} (fusemod);
-
-    % ======== 中央：/dev/fuse 桥接 ========
-    \node[bridge] (devfuse) at (0, 2.0) {/dev/fuse};
-
-    % ======== 右侧通路：用户态处理 ========
-    \node[user] (daemon)   at (4.2, 2.0) {FUSE 守护进程};
-    \node[user] (callback) at (4.2, 3.3) {回调派发};
-    \node[user] (logic)    at (4.2, 4.6) {业务逻辑 / 存储};
-
-    \draw[arr] (daemon)   -- node[right, lbl] {解析 opcode} (callback);
-    \draw[arr] (callback) -- node[right, lbl] {调用} (logic);
-
-    % ======== 跨 /dev/fuse 的双向箭头 ========
-    \draw[arr] (fusemod) -- node[above, lbl] {请求} (devfuse);
-    \draw[arr] (devfuse) -- node[above, lbl] {\texttt{read}} (daemon);
-
-    % 响应返回通路（弧线，避免与下行箭头重叠）
-    \draw[arr, bend left=28] (logic.west) to
-        node[above, lbl] {响应} (devfuse.north);
-    \draw[arr, bend left=28] (devfuse.north) to
-        node[above, lbl, pos=0.7] {\texttt{write}} (fusemod.north);
-
-    % ======== 图例：通过填充色区分用户/内核态 ========
-    \node[kern, minimum width=0.8cm, minimum height=0.4cm] at (-2.6, 0.5) {};
-    \node[lbl, anchor=west] at (-2.1, 0.5) {内核态组件};
-    \node[user, minimum width=0.8cm, minimum height=0.4cm] at ( 1.2, 0.5) {};
-    \node[lbl, anchor=west] at ( 1.7, 0.5) {用户态组件};
-
-    \end{tikzpicture}
-    \caption{FUSE 的内核路由与用户态处理。左侧是应用的文件系统调用在内核中的路径：
-             系统调用进入 VFS，VFS 识别出挂载点类型为 \texttt{fuse} 后转交 FUSE 内核模块，
-             最终把请求写入 \texttt{/dev/fuse} 字符设备队列并阻塞等待响应。
-             右侧是用户态守护进程的处理路径：通过 \texttt{read(/dev/fuse)} 取出请求，
-             解析 opcode 后派发到相应回调执行业务逻辑，再通过 \texttt{write(/dev/fuse)}
-             把响应写回内核。两侧只通过 \texttt{/dev/fuse} 一条字节流通道交互。}
-    \label{fig:fuse_architecture}
-\end{figure}
-
-\textbf{内核侧的路由}。当应用调用 \texttt{open("/mnt/fs/foo")}、\texttt{stat()}、\texttt{read()}
-等系统调用时，请求首先进入 Linux VFS。VFS 查看路径所属挂载点的超级块，
-发现该挂载点的文件系统类型是 \texttt{fuse}，于是把请求转交给 FUSE 内核模块（\texttt{fuse.ko}），
-而不是像 ext4 那样直接调用内核内部的文件系统方法。FUSE 模块把 VFS 的结构化调用
-编码为 FUSE 协议的字节序列——一个携带 opcode、请求 ID 和参数的帧——
-然后写入与挂载点对应的 \texttt{/dev/fuse} 字符设备队列，
-并让当前调用线程阻塞在该请求 ID 上，等待响应。
-
-\textbf{用户态侧的处理}。用户态守护进程在挂载时已经打开了 \texttt{/dev/fuse}，
-并在其上循环 \texttt{read}。一旦有请求到达，\texttt{read} 返回字节流，
-守护进程按 FUSE 协议头解析出 opcode 与参数，把请求派发到开发者注册的回调上
-（例如 \texttt{FUSE\_LOOKUP} 派发到 \texttt{lookup()}、\texttt{FUSE\_CREATE} 派发到 \texttt{create()}）。
-回调内部可以自由调用任何用户态代码——读写 RocksDB、发起 gRPC、访问远端对象存储——
-返回结果后，守护进程把结果按协议格式封装为响应帧，\texttt{write(/dev/fuse)} 送回内核；
-FUSE 内核模块以请求 ID 为索引唤醒原先阻塞的应用线程，把返回值填回系统调用的返回路径。
-如此循环，守护进程就像一个事件驱动的服务器：\texttt{/dev/fuse} 是它的 socket，
-FUSE 协议是它的 RPC，回调函数是它的 handler。
-开发者要做的就是把这些回调填上业务代码——下一节讨论具体的回调形式
-以及 fuse3 如何让回调模型与 Rust 的异步运行时协作。
-
-\subsubsection{开发接口与回调模型}
-
-FUSE 框架向开发者暴露一组回调函数接口，每个回调对应一个 VFS 操作。
-开发者实现所需的回调，注册到 FUSE 框架后，框架就会从 \texttt{/dev/fuse}
-读取请求、分发到对应的回调、将返回值写回内核。
-表~\ref{tab:fuse_callbacks} 列出了与本课题直接相关的核心回调。
+FUSE 在 RucksFS 中的请求通路可以抽象为表~\ref{tab:fuse_path}中的 6 个阶段。与直接阅读内核源码相比，这种表格更适合论文中的概念说明，因为它强调的是边界与责任，而不是具体函数名。
 
 \begin{table}[htbp]
     \centering
-    \caption{FUSE 核心回调接口（本课题涉及部分）}
+    \caption{FUSE 请求的分层执行路径}
+    \label{tab:fuse_path}
+    \begin{tabular}{clp{8.2cm}}
+    \toprule
+    \textbf{阶段} & \textbf{位置} & \textbf{动作} \\
+    \midrule
+    1 & 应用进程 & 调用 \texttt{open()}、\texttt{stat()}、\texttt{mkdir()} 等 POSIX 接口 \\
+    2 & Linux VFS & 识别目标路径属于 FUSE 挂载点，并把请求转交 FUSE 内核模块 \\
+    3 & FUSE 内核模块 & 为请求分配 ID，封装 opcode 与参数，写入 \texttt{/dev/fuse}，并阻塞原线程 \\
+    4 & FUSE 客户端 & 从 \texttt{/dev/fuse} 读取请求，解析协议头并派发到对应回调 \\
+    5 & RucksFS 用户态逻辑 & 通过 \texttt{VfsCore} 调用 MetadataServer 或 DataServer，得到处理结果 \\
+    6 & 内核返回路径 & 守护进程写回响应，内核按请求 ID 唤醒原线程并返回系统调用结果 \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+当应用对挂载点执行 \texttt{open()}、\texttt{stat()}、\texttt{mkdir()} 等系统调用时，请求首先进入 VFS。若目标路径位于 FUSE 挂载点下，VFS 不会继续调用 ext4 之类的内核文件系统实现，而是把请求转交给 FUSE 内核模块。该模块为请求分配请求 ID，封装操作码与参数，并将请求写入 \texttt{/dev/fuse}，同时让发起系统调用的线程阻塞等待。
+
+用户态守护进程在挂载时已经打开 \texttt{/dev/fuse}，随后持续从该设备读取请求帧。守护进程根据 opcode 识别请求类型，再把请求派发到开发者实现的回调，例如把 \texttt{LOOKUP} 派发给 \texttt{lookup()}，把 \texttt{CREATE} 派发给 \texttt{create()}。回调完成后，守护进程把结果编码为响应帧并写回 \texttt{/dev/fuse}；内核再据请求 ID 唤醒原先阻塞的线程，将结果接回系统调用返回路径。
+
+从系统结构上看，FUSE 把“POSIX 请求如何进入文件系统”和“文件系统内部如何实现这些请求”明确分离了。内核负责入口与调度，用户空间负责语义与存储实现，二者之间唯一共享的交互媒介就是 \texttt{/dev/fuse}。
+
+\subsubsection{回调模型与异步实现}
+
+FUSE 向开发者暴露的是一组与 VFS 操作一一对应的回调接口。表~\ref{tab:fuse_callbacks}列出了本文直接涉及的核心回调。它们与 POSIX 操作之间是直接对应关系：\texttt{lookup} 用于路径解析，\texttt{getattr} 对应 \texttt{stat()}，\texttt{create} 对应 \texttt{open(O\_CREAT)}，\texttt{rename} 对应目录项移动，\texttt{readdir} 对应目录遍历。
+
+\begin{table}[htbp]
+    \centering
+    \caption{FUSE 核心回调接口（本文涉及部分）}
     \label{tab:fuse_callbacks}
     \begin{tabular}{llp{6.5cm}}
     \toprule
@@ -133,528 +66,101 @@ FUSE 框架向开发者暴露一组回调函数接口，每个回调对应一个
     \end{tabular}
 \end{table}
 
-原始 libfuse（C 语言）给回调提供的是阻塞同步接口：
-守护进程主循环用一个线程对 \texttt{/dev/fuse} 做阻塞 \texttt{read}，
-拿到请求后分派给线程池中的 worker 同步执行回调，
-worker 拿到返回值后阻塞 \texttt{write} 写回响应。
-这种"一请求一线程"的模型在元数据密集场景下会遇到两个问题：
-一是回调中若要访问远端服务（如 RucksFS 的 gRPC 元数据调用），
-线程会长时间阻塞在网络 I/O 上，占用线程池槽位；
-二是线程数需要显著大于并发请求数才能避免排队，
-而大量线程又会带来可观的内存和调度开销。
+在实现机制上，\texttt{fuse3} 的异步模型可以概括为“读取请求帧、生成 Future、等待完成后写回响应”三个步骤。运行时从 \texttt{/dev/fuse} 读取请求后，不会要求每个请求独占一个阻塞线程，而是把请求派发到对应的异步回调，并由执行器驱动这些 Future 向前推进。只要某个回调在中途进入等待状态，例如等待元数据 RPC、数据 RPC 或本地异步 I/O，执行器就可以暂时挂起该任务，转而处理其他已经就绪的请求。
 
-Rust 生态里的 \texttt{fuse3} crate 用异步运行时重写了这条主循环。
-具体做法是把 \texttt{/dev/fuse} 的文件描述符注册到 tokio 的 \texttt{epoll} 反应器上，
-开启 \texttt{EPOLLIN} 监听：内核一旦往设备队列写入请求，
-\texttt{epoll\_wait} 就在 tokio 线程上返回可读事件，
-fuse3 紧接着对 \texttt{/dev/fuse} 做非阻塞 \texttt{read}，
-把取出的一批请求各自封装成独立的 \texttt{async} 任务（\texttt{tokio::task::spawn}），
-这些任务就被派发到 tokio 的工作线程池。
-每个任务调用对应的 \texttt{async fn} 回调——在 fuse3 中，
-\texttt{Filesystem} trait 的 \texttt{lookup}、\texttt{create}、\texttt{getattr} 等方法
-全部被声明为 \texttt{async fn}。
-回调内部执行 \texttt{metadata\_client.create(...).await} 这类远程调用时，
-底层的 \texttt{.await} 会把当前任务挂起，让出工作线程；
-待 gRPC 响应到达、future 被唤醒后，任务回到工作线程完成剩余逻辑，
-最后把响应帧 \texttt{write} 回 \texttt{/dev/fuse}。
+这种机制的关键不在于“把同步函数改写为异步语法”，而在于把等待开销从内核工作线程中剥离出去。对分布式文件系统客户端而言，一次 FUSE 回调后面往往还跟着一次或多次网络往返；若仍采用“一个请求绑定一个线程”的阻塞模型，线程数会随并发请求数和网络等待时间同步膨胀。异步执行模型则把并发控制转移到事件循环与任务调度层，使系统可以在有限线程数下维持大量未完成请求。
 
-这套"epoll + async 回调"模型的效果是：
-数千个并发 FUSE 请求可以在少量工作线程上轻量地交错推进，
-不再被阻塞式的网络 I/O 占用线程资源。
-RucksFS 的 tokio 运行时只开启 8 个工作线程（等于 CPU 核数），
-就足以承担第四章中 mdtest 在 $N=32$ 并发下的元数据负载。
+从系统角度看，\texttt{fuse3} 的异步接口恰好适合 RucksFS 这类客户端/服务端分离的实现形态。FUSE 层负责接收和返回请求，真正耗时的部分通常发生在用户态客户端与 MetadataServer、DataServer 的交互过程中。将这一路径组织为异步回调后，客户端就可以在等待远端返回期间继续推进其他 \texttt{lookup}、\texttt{getattr} 或 \texttt{readdir} 请求，从而更好地适应元数据密集型并发负载。
 
-\subsubsection{性能特征}
+\subsubsection{性能开销特征}
 
-理解 FUSE 的性能开销，最直接的方式是把它和内核态文件系统的调用路径做对比。
-对 ext4 这类内核态文件系统，一次 \texttt{stat()} 的路径是：
-应用 $\to$ 内核态系统调用 $\to$ VFS $\to$ ext4 代码 $\to$ 返回用户态——
-除了系统调用自身的一次 ring 0/3 切换外，整条路径都在内核内完成，
-没有任何跨地址空间的数据拷贝。
-而对 FUSE 文件系统，由于业务逻辑在另一个用户态进程里，
-同一次 \texttt{stat()} 必须经过图~\ref{fig:fuse_architecture} 所示的完整往返：
-应用 $\to$ 内核（路由）$\to$ \texttt{/dev/fuse}（请求入队）$\to$ 守护进程（处理）$\to$
-\texttt{/dev/fuse}（响应入队）$\to$ 内核（匹配 ID）$\to$ 应用。
-整个过程里发生\textbf{两次用户态/内核态上下文切换}
-（应用线程睡眠再被唤醒、守护进程从 \texttt{epoll\_wait} 返回再回到 \texttt{write}），
-以及\textbf{两次经 \texttt{/dev/fuse} 的数据拷贝}（请求帧和响应帧各一次）。
-应用线程在整段过程中一直阻塞，真正的计算只发生在守护进程处理阶段——
-剩下的时间基本都花在切换和拷贝上。
+FUSE 的主要代价来自跨越内核态与用户态边界所引入的固定成本。对 ext4 这类内核态文件系统，一次 \texttt{stat()} 基本都在内核中完成；对 FUSE 文件系统，同一次 \texttt{stat()} 至少要经历“应用线程进入内核、请求写入 \texttt{/dev/fuse}、守护进程读取请求、守护进程写回响应、内核唤醒原线程”这一完整往返。与之对应，路径中至少多出了两类固定开销：上下文切换，以及请求帧和响应帧在 \texttt{/dev/fuse} 上的两次数据拷贝。
 
-Vangoor 等人\cite{vangoor2017fuse}对 FUSE 相对内核态文件系统的开销做过系统测量：
-在元数据操作（\texttt{getattr}、\texttt{lookup}）上，
-FUSE 相比对应的内核态文件系统退化约 20\%--60\%——
-因为这类操作本身执行时间极短（微秒级），固定的切换和拷贝开销占比极高；
-数据操作（顺序读写大文件）退化较小，约 5\%--20\%，
-因为此时磁盘或网络 I/O 时间远大于切换开销，分摊下来固定开销的影响被稀释。
-本工作在第四章的分层开销实验中测到，
-RucksFS 从进程内直接调用 RocksDB 的 172\,814\,ops/s，
-到暴露为 FUSE 挂载点后的 2\,313\,ops/s，
-FUSE 层本身只贡献了约 1.5$\times$ 的退化；
-真正的大头（48.6$\times$）来自用户态的 gRPC 网络栈，
-因为 RucksFS 的业务逻辑还涉及跨机器调用 MetadataServer。
-换句话说，对本课题这种元数据密集、且元数据存储在远端服务的系统，
-FUSE 的切换开销是不可消除但也不是主导因素的常数项——
-优化的空间更多在 gRPC 栈和 RocksDB 访问上（第三章和第四章详述）。
+Vangoor 等人\cite{vangoor2017fuse}的系统性测试表明，在 \texttt{lookup}、\texttt{getattr} 等元数据操作上，FUSE 相比内核态文件系统通常会退化 20\%--60\%；在顺序大文件读写场景中，这一退化一般只有 5\%--20\%。原因很直接：元数据操作本身执行时间短，固定边界开销占比更高；当磁盘或网络 I/O 已经主导请求时，这部分固定成本就会被摊薄。
 
+对 RucksFS 这样的分布式原型而言，FUSE 不是主导瓶颈。第四章的分层开销实验将看到，从进程内直接访问 RocksDB 到暴露为 FUSE 挂载点，性能退化远小于客户端到 MetadataServer 的 gRPC 网络路径。因此，FUSE 是不可忽略但并非主导项的常数开销，真正决定上限的仍然是 RPC 往返次数与服务端处理路径长度。
 
 \subsection{RocksDB 存储引擎}
 
-文件系统的元数据——inode 属性、目录项、扩展属性等——天然适合用键值对的形式组织。
-RocksDB\cite{dong2021rocksdb}是 Meta（原 Facebook）基于 Google
-LevelDB\cite{google2011leveldb}开发的嵌入式键值存储引擎，
-针对 SSD 和大规模写入场景做了大量优化。
-MySQL 的 MyRocks 引擎、TiKV、CockroachDB 等生产系统均以 RocksDB 作为底层存储。
+RocksDB\cite{dong2021rocksdb}是 Meta 在 LevelDB\cite{google2011leveldb}基础上发展出的嵌入式键值存储引擎，针对 SSD 场景和高写入负载做了大量工程优化。它已经广泛作为上层系统的持久化组件使用，例如 TiKV、MyRocks 与 CockroachDB。对文件系统元数据这类“小值、高频、随机写密集”的负载而言，RocksDB 提供的 LSM-tree、列族、前缀布隆过滤器和事务接口都具有直接价值。
 
 \subsubsection{LSM-tree 数据结构}
 
-RocksDB 的底层数据结构为 LSM-tree（Log-Structured Merge-tree），
-最早由 O'Neil 等人\cite{oneil1996lsmtree}于 1996 年提出。
-其核心思想是将随机写转化为顺序写，以适应磁盘和 SSD 的 I/O 特性。
-这一思想的渊源可以追溯到更早的日志结构文件系统（Log-Structured File System, LFS）\cite{rosenblum1992lfs}，
-Rosenblum 和 Ousterhout 在 1991 年提出将所有写入——包括元数据——以日志追加的方式顺序写入磁盘，
-LSM-tree 继承了这种"先写后整理"的策略并将其应用于索引结构。
+LSM-tree（Log-Structured Merge-tree）最早由 O'Neil 等人提出\cite{oneil1996lsmtree}。它的核心思想是把随机写转换为顺序写：新写入首先进入内存中的 MemTable，同时追加 WAL；当 MemTable 达到阈值后，再批量刷盘为有序 SST 文件；后台 Compaction 线程随后将不同层级的 SST 文件按键范围合并重写，从而维持读性能和空间利用率。
 
-写入路径如下：数据首先写入内存中的 MemTable（RocksDB 默认使用 SkipList 实现），
-同时追加一条 WAL（Write-Ahead Log）记录以保证持久性。
-当 MemTable 大小达到阈值（默认 64\,MB），它被转换为只读的 Immutable MemTable，
-由后台线程 flush 到磁盘，生成一个有序的 SST（Sorted String Table）文件，
-进入 Level-0 层。新的空 MemTable 随即可用于接收后续写入。
-Level-0 的 SST 文件之间可能存在键范围重叠，当文件数量超过触发阈值
-（默认 4 个）时，后台 Compaction 线程将 Level-0 文件与 Level-1 文件合并排序，
-消除重叠并生成新的 SST 文件。类似的 Compaction 过程在更高层级之间逐层推进，
-每一层的总容量以固定倍率（默认 10 倍）递增。
+对文件系统元数据而言，这一结构有两个直接含义。第一，单条目录项或 inode 属性更新可以先以内存追加的形式进入 MemTable，而不必像 B 树那样立即修改磁盘页。第二，后台合并阶段会引入额外写放大，因此键设计与值大小必须保持克制。RucksFS 正是围绕这两点展开后续设计：目录项和值都保持较小粒度，文件数据则完全绕开 RocksDB，避免大 value 拖垮 Compaction 路径。
 
-读取路径则相反：先查活跃 MemTable，再查 Immutable MemTable，
-然后从 Level-0 开始逐层搜索 SST 文件，直到找到目标键或确认不存在。
-为了加速点查询，每个 SST 文件内部维护索引块和可选的 Bloom 过滤器，
-内存中还维护块缓存（Block Cache）存放频繁访问的数据块。
-
-这种"写入友好"的结构使得 RocksDB 在写入密集场景下表现出色，
-但也带来写放大（同一数据在 Compaction 过程中被反复读写）和
-读放大（查询可能穿透多个层级）的问题。
-RocksDB 提供了 Leveled、Universal、FIFO 三种 Compaction 策略，
-允许使用者根据工作负载特征权衡写放大与空间利用率。
-
-
-\begin{figure}[htbp]
-    \centering
-    \begin{tikzpicture}[
-        sst/.style={draw, minimum width=0.9cm, minimum height=0.55cm, align=center, font=\scriptsize},
-        lbl/.style={font=\footnotesize, text=black!60},
-        arr/.style={->, >=stealth, thick, dashed, black!40}
-    ]
-
-    % MemTable
-    \node[sst, fill=black!8, minimum width=2.2cm] (mem) at (0, 4) {MemTable};
-    \node[lbl, anchor=east] at (-1.5, 4) {内存};
-
-    % Level 0（允许重叠）
-    \node[sst, fill=black!5] (l0a) at (-1, 2.8) {SST};
-    \node[sst, fill=black!5] (l0b) at ( 0, 2.8) {SST};
-    \node[sst, fill=black!5] (l0c) at ( 1, 2.8) {SST};
-    \node[lbl, anchor=east] at (-1.5, 2.8) {L0};
-
-    % Level 1
-    \node[sst, fill=black!5] (l1a) at (-1.5, 1.7) {SST};
-    \node[sst, fill=black!5] (l1b) at (-0.5, 1.7) {SST};
-    \node[sst, fill=black!5] (l1c) at ( 0.5, 1.7) {SST};
-    \node[sst, fill=black!5] (l1d) at ( 1.5, 1.7) {SST};
-    \node[lbl, anchor=east] at (-1.5, 1.7) {L1};
-
-    % Level 2
-    \node[sst, fill=black!5] (l2a) at (-2, 0.6) {SST};
-    \node[sst, fill=black!5] (l2b) at (-1, 0.6) {SST};
-    \node[sst, fill=black!5] (l2c) at ( 0, 0.6) {SST};
-    \node[sst, fill=black!5] (l2d) at ( 1, 0.6) {SST};
-    \node[sst, fill=black!5] (l2e) at ( 2, 0.6) {SST};
-    \node[lbl, anchor=east] at (-1.5, 0.6) {L2};
-
-    % 箭头
-    \draw[arr] (mem.south) -- ++(0, -0.45) node[right, lbl] {Flush};
-    \draw[arr] (0, 2.45)   -- ++(0, -0.35) node[right, lbl] {Compaction};
-    \draw[arr] (0, 1.35)   -- ++(0, -0.35) node[right, lbl] {Compaction};
-
-    % 容量标注
-    \node[lbl] at (3.2, 2.8) {可重叠};
-    \node[lbl] at (3.2, 1.7) {有序不重叠};
-    \node[lbl] at (3.2, 0.6) {容量 $\times 10$};
-
-    \end{tikzpicture}
-    \caption{LSM-tree 分层结构。写入先进入内存 MemTable，写满后 Flush 为 Level~0 的 SST 文件（允许键范围重叠），各层间通过 Compaction 合并排序，每层容量以 10 倍递增。}
-    \label{fig:lsm_tree}
-\end{figure}
-
+RocksDB 的读取路径与此相反：先查活跃 MemTable，再查不可变 MemTable，随后自 Level~0 起逐层搜索 SST 文件。为了降低点查成本，SST 文件内部维护索引块和 Bloom 过滤器；为了降低磁盘访问次数，常用数据块还会进入块缓存。这也解释了为什么文件系统元数据需要强调键的前缀局部性与点查友好性，否则读取路径会在多层 SST 中不断放大。
 
 \subsubsection{Column Family 机制}
 
-Column Family（列族）是 RocksDB 在单个数据库实例内提供的逻辑分区机制，
-设计上受到了 Bigtable\cite{chang2006bigtable}列族概念的启发。
-每个 Column Family 拥有独立的 MemTable、SST 文件集合和 Compaction 配置，
-但共享同一个 WAL 文件。一个 RocksDB 实例可以创建任意数量的 Column Family，
-各自配置不同的压缩算法、block\_size、Bloom 过滤器参数和 Compaction 触发阈值。
+Column Family（列族）是 RocksDB 最有工程价值的特性之一。它允许在同一个数据库实例内维护多组逻辑隔离的键空间，各自拥有独立的 MemTable、SST 集合和压缩配置，但共享 WAL。对文件系统而言，这意味着 inode 基础属性、目录项、增量日志和系统元信息不必挤在同一种访问模式下统一处理。
 
-这种隔离性在文件系统场景中有实际好处。inode 属性数据（几百字节一条）
-以点查询为主，适合配置较小的 block\_size 来减少读放大，并启用全键 Bloom 过滤器。
-目录项数据（父 inode 编号 + 文件名的映射）以前缀扫描为主——给定父目录 inode，
-遍历其下所有子项——适合配置前缀提取器和前缀 Bloom 过滤器。
-将两类数据放在不同的 Column Family 中，可以分别选择最优的配置，
-避免单一配置下的折衷。
+RucksFS 的元数据层正是依赖这一机制实现分层配置。\texttt{inodes} 列族承担点查为主的 inode 属性访问；\texttt{dir\_entries} 列族承担按父目录前缀扫描的目录项访问；\texttt{delta\_entries} 列族承担高 churn 的增量追加与后台折叠；\texttt{system} 列族只保存 inode 分配器等低频元信息。将它们拆开之后，就可以为不同列族分别配置 Bloom 过滤器、前缀提取器和压缩策略，而不必在一个全局配置上折中。
 
-各 Column Family 独立 flush 和 Compaction 还有一个间接好处：
-频繁更新的数据（如文件大小、修改时间戳）产生的 Compaction I/O
-不会干扰相对稳定的目录结构数据。
-同时，同一个 WriteBatch 可以包含对多个 Column Family 的操作，
-并以原子方式提交——跨 Column Family 的原子性由共享 WAL 来保证。
+这种做法同样有代价。列族越多，内存中的 MemTable 和后台 Compaction 状态也越多；跨列族一致性更新则需要借助事务或批量原子提交来完成。RucksFS 最终只保留 4 个列族，就是在“访问模式隔离”与“系统复杂度”之间做出的折中。
 
+\subsubsection{WriteBatch、事务与并发控制}
 
-\begin{figure}[htbp]
-    \centering
-    \begin{tikzpicture}[
-        cf/.style={draw, rounded corners=2pt, minimum width=2.6cm, minimum height=1.8cm,
-                    align=center, font=\small, fill=black!4},
-        wal/.style={draw, rounded corners=2pt, minimum width=9.5cm, minimum height=0.6cm,
-                    align=center, font=\small, fill=black!8},
-        arr/.style={->, >=stealth, thick, black!40}
-    ]
+RocksDB 提供两层与一致性相关的能力。第一层是 WriteBatch，它保证一组 \texttt{put}/\texttt{delete} 操作原子提交；第二层是 TransactionDB，它进一步提供 \texttt{get\_for\_update}、锁等待超时和冲突检测等事务能力。对普通键值业务而言，WriteBatch 往往已经足够；但对文件系统元数据操作而言，单纯的原子写还不够，因为很多错误恰恰发生在“检查条件”和“执行修改”之间。
 
-    % Column Families
-    \node[cf] (cf1) at (0, 2.5)   {\textbf{inodes CF}\\[2pt]{\footnotesize MemTable}\\{\footnotesize SST files}\\{\footnotesize 全键 Bloom}};
-    \node[cf] (cf2) at (3.5, 2.5) {\textbf{dir\_entries CF}\\[2pt]{\footnotesize MemTable}\\{\footnotesize SST files}\\{\footnotesize 前缀 Bloom}};
-    \node[cf] (cf3) at (7, 2.5)   {\textbf{delta\_entries CF}\\[2pt]{\footnotesize MemTable}\\{\footnotesize SST files}\\{\footnotesize 前缀 Bloom}};
+以 \texttt{create(parent, name)} 为例，仅靠 WriteBatch 可以把“写入新 inode”和“插入新目录项”做成原子提交，但如果在提交前没有锁住同名目录项键，就无法阻止另一个并发事务同时创建同名文件。RucksFS 因此采用 TransactionDB：先用 \texttt{get\_for\_update} 锁定相关 inode 键和目录项键，再在同一事务中执行条件检查与批量更新，最后通过事务提交保证跨列族修改的一致性。
 
-    % Shared WAL
-    \node[wal] (wal) at (3.5, 0.4) {共享 Write-Ahead Log（WAL）};
+从并发控制角度看，这实际上对应悲观并发控制（Pessimistic Concurrency Control, PCC）的思路。目录是否为空、目标名字是否存在、某个 inode 是否仍可删除，这些判断只要脱离事务边界，就会暴露 TOCTOU（Time-of-Check to Time-of-Use）窗口。RocksDB TransactionDB 提供的 \texttt{get\_for\_update} 允许调用方在读取键时直接获取排他锁，使“检查条件”和“执行修改”能够落在同一事务上下文内。
 
-    % Connections
-    \draw[arr] (cf1.south) -- (cf1 |- wal.north);
-    \draw[arr] (cf2.south) -- (cf2 |- wal.north);
-    \draw[arr] (cf3.south) -- (cf3 |- wal.north);
+这一机制的价值不只是“加锁”，更在于锁粒度足够细。RucksFS 依赖 RocksDB 的行级锁接口，把冲突范围限制在具体的 inode 键和目录项键上，而不是锁整个目录树。例如，\texttt{create(parent, name)} 主要锁定目标目录项键及必要的父目录状态，\texttt{rename} 则锁定源目录项、目标目录项和相关 inode。只有真正共享这些键的并发操作才会彼此阻塞。为了进一步降低死锁风险，系统还需要规定统一的加锁顺序；RucksFS 在后续实现中采用按 inode 编号排序后依次加锁的策略。
 
-    \end{tikzpicture}
-    \caption{RocksDB 列族机制。每个列族拥有独立的 MemTable、SST 文件和 Bloom 过滤器配置，共享同一个 WAL 以保证跨列族原子写入。}
-    \label{fig:column_family}
-\end{figure}
-
-
-\subsubsection{WriteBatch 与事务支持}
-
-WriteBatch 是 RocksDB 的批量写入接口。
-多个 \texttt{put()}、\texttt{delete()}、\texttt{merge()} 操作可以被收集到
-同一个 WriteBatch 中，随后一次性提交。
-从持久化角度看，整个 WriteBatch 只产生一次 WAL 写入和一次 \texttt{fsync}，
-相比逐条提交将 I/O 次数降低了一到两个数量级。
-从原子性角度看，WriteBatch 中的所有操作要么全部对读取者可见，
-要么全部不可见，不存在部分提交的中间状态。
-
-单纯的 WriteBatch 无法处理"读取—判断—修改"模式的操作，
-因为在读取和写入之间，其他线程可能修改了相同的键。
-RocksDB 的 TransactionDB 在 WriteBatch 基础上增加了行级锁机制。
-打开数据库时指定 \texttt{TransactionDBOptions}，
-即可使用 \texttt{begin\_transaction()} 创建事务对象。
-事务内调用 \texttt{get\_for\_update(key)} 读取某个键时，
-TransactionDB 对该键加排他锁，阻止其他事务修改同一键，
-直到当前事务 \texttt{commit()} 或 \texttt{rollback()}。
-
-TransactionDB 同时支持两种并发控制模式：
-悲观模式（\texttt{TransactionDB}）在读取时即加锁；
-乐观模式（\texttt{OptimisticTransactionDB}）在提交时才检测冲突。
-文件系统元数据操作——特别是 \texttt{mkdir}、\texttt{rename}
-等涉及父目录并发修改的操作——冲突概率相对较高，
-悲观模式通过提前加锁避免了回滚的浪费。
-
-
-\begin{figure}[htbp]
-    \centering
-    \begin{tikzpicture}[
-        box/.style={draw, rounded corners=2pt, minimum width=2.8cm, minimum height=0.7cm,
-                     align=center, font=\small, fill=black!4},
-        arr/.style={->, >=stealth, thick},
-        lbl/.style={font=\footnotesize, text=black!60}
-    ]
-
-    % 三个阶段
-    \node[box] (collect)  at (0, 0)   {收集操作};
-    \node[box] (wal)      at (4, 0)   {写入 WAL};
-    \node[box] (memtable) at (8, 0)   {应用到 MemTable};
-
-    \draw[arr] (collect)  -- (wal);
-    \draw[arr] (wal)      -- (memtable);
-
-    % 子标注
-    \node[lbl, text width=2.5cm, align=center] at (0, -0.9)
-        {Put A, Put B,\\Delete C, Merge D};
-    \node[lbl, text width=2.5cm, align=center] at (4, -0.9)
-        {单次 \texttt{fsync}\\持久化保证};
-    \node[lbl, text width=2.5cm, align=center] at (8, -0.9)
-        {所有操作\\原子可见};
-
-    \end{tikzpicture}
-    \caption{WriteBatch 执行流程。多个 put/delete 操作被收集到同一个批次中，通过一次 WAL 写入持久化，再原子地应用到 MemTable——全部可见或全部不可见。}
-    \label{fig:write_batch}
-\end{figure}
-
+这一点也是 RocksDB 相比早期 LevelDB 型方案更适合文件系统元数据的原因。TableFS\cite{ren2013tablefs}验证了 KV 元数据的可行性，但它并没有原生事务接口，因此很多并发正确性问题只能放到上层锁中解决。本文后续对目录操作的设计，正是建立在 RocksDB 已经提供悲观事务能力这一事实上。
 
 \subsubsection{Bloom 过滤器与前缀迭代器}
 
-RocksDB 在每个 SST 文件中嵌入 Bloom 过滤器\cite{rocksdb2023wiki}，
-用于在点查询时快速判断目标 key 是否可能存在于该文件中。
-命中否定结果时可以跳过整个 SST 文件，避免无效的磁盘读取。
-RucksFS 的 \texttt{inodes} 列族配置了全键 Bloom 过滤器（10\,bit/key），
-用于加速 \texttt{getattr} 等点查操作。
+Bloom 过滤器用于快速判断某个键是否“不存在于某个 SST 文件中”，从而避免无谓的磁盘访问；前缀迭代器则要求一组具有共同前缀的键在字节序上连续排列，以便对同一前缀做局部扫描。对文件系统目录项而言，这两个特性组合起来尤其关键。
 
-除全键 Bloom 外，RocksDB 还提供前缀 Bloom 过滤器（Prefix Bloom Filter），
-配合 \texttt{prefix\_extractor} 选项使用。
-指定前缀提取函数后，同一前缀下的所有 key 共享一个 Bloom 条目；
-配合 \texttt{prefix\_same\_as\_start} 选项，
-迭代器在扫描完当前前缀后自动终止。
-
-前缀迭代器直接决定了目录遍历的执行效率。
-RucksFS 的 \texttt{dir\_entries} 列族将目录项键设计为"父 inode 编号（大端序 8 字节）+ 文件名"的复合格式，
-前缀提取器设为 \texttt{FixedPrefix(9)}（1 字节类型前缀 + 8 字节 inode）。
-\texttt{readdir} 操作通过前缀迭代器只扫描属于目标目录的条目，
-时间复杂度与该目录的条目数成正比，而非与整个数据库规模相关。
+若把目录项键设计为“父 inode + 文件名”的拼接形式，同一父目录下的全部子项就天然共享固定前缀。这样一来，\texttt{lookup(parent, name)} 可以退化为点查，\texttt{readdir(parent)} 则可以退化为前缀扫描。RucksFS 之所以采用大端序编码，也是为了让 inode 的数值顺序与字节序保持一致，从而使前缀范围查询在 RocksDB 中可以直接依赖字节比较器实现。第三章讨论键编码时，将在这一基础上给出更具体的映射方案。
 
 \subsection{POSIX 文件系统语义}
 
-POSIX\cite{ieee2017posix} 是本工作的语义合约。
-RucksFS 虽然用 Rust 写、跑在用户态、元数据放在 RocksDB，
-但对上层应用它必须"看起来像一个符合 POSIX 的文件系统"——否则依赖 POSIX 假设的工具
-（cp、rsync、make、Git、sqlite\ldots）会在不起眼的细节上出错。
-本节梳理与 RucksFS 设计直接相关的几组 POSIX 约束，
-后续第三章的许多设计取舍都要回到这些语义要求上来理解。
+一个文件系统只要对外暴露 POSIX 接口，就不能只关心“数据能否读写”，还必须遵守一整套关于 inode、目录结构、权限位和错误码的约束。RucksFS 的目标并不是实现 POSIX 的全部边角功能，而是在普通文件、目录和元数据操作范围内尽量与 Linux 用户空间程序的预期保持一致。
 
 \subsubsection{inode 模型与目录结构}
 
-POSIX 标准定义了 Unix 系文件系统的基本抽象模型。
-每个文件系统对象（普通文件、目录、符号链接、字符/块设备、FIFO、套接字等）由一个 inode（index node）唯一标识。
-inode 编号在同一文件系统内全局唯一，存储了对象的全部元数据信息：
-文件类型与权限模式（\texttt{mode}，16 位整数，其中高 4 位编码类型、低 12 位编码权限及 setuid/setgid/sticky）、
-所有者和所属组（\texttt{uid}/\texttt{gid}，各 32 位）、
-文件大小（\texttt{size}，64 位字节数，对目录特指占用字节，不是条目数）、
-硬链接计数（\texttt{nlink}）、
-访问时间（\texttt{atime}）、修改时间（\texttt{mtime}）、
-状态变更时间（\texttt{ctime}，注意与 mtime 的区分——mtime 反映文件内容变化，
-ctime 反映 inode 元数据本身变化，包括 chmod、chown、rename 等）。
+POSIX 文件系统以 inode 作为对象的持久标识。目录并不是路径字符串的简单集合，而是“名字到 inode”的映射表。路径解析的本质，是从根目录开始逐级查找目录项，再根据目录项拿到下一层 inode。普通文件、目录和符号链接在这一模型中共享同一种基本身份表示，只是 \texttt{mode}、\texttt{nlink} 和数据解释方式不同。
 
-目录是一种特殊文件，其数据内容是一组 (名称, inode 编号) 的映射关系，
-即目录项（directory entry, dentry）。
-同一个 inode 可以被多个目录项引用，这就是硬链接机制。
-inode 的 \texttt{nlink} 字段记录指向它的硬链接数量。
-当 \texttt{nlink} 降为 0 且没有进程持有该文件的打开文件描述符时，
-文件系统回收该 inode 及其数据块。
-对目录而言，\texttt{nlink} 有更特殊的含义：一个空目录的 \texttt{nlink} 初始为 2（
-自身的目录项 + 自身下的 \texttt{.}），每增加一个子目录再 +1（子目录下的 \texttt{..} 指回来）。
-这一看似冗余的规则是 POSIX 明文要求，工具如 \texttt{find} 会依赖 \texttt{nlink-2}
-推算子目录数量来做剪枝，若实现不当会使这些工具效率显著下降。
-
-根目录是整个文件系统命名空间的起点，通常使用 inode 编号 1 或 2（取决于具体实现）。
-每个目录至少包含两个特殊条目：\texttt{.}（指向自身）和 \texttt{..}（指向父目录）。
-路径解析从根目录开始，逐级在目录项中查找下一个分量的 inode 编号，
-直到到达目标对象或遇到错误（如中间某级目录不存在）。
-这个逐级查找过程在 FUSE 框架中对应 \texttt{lookup} 回调。
-路径解析的每一步都要做权限检查——沿途每级目录都必须有执行位（\texttt{x}）——
-因此深层路径的解析成本是 $O(\text{depth})$。
-RucksFS 依赖内核 \texttt{default\_permissions} 完成这层检查，
-用户态只负责返回正确的 \texttt{mode}、\texttt{uid}、\texttt{gid}。
+这一定义对 RucksFS 有两点直接影响。首先，路径树不应该直接存成“全路径字符串到内容”的映射，否则 \texttt{rename} 会演变为对整棵子树的递归重写；其次，目录项和值需要明确区分“目录结构本身”和“inode 属性本身”，否则 \texttt{lookup}、\texttt{readdir} 和 \texttt{getattr} 很难获得清晰的访问路径。第三章中的“边为中心”键编码设计，本质上就是把目录树分解为“父目录 inode + 子名字”这类基本边关系。
 
 \subsubsection{核心文件操作语义}
 
-POSIX 标准对文件操作的行为有严格规定，
-FUSE 文件系统必须正确实现这些语义才能被上层应用正常使用。
-以下是几个关键操作的语义约束，也是 RucksFS 必须严格满足的合约。
-
-\texttt{create} 在指定目录下创建一个新的普通文件。
-系统需要分配一个未使用的 inode 编号、初始化 inode 元数据
-（\texttt{nlink} 设为 1，\texttt{size} 设为 0，\texttt{mode} 按参数与 umask 的位运算结果设置），
-并在父目录中插入一条目录项。
-父目录的 \texttt{mtime} 和 \texttt{ctime} 需要同步更新。
-如果同名文件已存在，返回 \texttt{EEXIST} 错误；
-如果调用时带 \texttt{O\_EXCL} 但文件已存在，同样返回 \texttt{EEXIST}。
-所有这些子步骤必须对其他进程表现为原子整体——不能观察到"目录项已出现但 inode 属性未写"之类的中间态。
-RucksFS 通过单次 RocksDB \texttt{WriteBatch} 提交来保证这一原子性（详见第三章）。
-
-\texttt{unlink} 从指定目录中删除一个目录项，
-并将对应 inode 的 \texttt{nlink} 减 1。
-如果 \texttt{nlink} 降至 0 \emph{且} 没有进程持有该文件的打开文件描述符，文件数据被释放；
-\textbf{若仍有 fd 被打开，inode 和数据必须保留直到最后一个 fd 关闭}。
-这一语义是 Unix 系统编程的常用技巧——
-应用可以在 \texttt{open} 后立即 \texttt{unlink}，得到一个只被本进程可见的临时文件，
-进程退出时系统自动回收。
-为正确实现该语义，文件系统必须维护一个"待删除但还有 fd 引用"的 inode 集合；
-RucksFS 对应的数据结构是 \texttt{pending\_deletes}（第三章第五节）。
-\texttt{unlink} 只能用于非目录对象——
-删除空目录需要使用 \texttt{rmdir}，
-它会额外检查目录是否为空（仅包含 \texttt{.} 和 \texttt{..}）。
-\texttt{unlink} 对一个目录调用时返回 \texttt{EISDIR}，
-\texttt{rmdir} 对一个非空目录调用时返回 \texttt{ENOTEMPTY}。
-
-\texttt{rename} 将一个目录项从源位置移动到目标位置。
-POSIX 要求 \texttt{rename} 是原子操作：
-其他进程要么看到旧状态，要么看到新状态，
-不应观察到中间的不一致状态。
-如果目标位置已有同名文件，\texttt{rename} 先隐式 \texttt{unlink} 目标文件，
-这一步同样必须与移动操作原子一体。
-跨目录的 \texttt{rename} 还需同时更新源父目录和目标父目录的元数据，
-并检测是否构成目录循环——例如把 \texttt{/a} 重命名为 \texttt{/a/b}
-应返回 \texttt{EINVAL}。
-Linux 5.x 起还支持 \texttt{renameat2()} 系统调用的 \texttt{RENAME\_EXCHANGE} 模式，
-原子交换两个路径所指向的 inode，这对 \texttt{sqlite}、\texttt{vim} 等需要"写入临时文件后原子替换"的工具有价值；
-RucksFS 目前支持标准的 \texttt{rename}，\texttt{RENAME\_EXCHANGE} 留作后续工作。
-
-\texttt{readdir} 遍历一个目录的所有条目，
-返回 (名称, inode 编号, 文件类型) 三元组的列表。
-POSIX 对遍历过程中的一致性保证较弱——
-允许在遍历期间新增或删除的条目可见性不确定。
-但有两项弱一致的不变式仍须保证：
-一是同一 \texttt{opendir} 会话内的同一条目不会被读取两次；
-二是在 \texttt{opendir} 前就存在且未被删除的条目一定会被读取一次。
-RucksFS 的 \texttt{readdir} 实现通过在 RocksDB 上做前缀迭代（见 \ref{sec:bloom-prefix} 节），
-并在迭代开始时建立快照来满足这两项不变式。
-
-\texttt{open} 与 \texttt{release}（对应 \texttt{close}）之间维护了一份文件会话状态。
-\texttt{open} 返回的文件描述符在同一进程内被 \texttt{dup} 后，
-两个 fd 共享同一个会话（即 offset、访问模式等），而不是独立会话——
-POSIX 严格区分"文件描述符"和"文件描述"：
-前者是进程表中的条目，后者是内核中的会话结构。
-FUSE 把这份会话暴露为 \texttt{open} 回调返回的 \texttt{fh}（file handle），
-\texttt{release} 只在该会话的最后一个 fd 被关闭时才触发。
-RucksFS 借此 handle 计数判断 \texttt{pending\_deletes} 中的 inode 能否真正回收。
-
-\texttt{fsync} 和 \texttt{fdatasync} 要求将已写入的数据与元数据持久化到稳定存储，
-系统调用返回时必须保证崩溃后数据仍在。
-对 RucksFS 这一约束转化为：调用 MetadataServer 的 \texttt{fsync} 时必须触发
-RocksDB 的 WAL \texttt{fsync} 和 DataServer 的 \texttt{fdatasync}，
-两者任一失败都应返回 \texttt{EIO}。
+\texttt{create}、\texttt{mkdir}、\texttt{unlink}、\texttt{rmdir} 和 \texttt{rename} 是本文最关心的 POSIX 操作。它们共同的难点不在于“写几条记录”，而在于必须同时满足若干一致性条件。表~\ref{tab:posix_ops}对这些操作的核心约束做了归纳。
 
 \begin{table}[htbp]
     \centering
-    \caption{与 RucksFS 实现直接相关的 POSIX 错误码约定}
-    \label{tab:posix-errno}
-    \begin{tabular}{llp{6.8cm}}
+    \caption{核心 POSIX 目录操作的语义约束}
+    \label{tab:posix_ops}
+    \begin{tabular}{llp{7.2cm}}
     \toprule
-    \textbf{errno} & \textbf{常量} & \textbf{触发场景} \\
+    \textbf{操作} & \textbf{典型返回} & \textbf{关键语义约束} \\
     \midrule
-    2  & \texttt{ENOENT}    & 路径中某级不存在；\texttt{lookup}/\texttt{unlink} 找不到目标 \\
-    13 & \texttt{EACCES}    & 权限不足；由 \texttt{default\_permissions} 代理返回 \\
-    17 & \texttt{EEXIST}    & \texttt{create}/\texttt{mkdir} 时目标已存在 \\
-    20 & \texttt{ENOTDIR}   & 以非目录作为路径中间分量 \\
-    21 & \texttt{EISDIR}    & 对目录调用 \texttt{unlink} 或 \texttt{write} \\
-    22 & \texttt{EINVAL}    & \texttt{rename} 形成循环、参数非法等 \\
-    28 & \texttt{ENOSPC}    & 底层存储空间不足 \\
-    30 & \texttt{EROFS}     & 对只读挂载执行写操作 \\
-    39 & \texttt{ENOTEMPTY} & \texttt{rmdir} 时目录非空 \\
-    11 & \texttt{EAGAIN}    & PCC 事务冲突，本文内部约定（见 \ref{sec:pcc}）\\
+    \texttt{create} & 成功或 \texttt{EEXIST} & 同一父目录下名字必须唯一；普通文件创建会更新父目录的 \texttt{mtime}/\texttt{ctime} \\
+    \texttt{mkdir} & 成功或 \texttt{EEXIST} & 新建对象类型为目录；除更新时间戳外，还会使父目录 \texttt{nlink} 增加 1 \\
+    \texttt{unlink} & 成功或 \texttt{ENOENT}/\texttt{EISDIR} & 删除的是普通文件目录项；会更新父目录时间戳；若文件仍被打开，则目录项删除与对象回收需要分离 \\
+    \texttt{rmdir} & 成功或 \texttt{ENOTEMPTY} & 只能删除空目录；成功后父目录 \texttt{nlink} 减少 1，并更新 \texttt{mtime}/\texttt{ctime} \\
+    \texttt{rename} & 成功或相关错误码 & 源目录项删除与目标目录项建立必须原子可见；跨父目录移动目录时需要同步调整新旧父目录 \texttt{nlink} \\
     \bottomrule
     \end{tabular}
 \end{table}
 
-表~\ref{tab:posix-errno} 汇总了 RucksFS 必须正确返回的几个核心错误码。
-pjdfstest 测试套件中 8\,000 余条用例里的绝大多数，实质是在验证这些错误码
-在各种边界输入下能否按 POSIX 规定触发。
-第四章 \ref{sec:experiments} 节的 POSIX 合规性测试结果表明 RucksFS 在 8 类操作上 100\% 通过，
-另外 4 类（link/symlink/mkfifo/mknod）由于对应的 inode 类型尚未实现而未通过。
+首先，目录项相关操作需要保持名字唯一。若同一父目录下已经存在名为 \texttt{foo} 的目录项，再次 \texttt{create(parent, "foo")} 就必须返回 \texttt{EEXIST}，而不能出现两个同名条目。其次，\texttt{rmdir} 只能删除空目录；若目标目录仍含子项，就必须返回 \texttt{ENOTEMPTY}。再次，\texttt{rename} 要求原子可见：外部观察者不能看到“旧名字已经删掉，但新名字尚未建立”的中间态。
+
+时间戳和链接计数同样属于语义的一部分。普通文件的 \texttt{create} 和 \texttt{unlink} 会更新父目录的 \texttt{mtime}/\texttt{ctime}；\texttt{mkdir} 和 \texttt{rmdir} 除了更新时间戳之外，还会改变父目录的 \texttt{nlink}。如果这些字段在高并发下仍然采用读改写模式，热点目录很快就会成为争用中心。这也是本文引入增量更新机制的直接动机之一。
+
+最后，打开文件与删除目录项之间的关系不能被忽略。POSIX 允许一个文件在目录项被移除后继续被已打开的句柄访问，直到最后一个句柄关闭为止。这要求元数据层区分“名字是否还在目录里”和“对象是否还能被已有句柄引用”两个状态。RucksFS 在这一点上采用延迟删除策略：当 \texttt{nlink} 降到 0 但文件仍被打开时，只删除目录项而不立即清除数据，待 \texttt{release} 发生后再完成最终删除。
 
 \subsubsection{权限模型}
 
-Unix 权限模型为每个 inode 关联三组 rwx（读/写/执行）权限位，
-分别对应文件所有者、所属组和其他用户，编码在 \texttt{mode} 字段的低 9 位中；
-加上 setuid、setgid、sticky 三位特殊权限，共 12 位。
-权限检查发生在每次访问时，由内核 VFS 依据当前进程的 \texttt{euid}/\texttt{egid} 完成。
-FUSE 框架提供了 \texttt{default\_permissions} 挂载选项，
-启用后权限检查完全由内核 VFS 层代理完成，
-用户态守护进程只需在 \texttt{getattr} 中正确返回 \texttt{mode}、\texttt{uid}、\texttt{gid} 即可；
-对于沿路径遍历时的 \texttt{x} 权限检查、读目录时的 \texttt{r} 权限检查、
-写文件时的 \texttt{w} 权限检查，用户态无需介入。
-配合 \texttt{allow\_other} 选项，非挂载者的用户也可访问文件系统。
-RucksFS 启用了这两个选项，将权限检查完全委托给内核，
-既降低了实现复杂度，又保证了行为与内核原生文件系统一致。
+POSIX 权限模型由 \texttt{uid}、\texttt{gid} 和 \texttt{mode} 三部分组成。FUSE 文件系统既可以在用户态自行实现访问控制，也可以把常规权限判断交给 Linux VFS。RucksFS 采用的是后一种方式：挂载时启用 \texttt{default\_permissions}，由内核在请求进入用户态之前完成基础权限检查。这样做的好处是，常规的 owner/group/other 语义不必在 FUSE 守护进程中重复实现；用户态更关注元数据事务和存储路径本身。
 
-
-\subsection{悲观并发控制}
-
-文件系统的元数据操作天然面临并发竞争。多个进程可能同时在同一目录下创建文件、
-删除文件或执行 rename。如果不加以控制，并发操作可能导致链接计数错误、
-目录项残留或孤儿 inode 等一致性问题。
-
-\subsubsection{PCC 基本原理}
-
-悲观并发控制（Pessimistic Concurrency Control, PCC）的策略是"先加锁，再操作"。
-事务在访问数据之前即获取排他锁，持有锁期间其他事务对同一数据的访问被阻塞，
-直到锁释放。这种方式牺牲了一定的并行度，但换来了确定性的执行结果——
-事务一旦开始，就不会因为冲突而被迫回滚。
-
-与之对应的乐观并发控制（OCC）在事务执行期间不加锁，
-仅在提交时检测冲突，若有冲突则回滚并重试。
-OCC 在冲突率较低的场景下性能更好，但文件系统元数据操作（特别是同一目录下的并发创建和删除）
-冲突概率较高，OCC 会导致大量无效回滚。
-以 \texttt{mkdir} 为例：多个线程同时在同一父目录下创建子目录，
-每次操作都需要检查子目录名是否已存在、插入目录项、更新父目录时间戳，
-这些操作之间存在真实的写-写冲突。
-PCC 通过在读取父目录 key 时就加锁，避免了这类无效计算。
-
-\subsubsection{行级锁与事务隔离}
-
-RocksDB TransactionDB 采用的锁粒度为单个 key——
-可以视为关系数据库行级锁在键值存储中的等价物。
-调用 \texttt{get\_for\_update(key)} 时，TransactionDB 对该 key 加排他锁。
-如果另一个事务已持有同一 key 的锁，当前事务进入等待状态。
-等待超时后（可配置，默认 1000\,ms），返回锁超时错误，调用方可选择重试或放弃。
-
-锁表存储在内存中的哈希表里，不持久化到磁盘。
-按 key 的哈希值分片（默认 16 个分片），减少了锁表本身的访问竞争。
-当事务 \texttt{commit()} 或 \texttt{rollback()} 时，持有的所有锁被释放。
-
-这种机制提供的隔离级别类似于 Read Committed：
-事务读取到的数据是已提交的最新版本，不会看到其他未提交事务的中间结果。
-结合排他锁，对于"读取—判断—修改"模式的操作，
-从加锁到提交之间不会有其他事务修改同一 key。
-
-在文件系统场景中，锁的粒度足够细。
-一个 \texttt{create} 操作通常只需锁定父目录的目录项 key（检测同名、插入新条目）
-和 inode 分配计数器 key（原子递增 inode 编号）。
-如果两个进程同时在同一目录下创建不同名称的文件，
-它们锁定的目录项 key 不同，可以并行执行。
-只有名称相同时，后到的事务才会在 \texttt{get\_for\_update} 处阻塞。
-
-\subsubsection{TOCTOU 竞态问题}
-
-TOCTOU（Time-of-Check to Time-of-Use）是并发编程中一类常见的竞态条件。
-程序先检查某个条件是否成立，再基于检查结果执行操作，
-但在检查和操作之间存在时间窗口，其他线程可能在此窗口内改变了条件，
-导致操作基于过期的信息执行。
-
-以 \texttt{rmdir} 操作为例。按照 POSIX 语义，\texttt{rmdir} 只能删除空目录。
-一个朴素的实现分两步执行：
-第一步，遍历目标目录的条目列表，确认目录为空；
-第二步，删除该目录的 inode 和父目录中的对应条目。
-如果这两步不在同一个原子事务内完成，就存在如下竞态：
-线程 A 在第一步确认目录为空后、第二步执行前，
-线程 B 在该目录下创建了新文件。
-随后线程 A 执行第二步删除目录——一个非空目录被错误地删除，
-其中的文件变成了无法通过任何路径访问的孤儿 inode。
-
-类似的 TOCTOU 风险存在于多个元数据操作中。
-\texttt{rename} 在检查目标是否存在和执行移动之间有窗口；
-\texttt{create} 在检查文件名不存在和插入目录项之间也有竞态；
-\texttt{unlink} 在读取 \texttt{nlink} 和执行减一操作之间同样存在并发修改的可能。
-
-解决 TOCTOU 的核心方法是将检查和操作纳入同一个原子事务。
-在 RocksDB TransactionDB 的 PCC 模式下，
-通过 \texttt{get\_for\_update} 在读取目录项时即加锁，
-保证从检查到修改的整个过程中，其他事务无法插入或删除该目录的条目。
-检查和操作之间的时间窗口被排他锁所覆盖，竞态条件随之消除。
-
-回到 \texttt{rmdir} 的例子：事务开始后，
-对目标目录的子条目前缀范围调用 \texttt{get\_for\_update}，确认为空且阻止并发插入，
-再执行实际的删除操作，最后 \texttt{commit()} 原子提交。
-如果在锁定过程中发现目录非空，事务直接回滚并返回 \texttt{ENOTEMPTY}。
-整个过程中，检查和删除在同一个锁保护范围内完成。
+当然，这并不意味着元数据层可以忽略权限字段。文件创建和目录创建仍然必须正确记录 \texttt{uid}、\texttt{gid} 和 \texttt{mode}，否则内核后续的权限判断就失去依据。也正因如此，客户端在处理 \texttt{create} 和 \texttt{mkdir} 时会把请求发起者的身份信息一并传递给元数据服务。
 
 \subsection{本章小结}
 
-本章介绍了 RucksFS 所依赖的四项基础技术及其在本课题中的具体使用方式。
-FUSE 提供了用户态文件系统的开发框架，开发者通过实现 lookup、create、readdir 等回调接口即可构建完整的文件系统，RucksFS 基于 fuse3 的异步模型开发。FUSE 的上下文切换开销（元数据操作退化 20\%--60\%）是可接受的常数因子，不影响本课题对存储层设计的验证。
-RocksDB 的 LSM-tree 结构天然适合写入密集的元数据负载；Column Family 将不同类型的元数据隔离配置，WriteBatch 保证跨列族的原子写入，TransactionDB 提供行级锁的并发控制能力。Bloom 过滤器和前缀迭代器则分别加速了点查和目录遍历操作。
-POSIX 语义定义了 create、unlink、rename、readdir 等操作的行为约束，这些约束直接决定了存储层的事务边界——rename 必须原子，unlink 必须正确维护链接计数。权限检查通过 \texttt{default\_permissions} 挂载选项委托给内核。
-悲观并发控制通过在操作前加锁，将 TOCTOU 窗口归零。对于文件系统元数据这种冲突概率较高的场景，PCC 比乐观方案更经济。RucksFS 在此基础上实现了按 inode ID 排序加锁、冲突自动重试等具体策略。
+本章梳理了 RucksFS 设计所依赖的三组基础事实。FUSE 提供了把 Linux VFS 请求转交给用户态客户端的标准机制；RocksDB 提供了适合元数据工作负载的 LSM-tree、列族以及事务与并发控制接口；POSIX 语义明确规定了目录操作、链接计数、时间戳和权限模型的行为边界。基于这些基础，下一章将转入 RucksFS 的具体系统设计与实现。

@@ -1,879 +1,363 @@
 \section{系统设计与实现}
 \label{sec:design}
 
-RucksFS 是一个基于 RocksDB 的用户态 FUSE 文件系统，使用 Rust 编写。系统将全部文件系统元数据——包括 inode 属性、目录项和增量操作日志——持久化到一个 RocksDB 实例中，文件数据则存放在独立的原始磁盘存储中。这种分离使得元数据引擎可以针对小粒度随机读写做专门优化，而数据通路则可以绕过键值存储的额外开销。
+RucksFS 是一个采用 Rust 实现的分布式文件系统原型。系统以 FUSE 客户端作为 POSIX 入口，以 MetadataServer 负责命名空间与 inode 元数据，以 DataServer 负责文件数据 I/O，并通过 gRPC 连接客户端与服务端。设计的关键不在于把“文件系统功能”简单拆成若干模块，而在于围绕元数据关键路径组织三件事：目录项如何映射到 RocksDB 键空间，目录修改如何在并发下保持正确性，以及客户端如何在元数据服务与数据服务之间完成协调。
+
+\subsection{设计目标}
+
+本文实现 RucksFS 时遵循了四个设计目标。
+
+第一，客户端必须提供标准 POSIX 访问入口。应用程序通过普通的 \texttt{open()}、\texttt{rename()}、\texttt{unlink()} 等系统调用访问挂载点，而不需要为 RucksFS 单独改写接口或调用方式。
+
+第二，元数据与文件数据在服务层显式分离。这不仅因为二者的访问模式不同，也因为本文的研究重点本来就放在元数据路径上。元数据更新涉及目录项组织、inode 属性维护、事务提交与并发控制，更适合放在 MetadataServer 中围绕 RocksDB 做针对性设计；文件数据访问则主要表现为按偏移读写与刷盘，更接近顺序 I/O 路径，交由 DataServer 单独处理更容易把问题边界划清。这样的拆分可以避免数据读写细节干扰本文对元数据组织方式的分析。
+
+第三，目录操作必须在并发下保持可解释的正确性。名字唯一、目录非空检查、跨目录重命名原子性以及延迟删除等语义，都不能依赖“通常不会冲突”这样的经验假设，而需要在事务边界内被明确保证。
+
+第四，系统应尽量把元数据性能瓶颈集中到少数可分析、可优化的关键路径上，例如目录项查找、事务提交与父目录属性更新，而不是把大量文件系统语义完全外包给通用数据库后，再把性能与正确性问题留给黑盒后端。
 
 \subsection{系统整体架构}
 \label{sec:architecture}
 
-\subsubsection{分层架构设计}
-
-系统采用五层结构，自上而下分别是应用层、内核 VFS 层、客户端层、服务层和存储层。应用程序通过标准 POSIX 系统调用（open、read、write 等）访问挂载点，Linux 内核的 VFS 子系统将请求经由 FUSE 模块转发到用户空间。客户端层接收 FUSE 请求并将其拆解为两类操作：元数据操作（如 lookup、create、unlink）被发送到 MetadataServer，文件 I/O 操作（如 read\_data、write\_data）被路由到 DataServer。两条通路在存储层汇合——前者持久化到 RocksDB，后者写入原始磁盘文件。
-
-为什么选择将元数据和数据在服务层就做物理分离？一个直接的原因是 RocksDB 对大 value 的处理并不理想。当 value 超过几 KiB 时，LSM-Tree 的 compaction 开销会急剧增长\cite{dong2021rocksdb}。将文件数据排除在 RocksDB 之外，可以使 LSM-Tree 的写放大保持在可控水平。另一个原因是两类操作的并发模式截然不同：元数据操作需要事务保护（例如 rename 涉及多键原子修改），而数据 I/O 只需要简单的偏移量定位和 pread/pwrite 调用。将它们放在同一个事务框架下既不必要，也会损害数据通路的吞吐量。
+RucksFS 的运行时由三个主要角色组成：挂载在客户端机器上的 FUSE 客户端、负责命名空间与 inode 状态的 MetadataServer，以及负责文件内容读写的 DataServer。客户端接收来自内核的 FUSE 请求后，并不会把所有操作都转发到同一后端，而是先经过本地的 \texttt{VfsCore} 路由层，再决定请求属于元数据面还是数据面。图~\ref{fig:overall_arch}给出了系统的整体请求路径。
 
 \begin{figure}[htbp]
     \centering
     \begin{tikzpicture}[
-        box/.style={draw, rounded corners=2pt, minimum width=4.8cm, minimum height=0.7cm,
-                     align=center, font=\small, fill=black!4},
-        bigbox/.style={draw, rounded corners=2pt, minimum width=10.5cm, minimum height=0.7cm,
-                        align=center, font=\small, fill=black!4},
-        arr/.style={->, >=stealth, thick, black!50},
-        lbl/.style={font=\scriptsize, text=black!50}
+        font=\small,
+        box/.style={draw, rounded corners=2pt, fill=black!5, align=center, minimum width=2.45cm, minimum height=0.95cm},
+        arr/.style={->, >=stealth, thick}
     ]
-    % 上层（全宽）
-    \node[bigbox] (app)     at (0, 4.5) {Application};
-    \node[bigbox] (vfs)     at (0, 3.3) {Linux Kernel VFS + FUSE 内核模块};
-    \node[bigbox] (fuse)    at (0, 2.1) {FuseClient（fuse3 / tokio）};
-    \node[bigbox] (vfscore) at (0, 0.9) {VfsCore（VfsOps trait）};
-    % 分叉层
-    \node[box] (meta)  at (-2.85, -0.4) {MetadataServer\\[-1pt]{\scriptsize MetadataOps}};
-    \node[box] (data)  at (2.85, -0.4)  {DataServer\\[-1pt]{\scriptsize DataOps}};
-    \node[box] (rocks) at (-2.85, -1.8) {RocksDB（4 CFs）};
-    \node[box] (raw)   at (2.85, -1.8)  {RawDisk\\[-1pt]{\scriptsize pread / pwrite}};
-    % 箭头
-    \draw[arr] (app) -- (vfs);
-    \draw[arr] (vfs) -- (fuse) node[midway, right, lbl] {\texttt{/dev/fuse}};
-    \draw[arr] (fuse) -- (vfscore);
-    \draw[arr] (vfscore.south west) ++(-0.1,0) -- (meta.north);
-    \draw[arr] (vfscore.south east) ++(0.1,0) -- (data.north);
-    \draw[arr] (meta) -- (rocks);
-    \draw[arr] (data) -- (raw);
-    % 旁注
-    \node[lbl, anchor=east] at (-5.6, 4.5) {POSIX syscalls};
-    \node[lbl, anchor=east] at (-5.6, 2.1) {async FUSE handlers};
-    \node[lbl, anchor=east] at (-5.6, 0.9) {路由 metadata / data};
+    \node[box] (client) at (0,0) {FUSE Client\\\texttt{VfsCore}};
+    \node[box] (mds) at (3.4,1.35) {MetadataServer\\元数据操作\\\scriptsize \texttt{lookup/create/rename}};
+    \node[box] (ds) at (3.4,-1.35) {DataServer\\数据操作\\\scriptsize \texttt{read/write/truncate}};
+    \node[box] (rocks) at (6.7,1.35) {RocksDB\\元数据};
+    \node[box] (raw) at (6.7,-1.35) {RawDiskDataStore\\\texttt{data.raw}};
+
+    \draw[arr] (client.east) -- (mds.west);
+    \draw[arr] (client.east) -- (ds.west);
+    \draw[arr] (mds.east) -- (rocks.west);
+    \draw[arr] (ds.east) -- (raw.west);
     \end{tikzpicture}
-    \caption{RucksFS 分层架构。应用层系统调用经内核 VFS 和 FUSE 模块转入用户态 FuseClient，VfsCore 将请求路由到 MetadataServer（RocksDB）或 DataServer（原始磁盘）。}
-    \label{fig:architecture}
+    \caption{RucksFS 的整体架构与主请求路径}
+    \label{fig:overall_arch}
 \end{figure}
 
-FUSE 客户端使用 Rust 的 fuse3 库（版本 0.8，集成 tokio 异步运行时）实现，配置了 \texttt{force\_readdir\_plus}、\texttt{allow\_other} 和 \texttt{default\_permissions} 三个挂载选项。\texttt{default\_permissions} 将 POSIX 权限检查下放给内核 VFS，避免在用户空间重复实现 uid/gid 权限判断逻辑。FUSE 属性缓存的 TTL 设为 1 秒，MAX\_WRITE 设为 128\,KiB。
+从请求走向上看，这种拆分对应三条不同路径。
 
-\subsubsection{模块划分与依赖关系}
+\begin{enumerate}
+    \item \textbf{元数据路径。} 诸如 \texttt{lookup}、\texttt{create}、\texttt{mkdir}、\texttt{unlink}、\texttt{rename} 和 \texttt{readdir} 等请求，经 FUSE 客户端进入 \texttt{VfsCore} 后，被转发给 MetadataServer，再由后者访问 RocksDB。
+    \item \textbf{数据路径。} \texttt{read}、\texttt{write}、\texttt{truncate} 与 \texttt{flush} 等请求，由 \texttt{VfsCore} 选择对应的 DataServer，并交由原始磁盘后端执行。
+    \item \textbf{协调路径。} 某些操作天然跨越元数据面与数据面，例如客户端写入文件数据后，还需要通知 MetadataServer 更新文件大小和 \texttt{mtime}；\texttt{unlink} 或覆盖式 \texttt{rename} 完成后，MetadataServer 还会通过响应结构告知客户端哪些 inode 需要在 DataServer 侧清理数据。
+\end{enumerate}
 
-代码组织为一个包含 7 个 crate 的 Cargo workspace。依赖关系遵循单向原则：底层 crate（core、storage）不依赖上层 crate。
+客户端不直接持有 RocksDB，也不直接管理原始磁盘布局。它只负责在 FUSE 请求、MetadataServer 和 DataServer 之间做语义编排。这样做的直接好处是，文件系统的正确性主要集中在元数据事务设计与客户端协调逻辑中，边界较清晰，调试路径也更可控。
 
-\begin{table}[htbp]
-    \centering
-    \caption{RucksFS 各模块职责与依赖关系}
-    \label{tab:crates}
-    \begin{tabular}{llp{5cm}}
-    \toprule
-    \textbf{Crate} & \textbf{职责} & \textbf{直接依赖} \\
-    \midrule
-    \texttt{core} & 共享类型（FileAttr、DirEntry）与 trait 定义（MetadataOps、DataOps、VfsOps） & 无内部依赖 \\
-    \texttt{storage} & 存储层 trait、RocksDB 实现、二进制编码 & \texttt{core} \\
-    \texttt{server} & MetadataServer 实现、增量折叠、后台压缩 & \texttt{core, storage} \\
-    \texttt{dataserver} & DataServer 实现（原始磁盘 I/O） & \texttt{core, storage} \\
-    \texttt{client} & VfsCore 路由层、EmbeddedClient、FuseClient & \texttt{core} \\
-    \texttt{rpc} & gRPC 服务定义（tonic，尚未完成） & \texttt{core} \\
-    \texttt{demo} & 单二进制演示程序 & 全部模块 \\
-    \bottomrule
-    \end{tabular}
-\end{table}
-
-core crate 定义了三个核心 trait。\texttt{MetadataOps} 包含 16 个方法，覆盖 lookup、getattr、readdir、create、mkdir、unlink、rmdir、rename、setattr、statfs、open、report\_write、link、symlink、readlink 和 release。\texttt{DataOps} 包含 5 个方法：read\_data、write\_data、truncate、flush、delete\_data。\texttt{VfsOps} 是面向 FUSE 层的完整 POSIX 接口，在内部协调 MetadataOps 和 DataOps。
-
-trait 抽象带来的直接收益体现在测试上：单元测试直接构建基于 RocksDB 临时目录的 MetadataServer，不启动 FUSE 守护进程就能验证元数据逻辑。
-
-\subsection{数据模型与键值编码}
+\subsection{元数据模型与存储布局}
 \label{sec:datamodel}
 
-\subsubsection{核心数据类型}
+\subsubsection{核心对象模型}
 
-文件系统中每个文件和目录都由一个 inode 表示。inode 编号（\texttt{Inode} 类型，即 \texttt{u64}）在全局唯一。根目录固定使用 inode 1（\texttt{ROOT\_INODE}），在 MetadataServer 构造时自动初始化，权限位为 \texttt{S\_IFDIR | 0o777}，nlink 为 2（自身的 \texttt{.} 条目和父目录的引用）。
+RucksFS 采用典型的 inode 模型。每个文件系统对象都有一个全局唯一的 inode 编号，普通文件、目录和符号链接都以这种方式被标识。inode 保存的是对象属性，例如类型、权限、大小、链接计数以及时间戳，而不是路径名字。
 
-每个 inode 的属性由 \texttt{FileAttr} 结构体描述：
+路径中的名字由目录项维护。目录中的每一条目录项，本质上都是“名字到 inode 的映射关系”：父目录记录一个名字，再指出这个名字对应哪个 inode。也就是说，文件系统真正持久化的是 inode 和目录项，而不是把整条路径作为一个整体对象保存下来。
+
+因此，路径解析就是一个逐层查找目录项的过程。以 \texttt{/docs/paper.tex} 为例，系统先在根目录下查找名字 \texttt{docs}，得到其对应的目录 inode；再进入该目录，继续查找名字 \texttt{paper.tex}，最终定位到目标文件 inode。这样的组织方式使 \texttt{lookup}、\texttt{readdir} 和 \texttt{rename} 都可以围绕“目录项映射”来实现，也为后续把目录树映射到键值空间提供了基础。
+
+在实现中，对象属性由 \texttt{FileAttr} 抽象表示，目录遍历结果由 \texttt{DirEntry} 表示。前者面向 inode 本体，后者面向“目录中的一条边”。表~\ref{tab:fileattr}列出了 \texttt{FileAttr} 中最重要的字段。
 
 \begin{table}[htbp]
     \centering
-    \caption{FileAttr 结构体字段}
+    \caption{\texttt{FileAttr} 关键字段}
     \label{tab:fileattr}
     \begin{tabular}{llp{6cm}}
     \toprule
-    \textbf{字段} & \textbf{类型/大小} & \textbf{说明} \\
+    \textbf{字段} & \textbf{类型} & \textbf{含义} \\
     \midrule
-    inode & u64 / 8B & 文件唯一标识符 \\
-    size & u64 / 8B & 文件长度（字节） \\
-    mode & u32 / 4B & POSIX 权限位与文件类型（S\_IFREG、S\_IFDIR、S\_IFLNK） \\
-    nlink & u32 / 4B & 硬链接计数 \\
-    uid & u32 / 4B & 所有者用户 ID \\
-    gid & u32 / 4B & 所有者组 ID \\
-    atime & u64 / 8B & 最后访问时间（Unix 秒） \\
-    mtime & u64 / 8B & 最后修改时间 \\
-    ctime & u64 / 8B & 最后状态变更时间 \\
+    \texttt{inode} & \texttt{u64} & 文件系统对象的全局唯一标识 \\
+    \texttt{size} & \texttt{u64} & 文件长度；目录通常为 0 \\
+    \texttt{mode} & \texttt{u32} & POSIX 类型位与权限位，区分普通文件、目录与符号链接 \\
+    \texttt{nlink} & \texttt{u32} & 硬链接计数；目录的语义与普通文件不同 \\
+    \texttt{uid}/\texttt{gid} & \texttt{u32} & 所有者与所属组 \\
+    \texttt{atime}/\texttt{mtime}/\texttt{ctime} & \texttt{u64} & 访问时间、修改时间和状态变更时间 \\
     \bottomrule
     \end{tabular}
 \end{table}
 
-目录项（\texttt{DirEntry}）记录子文件的名称、inode 编号和类型（mode 的高 4 位）。系统还定义了 \texttt{DataLocation}（标识文件数据所在的 DataServer）、\texttt{SetAttrRequest}（属性修改请求，各字段为 \texttt{Option<T>} 以区分"不修改"和"设为 0"）等辅助结构。
+\subsubsection{列族划分}
 
-\subsubsection{RocksDB 列族设计}
-
-系统在单个 RocksDB 实例中使用 4 个列族（Column Family, CF），每个 CF 承载一种访问模式的数据：
+列族划分是 RucksFS 元数据设计中的核心决策之一。若把 inode、目录项、增量日志和系统状态全部放进一个统一键空间，点查、前缀扫描与高频追加写就会共享同一组 MemTable、SST 文件和压缩策略，最终在缓存命中率、Compaction 行为与读写放大之间相互牵制。RucksFS 因此没有采用“所有元数据混放”的做法，而是按访问模式把 RocksDB 实例拆成 4 个列族。表~\ref{tab:columnfamilies}先给出列族名称与主要内容。
 
 \begin{table}[htbp]
     \centering
-    \caption{RocksDB 列族配置}
+    \caption{RocksDB 列族划分}
     \label{tab:columnfamilies}
-    \begin{tabular}{llll}
+    \begin{tabular}{lp{9.2cm}}
     \toprule
-    \textbf{列族名称} & \textbf{存储内容} & \textbf{Bloom 过滤器} & \textbf{压缩} \\
+    \textbf{列族名称} & \textbf{主要内容} \\
     \midrule
-    \texttt{inodes} & inode 基础属性 & 10 bit/key & LZ4 \\
-    \texttt{dir\_entries} & 目录子项 & 10 bit/key + 9B 前缀提取 & LZ4 \\
-    \texttt{delta\_entries} & 属性增量日志 & 10 bit/key + 9B 前缀提取 & 无 \\
-    \texttt{system} & 系统元信息（inode 分配器状态等） & 无 & LZ4 \\
+    \texttt{inodes} & inode 基础属性、数据位置、符号链接目标 \\
+    \texttt{dir\_entries} & 目录项键值对 \\
+    \texttt{delta\_entries} & 目录时间戳与 \texttt{nlink} 的增量日志 \\
+    \texttt{system} & inode 分配器状态等系统元信息 \\
     \bottomrule
     \end{tabular}
 \end{table}
 
-将不同类型的数据放在同一个 CF 里也是可行的——TableFS\cite{ren2013tablefs} 就是这么做的，通过 key 前缀区分数据类型。但分离 CF 允许为每种数据独立配置 Bloom 过滤器、前缀提取器和压缩算法。\texttt{inodes} CF 只需要点查（get by inode），不需要前缀扫描；\texttt{dir\_entries} CF 需要按父 inode 做前缀迭代来列出目录内容；\texttt{delta\_entries} CF 同样需要按 inode 做前缀扫描来收集增量，但它的数据生命周期短（被后台压缩消费后删除），关闭压缩以避免小数据块的编解码开销；\texttt{system} CF 访问频率很低，独立出来避免其 compaction 干扰热路径。
-
-分 CF 也有代价：跨 CF 的原子写需要 WriteBatch，RocksDB 的 TransactionDB 需要为每个 CF 维护独立的 memtable 和 L0 文件。在 CF 数量较少（4 个）的情况下，这个开销是可以接受的。
-
-\subsubsection{键值编码方案}
-
-所有多字节整数采用大端序（big-endian）编码。RocksDB 使用字节序比较器，大端序保证字节序与数值序一致，inode 编号的范围扫描因此天然有序\cite{dong2021rocksdb}。
-
-每种键类型使用单字节前缀标识，确保不同类型的键在字节空间中完全隔离。二进制格式版本号为 \texttt{FORMAT\_VERSION = 1}，嵌入在 InodeValue 的第一个字节中。
+仅列出名称还不够，关键在于每个列族究竟存什么、为什么这样存。表~\ref{tab:cf_kv_layout}进一步展开了每个列族的 key/value 编码形式。
 
 \begin{table}[htbp]
     \centering
-    \caption{键编码格式}
-    \label{tab:key_encoding}
+    \caption{各列族中 key 与 value 保存的内容}
+    \label{tab:cf_kv_layout}
+    \footnotesize
+    \setlength{\tabcolsep}{4pt}
+    \begin{tabular}{p{2.35cm}p{4.05cm}p{4.65cm}}
+    \toprule
+    \textbf{列族} & \textbf{Key} & \textbf{Value} \\
+    \midrule
+    \texttt{inodes} & inode 编号或附属元数据标识 & inode 属性、数据位置、符号链接目标 \\
+    \texttt{dir\_entries} & 父目录 inode 与子名字 & 子 inode 编号及对象类型 \\
+    \texttt{delta\_entries} & inode 编号与增量序号 & 时间戳或 \texttt{nlink} 变化量 \\
+    \texttt{system} & 系统保留键 & 分配器计数等元信息 \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\texttt{inodes} 列族承担“对象本体”的点查负载。inode 基础属性、\texttt{DataLocation} 以及符号链接目标都被放在这一列族中，不是因为它们在语义上完全相同，而是因为它们都表现为按 inode 直接定位的点查访问。把这些内容放在同一列族，可以避免为了少量辅助元数据再额外维护新的 MemTable 和压缩状态。
+
+\texttt{dir\_entries} 列族承担命名空间边关系。\texttt{lookup} 需要按“父 inode + 名字”定位单条目录项，\texttt{readdir} 需要按父目录枚举全部子项，这两种访问都依赖前缀局部性。因此该列族启用了 9 字节前缀提取器，使同一父目录下的目录项可以按前缀连续排列。与把目录项和 inode 混放在一起相比，这种做法更有利于目录遍历与前缀 Bloom 过滤器生效；与一些把完整路径作为 key 的方案相比，它又避免了跨目录 \texttt{rename} 时对子树全量改写。
+
+\texttt{delta\_entries} 列族承担热点目录的增量写入。其设计目标不是长期保存完整状态，而是承接高频的 \texttt{mtime}/\texttt{ctime}/\texttt{nlink} 变化，避免每次目录修改都去重写父目录 inode 基值。Delta 的 value 并不是通用 JSON 或 protobuf，而是极短的二进制 \texttt{DeltaOp}，例如 \texttt{IncrementNlink(i32)} 用 5 字节表示，\texttt{SetMtime(u64)} 等时间戳操作用 9 字节表示。由于该列族条目短小、生命周期短，而且会被后台折叠线程周期性消费，因此这里刻意关闭压缩，以减少热路径上的编解码负担。
+
+\texttt{system} 列族只保存 inode 分配器等低频系统元信息。将这部分内容单独隔离，可以避免分配器状态与热点目录项共享同一压缩和缓存行为。虽然它在访问频率上远低于其他列族，但仍然需要与普通元数据一起参与原子提交，因此保留在同一 RocksDB 实例中，而不是另起一套外部存储。
+
+这种列族拆分体现的是“按访问模式设计元数据布局”，而不是形式上的模块化。它与把所有元数据塞进单一 KV 空间的方案不同，也与把元数据语义完全交给外部数据库默认布局的思路不同。对本文而言，列族设计本身就是元数据关键路径优化的一部分，因此需要在本章明确展开，而不能仅在实现细节中一笔带过。
+
+\subsubsection{键编码与目录映射}
+
+RucksFS 使用大端序编码所有多字节整数，以保证数值顺序与字节序顺序一致。不同类型的键通过单字节前缀区分。为了避免符号写法带来歧义，表~\ref{tab:key_legend} 先给出键前缀的图例说明。这里的 \texttt{[I]}、\texttt{[D]} 等都表示“首字节是一个固定的 ASCII 标签”，而不是论文中的占位记号。
+
+\begin{table}[htbp]
+    \centering
+    \caption{键前缀图例}
+    \label{tab:key_legend}
     \begin{tabular}{lll}
     \toprule
-    \textbf{键类型} & \textbf{编码格式} & \textbf{总长度} \\
+    \textbf{前缀} & \textbf{含义} & \textbf{作用} \\
     \midrule
-    Inode 键 & \texttt{[b'I'][inode: u64 BE]} & 9 字节固定 \\
-    目录项键 & \texttt{[b'D'][parent: u64 BE][name: UTF-8]} & 9 + len(name) 字节 \\
-    增量键 & \texttt{[b'X'][inode: u64 BE][seq: u64 BE]} & 17 字节固定 \\
-    数据位置键 & \texttt{[b'L'][inode: u64 BE]} & 9 字节固定 \\
-    符号链接键 & \texttt{[b'S'][inode: u64 BE]} & 9 字节固定 \\
+    \texttt{[I]} & inode & 区分 inode 基础属性记录 \\
+    \texttt{[D]} & directory entry & 区分目录项记录 \\
+    \texttt{[X]} & delta & 区分增量日志记录 \\
+    \texttt{[L]} & location & 区分数据位置记录 \\
+    \texttt{[S]} & symlink & 区分符号链接目标记录 \\
     \bottomrule
     \end{tabular}
 \end{table}
 
-\begin{figure}[htbp]
-    \centering
-    \begin{tikzpicture}[
-        x=1cm, y=1cm,
-        tnode/.style={draw, circle, minimum size=0.65cm, inner sep=0pt, font=\small\bfseries},
-        edge_lbl/.style={font=\scriptsize, midway, above, sloped},
-        kvrow/.style={draw, minimum height=0.5cm, font=\scriptsize, anchor=west},
-        kvkey/.style={kvrow, fill=black!5, minimum width=3.2cm, align=left},
-        kvval/.style={kvrow, fill=black!3, minimum width=1.5cm, align=center},
-        lbl/.style={font=\scriptsize, text=black!55}
-    ]
-
-    % ===== 左侧：目录树 =====
-    \node[font=\small\bfseries] at (1.5, 5.2) {目录树};
-    \node[tnode, fill=black!10] (root) at (1.5, 4.2) {1};
-    \node[tnode, fill=black!4] (a) at (0, 2.7) {2};
-    \node[tnode, fill=black!4] (b) at (3, 2.7) {3};
-    \node[tnode, fill=black!4] (c) at (-0.8, 1.2) {4};
-    \node[tnode, fill=black!4] (d) at (0.8, 1.2) {5};
-
-    \draw[->, thick, black!50] (root) -- (a) node[edge_lbl] {src};
-    \draw[->, thick, black!50] (root) -- (b) node[edge_lbl] {docs};
-    \draw[->, thick, black!50] (a) -- (c) node[edge_lbl] {main.rs};
-    \draw[->, thick, black!50] (a) -- (d) node[edge_lbl] {lib.rs};
-
-    \node[lbl] at (1.5, 0.3) {每条箭头 = 一条父子边};
-
-    % ===== 右侧：KV 键空间 =====
-    \node[font=\small\bfseries] at (7.5, 5.2) {dir\_entries CF（按字节序排列）};
-
-    % 键值行
-    \node[kvkey] (k1) at (5.2, 4.3) {\texttt{D|0001|docs}};
-    \node[kvval] (v1) at (8.4, 4.3) {inode=3};
-
-    \node[kvkey] (k2) at (5.2, 3.6) {\texttt{D|0001|src}};
-    \node[kvval] (v2) at (8.4, 3.6) {inode=2};
-
-    \node[kvkey] (k3) at (5.2, 2.7) {\texttt{D|0002|lib.rs}};
-    \node[kvval] (v3) at (8.4, 2.7) {inode=5};
-
-    \node[kvkey] (k4) at (5.2, 2.0) {\texttt{D|0002|main.rs}};
-    \node[kvval] (v4) at (8.4, 2.0) {inode=4};
-
-    % 分组花括号
-    \draw[decorate, decoration={brace, raise=3pt}, thick, black!40]
-        (5.1, 4.6) -- (5.1, 3.4) node[midway, left=6pt, lbl] {前缀 0001};
-    \draw[decorate, decoration={brace, raise=3pt}, thick, black!40]
-        (5.1, 3.0) -- (5.1, 1.8) node[midway, left=6pt, lbl] {前缀 0002};
-
-    \node[lbl] at (7.5, 1.2) {同一父目录的子边物理相邻};
-    \node[lbl] at (7.5, 0.6) {readdir = 前缀扫描，rename = 删边 + 插边};
-
-    % 映射箭头
-    \draw[->, dashed, black!30, thick] (3.3, 3.5) -- (5.0, 3.5);
-
-    \end{tikzpicture}
-    \caption{目录树到 KV 键空间的"以边为中心"映射。左侧每条父子边对应右侧 dir\_entries CF 中一条 KV 记录，大端序编码使同一父目录的全部子边在键空间中自然聚集。}
-    \label{fig:edge-centric-mapping}
-\end{figure}
-
-目录项键的设计遵循"以边为中心"的原则——每条目录项对应目录树中一条父子边，键由父 inode 号和子文件名拼接而成。同一父目录下的所有子项在 RocksDB 中物理相邻。\texttt{dir\_entries} CF 的前缀提取器设为 9 字节（1 字节前缀 + 8 字节父 inode），\texttt{prefix\_iterator} 据此跳过不属于目标父目录的 SST 块。文件操作由此转化为对边的增删——\texttt{create} 插入一条边，\texttt{unlink} 删除一条边，\texttt{rename} 删旧边、插新边——代价均为常数时间。如果采用全路径作为键（如 \texttt{/a/b/c}），\texttt{rename} 就必须递归改写子树中每条键，开销随子树规模线性增长。
-
-增量键中的 \texttt{seq} 字段是递增序列号。同一 inode 的多条增量按 seq 排列，保证折叠顺序与写入顺序一致。
-
-\paragraph{目录项值编码}
-
-目录项的值固定为 12 字节：
-
-\begin{verbatim}
-[child_inode: u64 BE][child_mode: u32 BE]
-(8 字节)               (4 字节)
-= 12 字节 (DIR_VALUE_SIZE)
-\end{verbatim}
-
-将 mode 嵌入目录项值中，readdir 操作就可以直接返回文件类型信息（\texttt{DT\_REG}、\texttt{DT\_DIR} 等），不必为每个子项回查 \texttt{inodes} CF。FUSE 的 readdir\_plus 模式仍然需要完整 FileAttr，但普通 readdir 可以省去这些额外查询。
-
-\subsubsection{InodeValue 序列化格式}
-
-InodeValue 采用 57 字节的固定长度手工序列化，不使用 Protocol Buffers、bincode 或其他通用序列化框架。
+在此基础上，表~\ref{tab:key_encoding} 再给出几类核心键的具体编码格式。
 
 \begin{table}[htbp]
     \centering
-    \caption{InodeValue 二进制布局（57 字节）}
-    \label{tab:inodevalue}
-    \begin{tabular}{rllr}
+    \caption{核心键编码格式}
+    \label{tab:key_encoding}
+    \small
+    \setlength{\tabcolsep}{4pt}
+    \begin{tabular}{p{2.0cm}p{4.6cm}p{4.2cm}}
     \toprule
-    \textbf{偏移} & \textbf{字段} & \textbf{编码} & \textbf{大小} \\
+    \textbf{键类型} & \textbf{编码格式} & \textbf{说明} \\
     \midrule
-    0 & version & u8 & 1B \\
-    1 & inode & u64 BE & 8B \\
-    9 & size & u64 BE & 8B \\
-    17 & mode & u32 BE & 4B \\
-    21 & nlink & u32 BE & 4B \\
-    25 & uid & u32 BE & 4B \\
-    29 & gid & u32 BE & 4B \\
-    33 & atime & u64 BE & 8B \\
-    41 & mtime & u64 BE & 8B \\
-    49 & ctime & u64 BE & 8B \\
-    \midrule
-    & \textbf{合计} & & \textbf{57B} \\
+    inode 键 & \texttt{[I][inode: u64 BE]} & 存放 inode 基础属性 \\
+    目录项键 & \texttt{[D][parent: u64 BE][name: UTF-8]} & 存放父目录到子名字的映射 \\
+    增量键 & \texttt{[X][inode: u64 BE][seq: u64 BE]} & 存放时间戳或 \texttt{nlink} 增量 \\
+    数据位置键 & \texttt{[L][inode: u64 BE]} & 存放 \texttt{DataLocation} \\
+    符号链接键 & \texttt{[S][inode: u64 BE]} & 存放符号链接目标路径 \\
     \bottomrule
     \end{tabular}
 \end{table}
 
-手工序列化最直接的好处是性能：固定长度布局使反序列化只需切片和类型转换，没有变长解码的分支开销。序列化代码在栈上分配一个 57 字节的数组，按偏移量直接 \texttt{copy\_from\_slice}，最后转为 \texttt{Vec<u8>}——整个路径没有堆分配（数组到 Vec 的转换除外）。版本字段（version）位于偏移 0，为未来扩展留出兼容性入口：反序列化时先读 version，遇到未知版本号直接返回错误。另外，确定性的字节布局在调试时很实用——可以用十六进制工具直接检查 RocksDB 的 SST 文件，省去反序列化步骤。
-
-这种做法的局限也很明显：每次增加字段都需要递增版本号并编写迁移代码。不过对于字段数量稳定的 inode 属性来说，这个问题并不突出。
-
-\subsection{增量更新与懒折叠机制}
-\label{sec:delta}
-
-\subsubsection{设计动机}
-
-考虑一个包含数万文件的目录。每次在该目录下创建或删除文件，父目录 inode 的 nlink、mtime 和 ctime 都需要更新。传统做法是读-修改-写（read-modify-write）：从存储中读出父 inode，修改字段值，写回。这在并发场景下有两个问题。
-
-一是串行化瓶颈。多个并发 create 操作都需要修改同一个父 inode，如果使用排他锁保护读-修改-写过程，吞吐量被限制在单线程水平。即使使用乐观并发控制，冲突率也会随并发度线性增长，导致大量重试。
-
-二是写放大。每次读-修改-写都要将完整的 57 字节 InodeValue 重新写入 RocksDB。在 LSM-Tree 中，这意味着每次修改至少产生一次 memtable 插入和后续的 L0 flush，而实际改变的可能只是 8 字节的 mtime。
-
-对于不太活跃的目录，读-修改-写完全可以胜任。问题出在热目录上——这恰恰是需要最高吞吐量的场景。
-
-\subsubsection{追加写增量日志}
-
-RucksFS 对父目录 inode 的更新采用追加写模式取代读-修改-写。当 create 操作需要更新父目录的 mtime 和 ctime 时，系统不修改 \texttt{inodes} CF 中的基础值，而是向 \texttt{delta\_entries} CF 追加两条小记录（各 9 字节），键为 \texttt{[b'X'][parent\_inode BE][seq BE]}。
-
-写入路径不需要读取基础值，也不需要对父 inode 加排他锁。多个并发 create 可以同时追加增量，只要它们使用不同的 seq。这将热 inode 上的竞争从排他锁降级为序列号分配（一个原子自增操作）。
-
-读取路径需要额外工作：加载基础 InodeValue 后，扫描该 inode 的全部增量，依次应用到基础值上。如果增量数量为 0，读取路径的开销与传统方案相同；增量越多，读取开销越大。这个权衡通过后台压缩来平衡。
+图~\ref{fig:key_mapping} 以路径 \texttt{/docs/paper.tex} 为例，展示了目录树如何映射到 RocksDB 键空间。核心思想不是存“整条路径”，而是存“父目录到子名字”的边关系。
 
 \begin{figure}[htbp]
     \centering
     \begin{tikzpicture}[
-        x=0.9cm, y=0.7cm,
-        exec/.style={fill=black!15, draw=black!50, thick},
-        wait/.style={fill=black!6, draw=black!40, thick},
-        fast/.style={fill=black!8, draw=black!40, thick},
-        bg/.style={fill=black!5, draw=black!40, thick},
-        lbl/.style={font=\small, anchor=east},
-        tl/.style={font=\small\bfseries},
-        note/.style={font=\scriptsize, text=black!60}
+        font=\small,
+        node distance=8mm and 13mm,
+        tree/.style={draw, rounded corners=2pt, fill=black!5, align=center, minimum width=2.2cm, minimum height=0.8cm},
+        kv/.style={draw, fill=black!2, align=left, minimum width=5.9cm, minimum height=0.8cm},
+        arr/.style={->, >=stealth, thick}
     ]
+    \node[tree] (root) {root\\inode 1};
+    \node[tree, below=10mm of root] (docs) {docs\\inode 17};
+    \node[tree, below=10mm of docs] (paper) {paper.tex\\inode 42};
+    \draw[arr] (root) -- (docs);
+    \draw[arr] (docs) -- (paper);
 
-    % ===== 上半部：传统方案 =====
-    \node[tl] at (4, 5.3) {（a）传统方案：排他锁串行化};
+    \node[kv, right=28mm of root] (k1) {\texttt{[D][1]["docs"] -> [17][DIR]}};
+    \node[kv, below=7mm of k1] (k2) {\texttt{[I][17] -> inode attrs of docs}};
+    \node[kv, below=7mm of k2] (k3) {\texttt{[D][17]["paper.tex"] -> [42][REG]}};
+    \node[kv, below=7mm of k3] (k4) {\texttt{[I][42] -> inode attrs of paper.tex}};
 
-    % 时间轴
-    \draw[->, >=stealth, thick] (0, 0.5) -- (10.5, 0.5);
-    \node[note] at (10.5, 0.1) {时间};
-
-    % Thread labels
-    \node[lbl] at (-0.2, 4.2) {线程 A};
-    \node[lbl] at (-0.2, 3.2) {线程 B};
-    \node[lbl] at (-0.2, 2.2) {线程 C};
-    \node[lbl] at (-0.2, 1.2) {父 inode};
-
-    % Thread A: 立即执行 Get-Modify-Put
-    \draw[exec] (0, 3.8) rectangle (1, 4.6);
-    \node[font=\scriptsize] at (0.5, 4.2) {Get};
-    \draw[exec] (1, 3.8) rectangle (2, 4.6);
-    \node[font=\scriptsize] at (1.5, 4.2) {Mod};
-    \draw[exec] (2, 3.8) rectangle (3, 4.6);
-    \node[font=\scriptsize] at (2.5, 4.2) {Put};
-
-    % Thread B: 等待 A 释放锁，再执行
-    \draw[wait] (0, 2.8) rectangle (3, 3.6);
-    \node[font=\scriptsize] at (1.5, 3.2) {等待锁};
-    \draw[exec] (3, 2.8) rectangle (4, 3.6);
-    \node[font=\scriptsize] at (3.5, 3.2) {Get};
-    \draw[exec] (4, 2.8) rectangle (5, 3.6);
-    \node[font=\scriptsize] at (4.5, 3.2) {Mod};
-    \draw[exec] (5, 2.8) rectangle (6, 3.6);
-    \node[font=\scriptsize] at (5.5, 3.2) {Put};
-
-    % Thread C: 等待 A+B，再执行
-    \draw[wait] (0, 1.8) rectangle (6, 2.6);
-    \node[font=\scriptsize] at (3, 2.2) {等待锁};
-    \draw[exec] (6, 1.8) rectangle (7, 2.6);
-    \node[font=\scriptsize] at (6.5, 2.2) {Get};
-    \draw[exec] (7, 1.8) rectangle (8, 2.6);
-    \node[font=\scriptsize] at (7.5, 2.2) {Mod};
-    \draw[exec] (8, 1.8) rectangle (9, 2.6);
-    \node[font=\scriptsize] at (8.5, 2.2) {Put};
-
-    % 父 inode 状态：被反复读写
-    \draw[exec] (0.2, 0.8) rectangle (0.8, 1.6);
-    \node[font=\tiny] at (0.5, 1.2) {R};
-    \draw[exec] (2.2, 0.8) rectangle (2.8, 1.6);
-    \node[font=\tiny] at (2.5, 1.2) {W};
-    \draw[exec] (3.2, 0.8) rectangle (3.8, 1.6);
-    \node[font=\tiny] at (3.5, 1.2) {R};
-    \draw[exec] (5.2, 0.8) rectangle (5.8, 1.6);
-    \node[font=\tiny] at (5.5, 1.2) {W};
-    \draw[exec] (6.2, 0.8) rectangle (6.8, 1.6);
-    \node[font=\tiny] at (6.5, 1.2) {R};
-    \draw[exec] (8.2, 0.8) rectangle (8.8, 1.6);
-    \node[font=\tiny] at (8.5, 1.2) {W};
-
-    % 总耗时标注
-    \draw[decorate, decoration={brace, mirror, raise=4pt}, thick]
-        (0, 0.5) -- (9, 0.5) node[midway, below=8pt, font=\small] {总耗时 $\approx 3T$（串行）};
-
+    \draw[arr] ($(root.east)!0.5!(docs.east)$) -- (k1.west);
+    \draw[arr] ($(docs.east)!0.5!(paper.east)$) -- (k3.west);
     \end{tikzpicture}
-
-    \vspace{0.8cm}
-
-    \begin{tikzpicture}[
-        x=0.9cm, y=0.7cm,
-        exec/.style={fill=black!15, draw=black!50, thick},
-        fast/.style={fill=black!8, draw=black!40, thick},
-        bg/.style={fill=black!5, draw=black!40, thick},
-        lbl/.style={font=\small, anchor=east},
-        tl/.style={font=\small\bfseries},
-        note/.style={font=\scriptsize, text=black!60}
-    ]
-
-    % ===== 下半部：增量方案 =====
-    \node[tl] at (4, 5.3) {（b）增量方案：无锁并行追加};
-
-    % 时间轴
-    \draw[->, >=stealth, thick] (0, 0.5) -- (10.5, 0.5);
-    \node[note] at (10.5, 0.1) {时间};
-
-    % Thread labels
-    \node[lbl] at (-0.2, 4.2) {线程 A};
-    \node[lbl] at (-0.2, 3.2) {线程 B};
-    \node[lbl] at (-0.2, 2.2) {线程 C};
-    \node[lbl] at (-0.2, 1.2) {后台压缩};
-
-    % Thread A: seq++ 然后 append
-    \draw[fast] (0, 3.8) rectangle (0.5, 4.6);
-    \node[font=\tiny] at (0.25, 4.2) {seq};
-    \draw[fast] (0.5, 3.8) rectangle (2, 4.6);
-    \node[font=\scriptsize] at (1.25, 4.2) {Append};
-
-    % Thread B: 同时 seq++ 然后 append
-    \draw[fast] (0.1, 2.8) rectangle (0.6, 3.6);
-    \node[font=\tiny] at (0.35, 3.2) {seq};
-    \draw[fast] (0.6, 2.8) rectangle (2.1, 3.6);
-    \node[font=\scriptsize] at (1.35, 3.2) {Append};
-
-    % Thread C: 同时 seq++ 然后 append
-    \draw[fast] (0.2, 1.8) rectangle (0.7, 2.6);
-    \node[font=\tiny] at (0.45, 2.2) {seq};
-    \draw[fast] (0.7, 1.8) rectangle (2.2, 2.6);
-    \node[font=\scriptsize] at (1.45, 2.2) {Append};
-
-    % 后台压缩（非阻塞，延迟执行）
-    \draw[bg] (4, 0.8) rectangle (5.5, 1.6);
-    \node[font=\scriptsize] at (4.75, 1.2) {Fold};
-    \draw[bg] (5.5, 0.8) rectangle (7, 1.6);
-    \node[font=\scriptsize] at (6.25, 1.2) {Commit};
-
-    % 虚线连接：append 完成后触发后台
-    \draw[->, dashed, gray] (2.2, 1.8) -- (4, 1.5);
-    \node[note] at (3.1, 1.2) {$> 32$ 条};
-
-    % 总耗时标注
-    \draw[decorate, decoration={brace, mirror, raise=4pt}, thick]
-        (0, 0.5) -- (2.2, 0.5) node[midway, below=8pt, font=\small] {临界路径 $\approx T$（并行）};
-
-    % 非关键路径标注
-    \node[note] at (5.5, 0.3) {非阻塞};
-
-    \end{tikzpicture}
-    \caption{传统排他锁方案与增量并行追加方案的并发对比。（a）传统方案中三个线程因排他锁串行化，总耗时 $\approx 3T$，父 inode 被反复读写 6 次；（b）增量方案中三个线程几乎同时完成追加写，临界路径缩减为 $\approx T$，后台压缩在非关键路径上异步执行。}
-    \label{fig:delta-concurrency}
+    \caption{路径树到 RocksDB 键空间的映射示意}
+    \label{fig:key_mapping}
 \end{figure}
 
+这种设计遵循的是“以边为中心”的命名空间建模思路。目录树中的每一条父子边，都对应 \texttt{dir\_entries} 列族中的一条记录。\texttt{lookup(parent, name)} 退化为点查一条目录项键；\texttt{readdir(parent)} 退化为扫描同一前缀下的全部目录项键；\texttt{rename} 则退化为删除旧边、插入新边。与使用全路径作为键相比，这种建模方式避免了跨目录重命名时对子树全量重写。
 
-\subsubsection{增量操作类型}
+除 key 之外，不同类型 value 的编码也经过了针对性设计。inode value 采用 57 字节的定长二进制布局，依次保存版本号、inode 编号、文件大小、模式位、链接计数以及三类时间戳；目录项 value 固定为 12 字节，即 \texttt{[child\_inode: u64 BE][child\_mode: u32 BE]}；delta value 则采用极短的 \texttt{DeltaOp} 编码。把 \texttt{mode} 一并放入目录项 value，可以让 \texttt{readdir} 在不额外回查 inode 的情况下直接得到对象类型；而定长 inode value 则有利于在点查路径上减少解析开销。
+\subsubsection{固定长度 inode 序列化}
 
-系统定义了 4 种增量操作，每种操作的二进制格式为 \texttt{[op\_type: u8][payload: BE]}：
+MetadataServer 在 RocksDB 中存储的 inode 基础值并不使用通用序列化框架，而是采用固定长度的 \texttt{InodeValue} 手工编码。当前布局总长度为 57 字节，包含版本号、inode 编号、文件大小、模式位、链接计数以及三类时间戳。采用固定长度编码有两个直接好处：其一，读写路径只需要按偏移切片，不必承担变长解码开销；其二，调试时可以直接从 RocksDB 中观察二进制布局，问题定位更直接。
 
-\begin{table}[htbp]
-    \centering
-    \caption{DeltaOp 增量操作类型及折叠语义}
-    \label{tab:deltaops}
-    \begin{tabular}{lllp{5cm}}
-    \toprule
-    \textbf{操作} & \textbf{编码大小} & \textbf{负载} & \textbf{折叠语义} \\
-    \midrule
-    IncrementNlink & 5B & i32 BE & 累加到 nlink，结果钳位到 $\geq 0$ \\
-    SetMtime & 9B & u64 BE & 取 max(base.mtime, payload) \\
-    SetCtime & 9B & u64 BE & 取 max(base.ctime, payload) \\
-    SetAtime & 9B & u64 BE & 取 max(base.atime, payload) \\
-    \bottomrule
-    \end{tabular}
-\end{table}
+固定长度编码也意味着模式演进需要显式处理。为此，\texttt{InodeValue} 的第一个字节保留为格式版本号。只要未来确实需要扩展字段，就可以通过版本字段引入兼容逻辑，而不必打破既有键空间。
 
-IncrementNlink 使用有符号 i32 而非无符号增量，因为 unlink 操作需要递减 nlink（传入 $-1$）。折叠时先将 base.nlink 提升为 i64 做加法，再钳位回 u32，防止下溢 panic。
+\subsection{事务模型与元数据一致性}
+\label{sec:txn_model}
 
-三种时间戳操作的折叠语义都是取最大值。原因在于：正常的文件系统操作序列中，时间戳只会单调递增。max 语义使得增量的应用顺序无关——即使因为并发写入导致 seq 顺序与实际时间顺序不完全一致，最终结果仍然正确。
+\subsubsection{原子批量写抽象}
 
-\subsubsection{懒折叠缓存与后台压缩}
+RucksFS 并不直接在上层业务代码里拼装 RocksDB 原生事务，而是通过 \texttt{StorageBundle} 和 \texttt{AtomicWriteBatch} 进行封装。\texttt{StorageBundle::begin\_write()} 返回一个跨列族的批量写对象，调用者向其中追加 \texttt{BatchOp}，最后统一提交。这样做的目的有两点：一是把列族差异藏在存储层内部，二是为后续在事务中执行 \texttt{get\_for\_update}、目录是否为空检查等操作提供统一入口。
 
-增量日志需要两个配套机制：一个是读路径上的缓存，用于避免每次 getattr 都做增量扫描；另一个是后台压缩，用于控制增量数量的增长。图~\ref{fig:read-fold-path} 展示了 getattr 的完整读路径。
+当前存储后端由 \texttt{RocksStorageBundle} 实现，其内部持有 \texttt{Arc<TransactionDB>}。提交时，批量写对象最终调用的是 RocksDB 事务的 \texttt{commit()}，从而把跨 \texttt{inodes}、\texttt{dir\_entries} 和 \texttt{delta\_entries} 的多条修改一起持久化。
 
-\begin{figure}[htbp]
-    \centering
-    \begin{tikzpicture}[
-        x=1cm, y=1cm,
-        box/.style={draw, rounded corners=2pt, minimum height=0.6cm, align=center, font=\small},
-        store/.style={box, fill=black!6},
-        decision/.style={draw, diamond, aspect=2.2, inner sep=1pt, font=\small},
-        arr/.style={->, >=stealth, thick},
-        note/.style={font=\scriptsize, text=black!60}
-    ]
+\subsubsection{悲观事务与加锁顺序}
 
-    % 入口
-    \node[box, fill=black!8] (entry) at (0, 0) {getattr(inode)};
+MetadataServer 的目录操作依赖 RocksDB TransactionDB 的悲观事务接口。关键方法是 \texttt{get\_for\_update}：一旦在事务内读取某个目录项键或 inode 键，就同时获取该键的排他锁。RucksFS 还显式配置了 5 秒的锁等待超时，并关闭 RocksDB 的死锁检测；原因不是忽略死锁风险，而是系统已经在上层显式约束了加锁顺序。
 
-    % 缓存判断
-    \node[decision] (cache) at (3.5, 0) {缓存命中?};
-    \draw[arr] (entry) -- (cache);
+对于可能涉及多个 inode 的操作，MetadataServer 会先收集全部相关 inode 编号，再按升序依次加锁。\texttt{rename} 是最典型的场景：源目录、目标目录、被移动对象以及潜在被覆盖对象，都可能同时出现在同一事务中。统一的加锁顺序可以避免线程 A 先锁源目录、线程 B 先锁目标目录时形成循环等待。
 
-    % 命中：直接返回
-    \node[box, fill=black!4] (hit) at (3.5, -1.5) {返回缓存值};
-    \draw[arr] (cache) -- (hit) node[midway, right, note] {是};
+事务冲突不是直接向外暴露原始 RocksDB 错误，而是通过统一的重试逻辑处理。MetadataServer 对临时冲突最多重试 3 次，退避时间按指数增长；若多次重试后仍然失败，错误再向上返回，并在 FUSE 层映射为 \texttt{EAGAIN}。这样既保留了并发正确性，也避免把偶发冲突直接放大为用户可见错误。
 
-    % 未命中：加载 base
-    \node[store] (base) at (7, 0) {inodes CF};
-    \draw[arr] (cache) -- (base) node[midway, above, note] {否};
+\subsubsection{增量更新与懒折叠}
 
-    % 扫描 delta
-    \node[store] (delta) at (10, 0) {delta CF};
-    \draw[arr] (base) -- (delta) node[midway, above, note] {前缀扫描};
+若每次 \texttt{create}、\texttt{unlink}、\texttt{mkdir} 和 \texttt{rmdir} 都直接读取并重写父目录 inode，高频热点目录很快就会成为争用中心。RucksFS 因此没有把父目录时间戳与链接计数更新写回 \texttt{inodes} 基值，而是将这些变化编码为 \texttt{DeltaOp}，追加到 \texttt{delta\_entries} 列族中。
 
-    % fold
-    \node[box, fill=black!10] (fold) at (10, -1.5) {fold\_deltas};
-    \draw[arr] (delta) -- (fold);
+当前实现中的增量类型包括 \texttt{IncrementNlink}、\texttt{SetMtime}、\texttt{SetCtime} 和 \texttt{SetAtime}。其中，普通文件的创建与删除只会追加父目录 \texttt{mtime}/\texttt{ctime} 变化；\texttt{mkdir}、\texttt{rmdir} 以及跨目录移动目录时，才会额外追加 \texttt{nlink} 增量。这样做的直接收益是，热点父目录不再需要在每次操作中执行“读完整 inode，再改几个字段，再写回完整 inode”的流程。
 
-    % 写入缓存
-    \node[box, fill=black!8] (writecache) at (7, -1.5) {写入缓存};
-    \draw[arr] (fold) -- (writecache);
+读取路径则通过“基值 + 增量在线折叠”恢复最新状态。MetadataServer 在加载 inode 时，先尝试从 \texttt{InodeFoldedCache} 获取已经折叠好的结果；若缓存未命中，则先读 \texttt{inodes} 列族中的基础值，再按前缀扫描 \texttt{delta\_entries} 中属于该 inode 的全部增量，并依次执行折叠。折叠后的结果会重新写入缓存，以避免后续重复扫描。
 
-    % 返回
-    \node[box, fill=black!4] (ret) at (7, -3) {返回折叠值};
-    \draw[arr] (writecache) -- (ret);
-    \draw[arr] (hit) -- (ret);
+后台的 \texttt{DeltaCompactionWorker} 负责把积累的增量合并回基础值。写路径在追加增量后会把对应 inode 标记为 dirty；后台线程周期性检查 dirty 集合，当某个 inode 的增量数量超过阈值时，便读取基值、折叠增量，并通过原子提交把“写回新基值”和“删除已消费增量”一起完成。当前默认阈值为 32 条，检查周期为 5 秒。这一机制的本质，是用读路径上的有限折叠成本换取写路径上的冲突削减。
 
-    \end{tikzpicture}
-    \caption{getattr 读路径：缓存命中时直接返回；未命中时从 inodes CF 加载基值，从 delta CF 前缀扫描全部增量，在线折叠后写入缓存。}
-    \label{fig:read-fold-path}
-\end{figure}
+\subsubsection{延迟删除与句柄生命周期}
 
-\paragraph{InodeFoldedCache}
+POSIX 允许文件在目录项已经被移除后继续被打开的句柄访问。RucksFS 为此在 MetadataServer 内维护了 \texttt{open\_handles} 与 \texttt{pending\_deletes} 两类状态。\texttt{open()} 成功后，MetadataServer 递增该 inode 的打开计数，并把返回句柄与 \texttt{DataLocation} 一并交给客户端；\texttt{release()} 则递减打开计数。
 
-\texttt{InodeFoldedCache} 是一个 LRU 缓存，默认容量 10{,}000 个条目，存储已折叠的 InodeValue。缓存命中时直接返回，避免了基础值加载和增量扫描。缓存未命中时，系统从 \texttt{inodes} CF 读取基础值，从 \texttt{delta\_entries} CF 收集全部增量，调用 \texttt{fold\_deltas} 合并，将结果插入缓存并返回。
+当 \texttt{unlink} 或覆盖式 \texttt{rename} 使某个普通文件的 \texttt{nlink} 降到 0 时，MetadataServer 不一定立刻要求客户端删除数据。若该 inode 仍有打开句柄，系统只把它加入 \texttt{pending\_deletes}，并在最后一个句柄关闭时再通知客户端执行数据删除。这样才能满足“名字已经不可见，但已有句柄仍可继续使用”的 POSIX 语义。
 
-缓存的失效策略是写入时主动失效：当某个 inode 被直接修改（如 setattr）或其增量被后台压缩消费时，对应的缓存条目被删除。追加增量时不失效缓存——这是一个有意的选择。追加增量后，缓存中的值会暂时过期（缺少最新的增量），但 getattr 的调用者在下一次缓存未命中时会读到最新值。对于 mtime 这样的字段，短暂的过期在实际使用中几乎不可察觉。
+\subsection{核心操作实现}
+\label{sec:posix_impl}
 
-这个做法的一个已知问题是：如果在缓存命中的窗口内连续追加了大量增量，getattr 返回的 nlink 可能与实际值存在偏差。在当前实现中，这种偏差在下一次缓存未命中或后台压缩时被纠正。是否需要更激进的缓存失效策略，取决于应用对 nlink 精确度的要求——对于大多数 POSIX 应用来说，短暂的不一致是可以容忍的。
+\subsubsection{create 与 mkdir}
 
-\paragraph{后台压缩}
-
-\texttt{DeltaCompactionWorker} 在独立线程中运行，周期性地将积累的增量合并回基础值：
-
-\begin{enumerate}
-    \item 写入路径在追加增量后，调用 \texttt{mark\_dirty(inode)} 将 inode 加入脏集合（dirty set）。
-    \item 压缩线程通过 \texttt{Condvar} 等待脏集合非空，避免空轮询。
-    \item 对脏集合中的每个 inode，压缩线程执行以下操作：
-    \begin{itemize}
-        \item 从 \texttt{inodes} CF 读取基础 InodeValue
-        \item 从 \texttt{delta\_entries} CF 扫描全部增量并反序列化
-        \item 调用 \texttt{fold\_deltas} 合并
-        \item 通过 AtomicWriteBatch 原子地写回合并后的基础值并删除已消费的增量
-        \item 清除 InodeFoldedCache 中对应的条目
-    \end{itemize}
-    \item 检查间隔默认 5{,}000\,ms，增量阈值默认 32 条。
-\end{enumerate}
-
-增量阈值 32 的选取并非经过严密的理论推导。初始实现使用阈值 16，在高并发 create 负载下（1{,}000 并发线程），后台压缩线程的 CPU 占用率达到了约 40\%。将阈值提高到 32 后，压缩频率降低，CPU 占用率下降到 15\% 左右，而 getattr 的尾延迟增幅在 10\% 以内。阈值 64 虽然再次降低了压缩开销，但在读密集负载下 getattr 的平均延迟增长了约 25\%——增量扫描的代价开始显现。32 是当前工作负载下的折中点。
-
-\subsection{并发控制与事务机制}
-\label{sec:concurrency}
-
-\subsubsection{PCC 事务模型}
-
-文件系统的元数据操作天然存在并发冲突：两个进程可能同时在同一目录下创建文件，或者一个进程在 rename 的同时另一个进程在 unlink 同一目标。RucksFS 通过 RocksDB 的 TransactionDB 接口实现悲观并发控制（Pessimistic Concurrency Control, PCC）。
-
-TransactionDB 提供行级锁：当事务调用 \texttt{get\_for\_update(key)} 时，该 key 被加锁直到事务提交或回滚。如果另一个事务尝试锁定同一个 key，它将被阻塞直到锁释放，或在超时后返回 \texttt{TransactionConflict} 错误。
-
-锁超时设为 5{,}000\,ms。这个值比文件系统操作的正常延迟（微秒到毫秒级）大得多，目的是让临时的资源竞争有足够的等待窗口，而不是过早放弃导致不必要的重试。
-
-系统关闭了 RocksDB 的死锁检测。死锁检测的运行时开销来自等待图的维护，在锁数量较少时（通常每个事务锁定 2--5 个 key）收益有限。系统转而通过加锁顺序来预防死锁：当操作涉及多个 inode 时，按 inode ID 从小到大排序后依次加锁。rename 操作是这个策略的典型应用场景——它可能涉及源父目录、目标父目录、源文件和目标文件四个 inode。
-
-事务冲突时自动重试，最多 \texttt{TXN\_MAX\_RETRIES = 3} 次，退避策略为指数增长（1\,ms → 2\,ms → 4\,ms）。三次重试后仍然冲突则返回 \texttt{FsError::TransactionConflict}，对应 POSIX 错误码 \texttt{EAGAIN}。
-
-\subsubsection{WriteBatch 原子操作}
-
-每个变更操作（create、unlink、rename 等）将全部修改打包到一个 \texttt{AtomicWriteBatch} 中提交。WriteBatch 是 RocksDB 的原生原子写机制：批次中的所有 put/delete 操作要么全部持久化，要么在进程崩溃时全部丢弃。
-
-一个 create 操作的 WriteBatch 包含以下条目：
-
-\begin{enumerate}
-    \item \texttt{put\_cf(inodes, inode\_key, inode\_value)} — 写入新文件的 InodeValue
-    \item \texttt{put\_cf(dir\_entries, dir\_key, dir\_value)} — 在父目录下插入目录项
-    \item \texttt{put\_cf(inodes, location\_key, location\_value)} — 记录数据位置
-    \item \texttt{put\_cf(delta\_entries, delta\_key\_1, SetMtime)} — 父目录 mtime 增量
-    \item \texttt{put\_cf(delta\_entries, delta\_key\_2, SetCtime)} — 父目录 ctime 增量
-\end{enumerate}
-
-这 5 条写入跨越了 3 个列族，但 WriteBatch 保证它们的原子性。如果在 commit 过程中进程崩溃，RocksDB 的 WAL（Write-Ahead Log）确保恢复后这些写入要么全部存在，要么全部不存在。
-
-系统没有使用 TransactionDB 的完整事务回滚能力（即显式 \texttt{txn.rollback()}）。回滚只在 \texttt{get\_for\_update} 阶段检测到前置条件不满足时发生（如 create 发现目标名称已存在）。一旦前置条件检查通过，后续的 put/delete 操作不需要回滚——它们要么全部通过 WriteBatch 提交，要么因为进程崩溃而被 WAL 恢复机制丢弃。
-
-\subsubsection{TOCTOU 防护策略}
-
-Time-of-Check-Time-of-Use（TOCTOU）漏洞在文件系统中尤为常见：检查某个条件和基于该条件执行操作之间存在时间窗口，其他并发操作可能改变条件。RucksFS 通过在事务内完成检查和操作来消除这个窗口：
-
-\begin{itemize}
-    \item \textbf{create}：在事务内调用 \texttt{get\_for\_update} 检查父目录中是否已存在同名项。如果不存在，立即插入新目录项。锁保证在检查和插入之间没有其他事务能插入同名项。
-    \item \textbf{rmdir}：在事务内使用 \texttt{prefix\_iterator} 检查目录是否为空。迭代器在事务的快照上运行，锁保证检查期间没有新文件被创建到该目录下。
-    \item \textbf{unlink}：在事务内读取目标文件的 nlink，判断是否需要物理删除。锁防止另一个 link 操作在检查和删除之间增加 nlink。
-    \item \textbf{rename}：在事务内检查目标位置是否已存在同名项，如果存在则检查是否可以覆盖（目录必须为空）。全部检查和修改在同一个事务中完成。
-\end{itemize}
-
-\begin{figure}[htbp]
-    \centering
-    \begin{tikzpicture}[
-        x=1.1cm, y=0.65cm,
-        op/.style={draw, fill=#1, minimum height=0.45cm, font=\scriptsize, anchor=west},
-        arr/.style={->, >=stealth, thick},
-        lbl/.style={font=\small, anchor=east},
-        title/.style={font=\small\bfseries},
-        note/.style={font=\scriptsize, text=black!60},
-        conflict/.style={font=\scriptsize, text=black!60, anchor=west}
-    ]
-
-    % ===== (a) 无事务保护 =====
-    \node[title] at (4, 5.5) {（a）无事务保护：TOCTOU 竞态};
-
-    \node[lbl] at (-0.2, 4.2) {线程 A};
-    \node[lbl] at (-0.2, 2.7) {线程 B};
-
-    % Thread A
-    \node[op=black!6] at (0, 4.0) {check: ``f'' 不存在};
-    %   --- 窗口 ---
-    \node[op=black!10] at (4.5, 4.0) {insert ``f'' $\to$ inode 10};
-
-    % Thread B 在窗口内插入
-    \node[op=black!6] at (1, 2.5) {check: ``f'' 不存在};
-    \node[op=black!10] at (3, 2.5) {insert ``f'' $\to$ inode 11};
-
-    % 窗口标注
-    \draw[<->, black!50, thick] (3.3, 4.6) -- (4.5, 4.6);
-    \node[conflict] at (3.3, 5.0) {TOCTOU 窗口};
-
-    % 结果
-    \node[conflict] at (5.5, 3.2) {目录项冲突!};
-
-    % 分隔线
-    \draw[dashed, gray!50] (-0.5, 1.5) -- (8.5, 1.5);
-
-    % ===== (b) PCC 事务保护 =====
-    \node[title] at (4, 0.8) {（b）PCC 事务保护：窗口被锁覆盖};
-
-    \node[lbl] at (-0.2, -0.5) {线程 A};
-    \node[lbl] at (-0.2, -2.0) {线程 B};
-
-    % Thread A: 事务内 get_for_update + insert
-    \draw[draw=black!40, fill=black!4, thick, rounded corners=2pt]
-        (-0.1, -1.0) rectangle (5.5, 0.0);
-    \node[note] at (2.7, 0.2) {事务 + 行级锁};
-    \node[op=black!8] at (0, -0.7) {get\_for\_update(``f'')};
-    \node[op=black!8] at (3.5, -0.7) {insert + commit};
-
-    % Thread B: 被锁阻塞
-    \node[op=black!6] (bwait) at (0, -2.2) {get\_for\_update $\to$ 阻塞};
-    \draw[draw=black!40, fill=black!4, thick, rounded corners=2pt]
-        (5.4, -2.7) rectangle (8.3, -1.7);
-    \node[op=black!8] at (5.5, -2.4) {检查: 已存在};
-    \node[note] at (8.5, -2.0) {返回 EEXIST};
-
-    % 锁范围
-    \draw[<->, black!50, thick] (0, -1.2) -- (5.4, -1.2);
-    \node[note] at (2.7, -1.5) {锁覆盖整个检查+操作};
-
-    \end{tikzpicture}
-    \caption{TOCTOU 防护示意。（a）无事务保护时，线程 A 检查与插入之间的窗口允许线程 B 插入同名项，导致目录项冲突；（b）PCC 事务下 get\_for\_update 在检查时即加锁，线程 B 被阻塞至线程 A 提交后才能执行，TOCTOU 窗口被消除。}
-    \label{fig:toctou-protection}
-\end{figure}
-
-\subsection{核心 POSIX 操作实现}
-\label{sec:posix}
-
-\subsubsection{文件创建（create）}
-
-create 操作在指定父目录下创建一个新的普通文件。算法~\ref{alg:create} 描述了完整流程。
+\texttt{create} 的关键不是写入新 inode，而是确保“同名检查”和“目录项插入”处于同一事务中。算法~\ref{alg:create}给出了当前实现中的 \texttt{create} 流程。
 
 \begin{algorithm}[htbp]
-    \caption{create 操作}
+    \caption{\texttt{create(parent, name, mode, uid, gid)} 的核心流程}
     \label{alg:create}
     \begin{algorithmic}[1]
-        \State $txn \leftarrow$ \Call{begin\_write}{}
-        \State $existing \leftarrow$ \Call{get\_for\_update}{$\text{dir\_entry\_key}(parent, name)$}
-        \If{$existing \neq \text{None}$}
-            \State \Call{rollback}{$txn$}
-            \State \Return \textsc{EEXIST}
+        \State 开启事务 batch
+        \State 对目录项键 \texttt{D[parent, name]} 执行 \texttt{get\_for\_update}
+        \If{目录项已存在}
+            \State 返回 \textsc{EEXIST}
         \EndIf
-        \State $new\_inode \leftarrow$ \Call{allocator.alloc}{}
-        \State $now \leftarrow$ \Call{now\_secs}{}
-        \State $attr \leftarrow$ \Call{FileAttr}{$inode{=}new\_inode,\ mode{=}\text{S\_IFREG} \,|\, (mode \mathbin{\&} \text{0o7777})$}
-        \State \hspace{\algorithmicindent} $nlink{=}1,\ uid,\ gid,\ atime{=}now,\ mtime{=}now,\ ctime{=}now$
-        \State \Call{put\_inode}{$txn, new\_inode, attr$}
-        \State \Call{put\_dir\_entry}{$txn, parent, name, new\_inode, attr.mode$}
-        \State \Call{put\_data\_location}{$txn, new\_inode, \text{default\_location}$}
-        \State \Call{append\_delta}{$txn, parent, \text{SetMtime}(now)$}
-        \State \Call{append\_delta}{$txn, parent, \text{SetCtime}(now)$}
-        \State \Call{commit}{$txn$}
-        \State \Return $attr$
+        \State 分配新 inode 编号，构造普通文件的 \texttt{InodeValue}
+        \State 向 \texttt{inodes} 列族写入新 inode 基值
+        \State 向 \texttt{dir\_entries} 列族写入父目录到新文件的映射
+        \State 向 \texttt{inodes} 列族写入该 inode 的 \texttt{DataLocation}
+        \State 向 \texttt{delta\_entries} 追加父目录的 \texttt{SetMtime} 与 \texttt{SetCtime}
+        \State 提交事务
+        \State 更新本地缓存并返回新文件属性
     \end{algorithmic}
 \end{algorithm}
 
-几个值得说明的细节。mode 参数的处理方式是 \texttt{S\_IFREG | (mode \& 0o7777)}：高位强制设为普通文件类型，低 12 位取用户指定的权限。新文件的 nlink 初始化为 1——这一个链接就是父目录中的目录项。对父目录 inode 的修改通过追加 SetMtime 和 SetCtime 两条增量完成，而非修改父 inode 的基础值。
+\texttt{mkdir} 与 \texttt{create} 的差异主要体现在两个地方。第一，新对象的类型位为目录，且初始 \texttt{nlink} 为 2；第二，父目录除了更新时间戳之外，还需要追加 \texttt{IncrementNlink(+1)}，因为新增了一个子目录。普通文件创建不会改变父目录 \texttt{nlink}，这一点在后续实验分析中很重要。
 
-create 没有追加 IncrementNlink 增量给父目录。这是因为父目录的 nlink 语义在 POSIX 中是「子目录数量 + 2」，创建普通文件不改变父目录的 nlink。只有 mkdir 会追加 IncrementNlink(+1)。
+\subsubsection{unlink、rmdir 与 release}
 
-\subsubsection{文件删除（unlink）}
+\texttt{unlink} 先锁定目标目录项，再锁定被删除对象的 inode。若目标实际上是目录，则直接返回 \texttt{EISDIR}。对普通文件而言，\texttt{unlink} 会删除目录项、递减目标 inode 的 \texttt{nlink}，并根据结果决定是否进入延迟删除分支。父目录的 \texttt{mtime}/\texttt{ctime} 更新则通过增量日志完成。
 
-unlink 操作从父目录中移除一个文件的目录项，并在条件满足时物理删除文件数据。
+\texttt{rmdir} 的关键检查在于“目录是否为空”。RucksFS 并不是在事务外先做一次普通扫描，再进入事务删除目录项；相反，它通过事务内的前缀扫描接口在一致性视图里完成“是否为空”的检查，然后才决定是否执行删除。若目录非空，则返回 \texttt{ENOTEMPTY}；若目录为空，则删除目标目录项与目标 inode，并对父目录追加 \texttt{IncrementNlink(-1)} 以及时间戳增量。
 
-\begin{algorithm}[htbp]
-    \caption{unlink 操作}
-    \label{alg:unlink}
-    \begin{algorithmic}[1]
-        \State $txn \leftarrow$ \Call{begin\_write}{}
-        \State $child \leftarrow$ \Call{get\_for\_update}{$\text{dir\_entry\_key}(parent, name)$}
-        \If{$child = \text{None}$}
-            \State \Return \textsc{ENOENT}
-        \EndIf
-        \If{$child$ 是目录}
-            \State \Return \textsc{EISDIR}
-        \EndIf
-        \State \Call{delete\_dir\_entry}{$txn, parent, name$}
-        \State $child\_attr \leftarrow$ \Call{get\_for\_update}{$\text{inode\_key}(child.inode)$}
-        \State $child\_attr.nlink \leftarrow child\_attr.nlink - 1$
-        \State $purged \leftarrow \emptyset$
-        \If{$child\_attr.nlink = 0$ \textbf{and} $\text{open\_handles}[child.inode] = 0$}
-            \State \Call{delete\_inode}{$txn, child.inode$}
-            \State $purged \leftarrow purged \cup \{child.inode\}$ \Comment{通知客户端删除数据}
-        \ElsIf{$child\_attr.nlink = 0$ \textbf{and} $\text{open\_handles}[child.inode] > 0$}
-            \State $\text{pending\_deletes}.\text{insert}(child.inode)$ \Comment{延迟删除}
-            \State \Call{put\_inode}{$txn, child.inode, child\_attr$} \Comment{写回 nlink=0}
-        \Else
-            \State \Call{put\_inode}{$txn, child.inode, child\_attr$} \Comment{写回递减后的 nlink}
-        \EndIf
-        \State $now \leftarrow$ \Call{now\_secs}{}
-        \State \Call{append\_delta}{$txn, parent, \text{SetMtime}(now)$}
-        \State \Call{append\_delta}{$txn, parent, \text{SetCtime}(now)$}
-        \State \Call{commit}{$txn$}
-        \State \Return $\text{UnlinkResponse}\{purged\_inodes: purged\}$
-    \end{algorithmic}
-\end{algorithm}
+\texttt{release} 并不对应普通元数据变更，但它是延迟删除语义闭环中不可缺少的一环。每次客户端关闭文件句柄时，\texttt{release} 都会递减打开计数；若某个 inode 先前已经进入 \texttt{pending\_deletes} 且此时计数降为 0，MetadataServer 就把该 inode 返回给客户端，通知后者继续在 DataServer 侧执行最终的数据删除。
 
-unlink 的关键复杂性在于延迟删除（deferred deletion）。当 nlink 降为 0 但文件仍有打开的句柄时，不能立即删除——POSIX 语义要求进程可以继续读写已打开的文件，即使目录项已被移除。系统将这类 inode 记录到 \texttt{pending\_deletes} 集合中，等到 \texttt{release} 被调用（最后一个文件句柄关闭）时再执行物理删除。
+\subsubsection{rename}
 
-\texttt{open\_handles} 是一个 \texttt{HashMap<Inode, u32>}，记录每个 inode 当前打开的句柄数。open 操作递增计数，release 操作递减。两个数据结构（open\_handles 和 pending\_deletes）都由 Mutex 保护，在 unlink 和 release 的事务中访问。
-
-返回值 \texttt{UnlinkResponse} 中的 \texttt{purged\_inodes} 列表告诉客户端层（VfsCore）哪些 inode 的数据需要从 DataServer 删除。MetadataServer 自身不持有 DataOps 引用，数据删除的协调由 VfsCore 完成。
-
-\subsubsection{重命名（rename）}
-
-rename 是文件系统中最复杂的原子操作之一，因为它可能同时涉及 4 个不同的 inode（源父目录、目标父目录、被移动的文件、被覆盖的文件）。
+\texttt{rename} 是当前实现中最复杂的目录操作。它可能同时涉及源目录、目标目录、被移动对象以及潜在被覆盖对象四类状态，且要求整个过程原子可见。算法~\ref{alg:rename}概括了这一流程。
 
 \begin{algorithm}[htbp]
-    \caption{rename 操作}
+    \caption{\texttt{rename(old\_parent, old\_name, new\_parent, new\_name)} 的核心流程}
     \label{alg:rename}
     \begin{algorithmic}[1]
-        \State $involved \leftarrow$ 收集全部涉及的 inode ID
-        \State \Call{sort}{$involved$} \Comment{按 inode ID 排序，预防死锁}
-        \State $txn \leftarrow$ \Call{begin\_write}{}
-        \For{$id$ \textbf{in} $involved$}
-            \State \Call{get\_for\_update}{$\text{inode\_key}(id)$} \Comment{按序加锁}
-        \EndFor
-        \State $src \leftarrow$ \Call{lookup\_dir\_entry}{$txn, old\_parent, old\_name$}
-        \If{$src = \text{None}$}
-            \State \Return \textsc{ENOENT}
+        \State 读取并锁定源目录项
+        \State 若目标目录项存在，则读取其 inode 信息
+        \State 收集全部相关 inode 编号并排序，按序执行 \texttt{get\_for\_update}
+        \State 检查源对象与目标对象的类型兼容性
+        \If{目标存在且为非空目录}
+            \State 返回 \textsc{ENOTEMPTY}
         \EndIf
-        \State $purged \leftarrow \emptyset$
-        \State $dst \leftarrow$ \Call{lookup\_dir\_entry}{$txn, new\_parent, new\_name$}
-        \If{$dst \neq \text{None}$}
-            \If{$dst$ 是目录 \textbf{and} 目录非空}
-                \State \Return \textsc{ENOTEMPTY}
-            \EndIf
-            \State 按 unlink/rmdir 逻辑处理 $dst$，可能加入 $purged$
+        \If{目标存在}
+            \State 按覆盖删除逻辑处理目标对象
         \EndIf
-        \State \Call{delete\_dir\_entry}{$txn, old\_parent, old\_name$}
-        \State \Call{put\_dir\_entry}{$txn, new\_parent, new\_name, src.inode, src.mode$}
-        \If{$src$ 是目录 \textbf{and} $old\_parent \neq new\_parent$}
-            \State \Call{append\_delta}{$txn, old\_parent, \text{IncrementNlink}(-1)$}
-            \State \Call{append\_delta}{$txn, new\_parent, \text{IncrementNlink}(+1)$}
+        \State 删除源目录项，写入目标目录项
+        \State 更新被移动对象的 \texttt{ctime}
+        \If{移动的是目录且跨父目录}
+            \State 对旧父目录追加 \texttt{IncrementNlink(-1)}
+            \State 对新父目录追加 \texttt{IncrementNlink(+1)}
         \EndIf
-        \State $now \leftarrow$ \Call{now\_secs}{}
-        \State \Call{append\_delta}{$txn, old\_parent, \text{SetMtime}(now)$}
-        \State \Call{append\_delta}{$txn, old\_parent, \text{SetCtime}(now)$}
-        \If{$old\_parent \neq new\_parent$}
-            \State \Call{append\_delta}{$txn, new\_parent, \text{SetMtime}(now)$}
-            \State \Call{append\_delta}{$txn, new\_parent, \text{SetCtime}(now)$}
-        \EndIf
-        \State \Call{commit}{$txn$}
-        \State \Return $\text{RenameResponse}\{purged\_inodes: purged\}$
+        \State 对涉及的父目录追加时间戳增量
+        \State 提交事务并返回被覆盖对象列表
     \end{algorithmic}
 \end{algorithm}
 
-算法的第一步——收集并排序涉及的 inode ID——是死锁预防的关键。假如线程 A 执行 rename(dir1/a → dir2/b) 而线程 B 同时执行 rename(dir2/c → dir1/d)，不排序的话 A 先锁 dir1 再锁 dir2，B 先锁 dir2 再锁 dir1，形成环形等待。按 ID 排序后两个线程的加锁顺序一致，消除了死锁可能。
+排序加锁是 \texttt{rename} 能够避免死锁的关键。若线程 A 正在执行 \texttt{rename(dir1/a, dir2/b)}，线程 B 同时执行 \texttt{rename(dir2/c, dir1/d)}，只要双方都按 inode 编号升序加锁，就不会形成“你等我、我等你”的循环等待。
 
-跨目录移动目录时需要调整 nlink：源父目录的 nlink 减 1（失去了一个子目录的 \texttt{..} 引用），目标父目录的 nlink 加 1。移动普通文件不影响任何目录的 nlink。
+另一个容易被忽视的细节是，目录跨父目录移动时才需要调整父目录 \texttt{nlink}。移动普通文件不会影响任何目录的 \texttt{nlink}；同一父目录内对目录重命名，也不会影响父目录 \texttt{nlink}。这些细节都直接决定了增量日志中应追加哪些 \texttt{DeltaOp}。
 
-\subsubsection{目录遍历（readdir）}
+\subsubsection{readdir、open 与写入协调}
 
-readdir 利用 \texttt{dir\_entries} CF 的前缀迭代器实现：
+\texttt{readdir} 完全依赖 \texttt{dir\_entries} 列族的前缀扫描能力。给定父目录 inode 后，MetadataServer 构造前缀 \texttt{[D][parent: u64 BE]}，调用 RocksDB 前缀迭代器读取全部同前缀目录项值，并从目录项值中直接提取子 inode 与 \texttt{mode}。由于目录项值中已经携带对象类型，普通 \texttt{readdir} 不必逐项回查 inode。当前实现返回的是持久化目录项本身，不额外在元数据层存储 \texttt{.} 与 \texttt{..} 两个伪条目。
 
-\begin{algorithm}[htbp]
-    \caption{readdir 操作}
-    \label{alg:readdir}
-    \begin{algorithmic}[1]
-        \State $prefix \leftarrow$ \texttt{[b'D'][inode: u64 BE]} \Comment{9 字节}
-        \State $iter \leftarrow$ \Call{prefix\_iterator\_cf}{$\text{dir\_entries}, prefix$}
-        \State $entries \leftarrow [\text{DirEntry}\{``\texttt{.}", inode, mode\}, \text{DirEntry}\{``\texttt{..}", parent, parent\_mode\}]$
-        \For{$(key, value)$ \textbf{in} $iter$}
-            \If{$key$ 不以 $prefix$ 开头}
-                \State \textbf{break}
-            \EndIf
-            \State $name \leftarrow$ \Call{extract\_child\_name}{$key$} \Comment{截取偏移 9 之后的 UTF-8 字节}
-            \State $child\_inode \leftarrow$ \Call{u64\_from\_be}{$value[0..8]$}
-            \State $child\_mode \leftarrow$ \Call{u32\_from\_be}{$value[8..12]$}
-            \State $entries.\text{push}(\text{DirEntry}\{name, child\_inode, child\_mode\})$
-        \EndFor
-        \State \Return $entries$
-    \end{algorithmic}
-\end{algorithm}
+\texttt{open} 的职责与本地文件系统有所不同。它不仅要为客户端分配句柄，还要返回该 inode 对应的 \texttt{DataLocation}，使客户端后续的 \texttt{read} 和 \texttt{write} 可以直接路由到正确的 DataServer。当前实现里，\texttt{VfsCore} 维护了句柄到 \texttt{server\_id} 的映射；\texttt{read}、\texttt{write} 与 \texttt{truncate} 则根据该映射选择数据后端。
 
-前缀提取器设为 9 字节（\texttt{[b'D'][parent: u64 BE]}），使 RocksDB 可以利用 Bloom 过滤器快速判断某个 SST 块是否包含目标父目录的条目。对于空目录或子项很少的目录，这比全表扫描要快几个数量级。
+写入完成后的元数据更新由客户端主动协调。DataServer 成功完成 \texttt{write\_data} 后，客户端并不会假设 MetadataServer 已经自动得知文件大小变化，而是显式调用 \texttt{report\_write(inode, new\_size, mtime)}。这样做的结果是，数据路径可以保持尽量简洁，而文件长度与修改时间仍由 MetadataServer 统一维护。
 
-readdir 手动插入 \texttt{.} 和 \texttt{..} 两个伪条目。这两个条目不存储在 RocksDB 中——存储它们会浪费空间，并且在 rename 移动目录时需要额外更新 \texttt{..} 的 inode 指向。
+\subsection{数据服务与客户端协调}
+\label{sec:data_path}
 
-\subsection{存储后端实现}
-\label{sec:storage}
+\subsubsection{VfsCore 路由层}
 
-\subsubsection{RocksDB 元数据存储}
+\texttt{VfsCore} 是客户端内部最关键的协调层。它实现 \texttt{VfsOps}，对 FUSE 层暴露的是完整的 POSIX 风格接口；对下游则同时持有一个 \texttt{MetadataOps} 对象和一个或多个 \texttt{DataOps} 对象。元数据请求由 \texttt{VfsCore} 直接转发给 MetadataServer；数据请求则根据句柄映射或默认 DataServer 路由到相应 \texttt{DataOps} 实现。
 
-元数据存储由三个 trait 实现组成：\texttt{RocksMetadataStore}（映射到 \texttt{inodes} CF）、\texttt{RocksDirectoryIndex}（映射到 \texttt{dir\_entries} CF）和 \texttt{RocksDeltaStore}（映射到 \texttt{delta\_entries} CF）。三者共享同一个 \texttt{Arc<TransactionDB>} 实例。
+更重要的是，\texttt{VfsCore} 还承担“补齐跨服务语义”的职责。MetadataServer 返回的 \texttt{UnlinkResponse}、\texttt{RenameResponse} 和 \texttt{ReleaseResponse} 中，会携带 \texttt{purged\_inodes} 列表；客户端收到这些列表后，再调用 DataServer 的 \texttt{delete\_data} 完成数据侧清理。\texttt{setattr} 若导致文件缩短，也是在客户端收到 \texttt{needs\_truncate} 后，由 \texttt{VfsCore} 进一步调用 DataServer 执行真实的数据截断。
 
-\texttt{StorageBundle} trait 提供跨 CF 的原子写能力。其 \texttt{begin\_write()} 方法返回一个 \texttt{AtomicWriteBatch}，内部持有 RocksDB 的 \texttt{Transaction} 对象。调用者向 batch 中添加 \texttt{BatchOp}（put 或 delete，每个操作指定目标 CF），最后调用 \texttt{commit()} 一次性提交。
+换言之，RucksFS 并没有把所有“涉及元数据与数据两侧的复合语义”都压到 MetadataServer 内部，而是通过 \texttt{VfsCore} 在客户端做显式协调。这种设计让 MetadataServer 保持“只理解元数据事务”的边界，同时又没有牺牲最终的 POSIX 表现。
 
-RocksDB 的打开配置包括：
+\subsubsection{DataServer 与原始磁盘后端}
 
-\begin{itemize}
-    \item \texttt{create\_if\_missing = true}，\texttt{create\_missing\_column\_families = true}——首次启动时自动创建库和列族。
-    \item 使用 \texttt{TransactionDB::open\_cf\_descriptors} 打开，每个 CF 使用独立的 \texttt{Options}（Bloom、前缀提取器、压缩配置如前述）。
-    \item WAL 默认开启，保证崩溃恢复的原子性。
-\end{itemize}
+DataServer 的实现相对直接。它只是对 \texttt{DataStore} 的封装层，向上实现 \texttt{DataOps}，向下把请求交给具体的数据后端。当前唯一的数据后端是 \texttt{RawDiskDataStore}，它把所有 inode 的数据映射到一个连续的 \texttt{data.raw} 文件中，并用公式
+\[
+\text{disk\_offset} = \text{inode} \times \text{max\_file\_size} + \text{file\_offset}
+\]
+计算绝对偏移。随后，读取和写入分别通过 \texttt{pread} 与 \texttt{pwrite} 完成。
 
-\texttt{InodeAllocator} 管理 inode 编号分配。它维护一个 \texttt{AtomicU64} 计数器，每次 alloc() 调用返回当前值并原子递增。计数器的值持久化在 \texttt{system} CF 中，重启时通过 \texttt{InodeAllocator::load} 恢复。
+这种设计很朴素，但有两个现实好处。第一，数据路径不需要再经过 LSM-tree，也不需要维护 extent 树或块分配器，读写语义足够直接。第二，\texttt{pread}/\texttt{pwrite} 不共享文件游标，不同线程可以并发访问同一后端文件而不需要额外的全局锁。其不足也同样明显：每个 inode 会被分配一个固定大小的逻辑地址空间，空间利用率不如成熟块映射方案高。
 
-\subsubsection{原始磁盘数据存储}
+当前实现中的 \texttt{delete\_data} 仍然是空操作。原因不是忽略删除语义，而是 inode 编号目前单调递增且不复用，旧数据区域一旦失去目录项与 inode 的可达性，就不会再被后续对象引用。这样做避免了在 \texttt{unlink} 热路径上执行大块零填充，但也意味着物理空间回收尚未实现，这属于后续需要补足的工程能力。
 
-\texttt{RawDiskDataStore} 使用一个单独的 flat 文件（\texttt{data.raw}）作为文件数据存储。每个 inode 在该文件中占据固定大小的地址空间，偏移量计算公式为：
+\subsubsection{挂载选项与客户端实现细节}
 
-$$\text{disk\_offset} = \text{inode} \times \text{max\_file\_size} + \text{file\_offset}$$
+FUSE 客户端的挂载选项会直接影响访问语义与系统表现。当前实现通过 \texttt{fuse3} 设置了 \texttt{fs\_name("rucksfs")}、\texttt{force\_readdir\_plus(true)}、\texttt{allow\_other(true)} 和 \texttt{default\_permissions(true)}。其中，\texttt{force\_readdir\_plus} 使内核优先走 \texttt{readdirplus} 路径，客户端可以在目录遍历返回中附带目录项的基本属性信息；\texttt{default\_permissions} 则把基础权限检查交由 Linux VFS 完成。客户端返回给内核的属性 TTL 默认为 1 秒，\texttt{max\_write} 设置为 128\,KiB。
 
-这种简单的线性映射不需要块分配表或 extent 树。读写操作直接走 \texttt{pread}/\texttt{pwrite} 系统调用，内核在内部处理偏移量定位，多个线程可以并发操作同一个文件描述符而不互相干扰。
+这些配置并不神秘，但它们共同决定了一个事实：RucksFS 的客户端并不是单纯的“RPC 转发器”。它既要满足 FUSE 挂载的交互约束，又要在多服务之间协调语义，还要控制目录遍历与属性访问的代价。因此，客户端本身就是系统设计的一部分，而不只是一个薄薄的封装层。
 
-这个设计明显的局限是空间利用率：即使文件实际只有 1 字节，也会在地址空间中占据 max\_file\_size 的区域。不过由于文件系统支持稀疏文件（未写入的区域不分配物理磁盘块），实际的磁盘占用与文件内容大小成正比。
+\subsection{实现取舍与当前边界}
 
-选择 flat 文件而非将数据存入 RocksDB 的另一个 CF，是为了避免大 value 带来的 LSM-Tree 写放大问题。文件数据的访问模式是大块顺序读写，与 LSM-Tree 优化的小粒度随机读写模式不匹配\cite{lu2016wisckey}。
+RucksFS 当前实现有意保持了“单 MetadataServer + 单默认 DataServer”的主路径。虽然 \texttt{DataLocation} 与 \texttt{VfsCore::with\_data\_servers()} 已经为多 DataServer 路由预留接口，但元数据分片、多副本一致性和物理空间回收都尚未进入本文实现范围。与此同时，MetadataServer 已经完整实现了目录事务、增量更新、后台折叠和延迟删除；因此，本文更关注的是“客户端/元数据服务/数据服务分离条件下的元数据关键路径优化”，而不是大规模分片与副本管理。
 
-\subsection{性能优化策略}
-\label{sec:optimization}
-
-\subsubsection{多列族差异化配置}
-
-四个列族根据各自的访问模式做了差异化配置，汇总如表~\ref{tab:cf_tuning} 所示。
-
-\begin{table}[htbp]
-    \centering
-    \caption{RocksDB 各列族优化配置}
-    \label{tab:cf_tuning}
-    \begin{tabular}{lllp{5cm}}
-    \toprule
-    \textbf{列族} & \textbf{Bloom 过滤器} & \textbf{压缩算法} & \textbf{设计考量} \\
-    \midrule
-    inodes & 10 bit/key & LZ4 & 纯点查场景，Bloom 过滤器将不存在 key 的查询开销从 O(L) 降到 O(1)，L 为 LSM 层数 \\
-    dir\_entries & 10 bit/key + 9B 前缀 & LZ4 & 前缀提取器使同一父目录的条目在 memtable 和 SST 中聚集，加速 readdir 的前缀迭代 \\
-    delta\_entries & 10 bit/key + 9B 前缀 & 无 & 数据生命周期短（被后台压缩消费后删除），跳过 LZ4 编解码减少 CPU 开销 \\
-    system & 无 & LZ4 & 条目极少（仅 inode 分配器状态等），Bloom 的内存开销不值得 \\
-    \bottomrule
-    \end{tabular}
-\end{table}
-
-Bloom 过滤器设为 10 bit/key，对应约 1\% 的假阳性率\cite{dong2021rocksdb}。这是 RocksDB 社区推荐的默认值。曾尝试增加到 15 bit/key（假阳性率降到约 0.1\%），但在测试负载下 getattr 的 P99 延迟没有可观测的改善，而 Bloom 过滤器的内存占用增加了 50\%。
-
-\subsubsection{缓存策略}
-
-系统存在两层缓存。第一层是应用层的 \texttt{InodeFoldedCache}，如第~\ref{sec:delta} 节所述，默认容量 10{,}000 个条目，存储折叠后的 InodeValue。这一层缓存的目的是避免增量扫描的开销。
-
-第二层是 RocksDB 内置的块缓存（Block Cache），由 RocksDB 自动管理。块缓存以 4\,KiB 的数据块为粒度缓存 SST 文件的内容。
-
-一个早期的设计尝试是增大 RocksDB 块缓存到 256\,MiB，期望减少磁盘读取次数。但测试发现，在元数据密集型负载下（小文件创建/删除），块缓存的命中率只有约 35\%——因为 LSM-Tree 的 compaction 会频繁使缓存条目失效。将 256\,MiB 块缓存改为将同等内存预算分配给更大的 InodeFoldedCache（50{,}000 条目），吞吐量反而提升了约 18\%。当前配置保留了 RocksDB 的默认块缓存大小，将优化重心放在应用层缓存上。
-
-\subsubsection{后台压缩机制}
-
-后台压缩的核心参数已在第~\ref{sec:delta} 节讨论。这里补充两个实现细节。
-
-压缩操作本身使用 \texttt{AtomicWriteBatch}，将合并后的基础值写入和增量删除打包为原子操作。如果压缩过程中 MetadataServer 宕机，重启后增量仍然存在（它们还没被删除），下一次压缩会重新处理。这保证了压缩的幂等性——同一批增量被折叠两次，结果与折叠一次相同（因为增量不修改基础值中的其他字段）。
-
-压缩线程的优先级低于请求处理线程。在 Rust 的 \texttt{std::thread} 模型下没有直接的优先级控制，系统通过限制每轮压缩处理的 inode 数量（当前无上限，但脏集合的大小自然受限于写入速率）和在每个 inode 处理完后检查停止标志来实现近似的优先级调度。
-
-\subsubsection{异步 FUSE 处理}
-
-FuseClient 使用 fuse3 库的异步模式，将 \texttt{/dev/fuse} 的读写操作注册到 tokio 的 epoll 事件循环中，单个线程即可处理大量并发请求。VfsCore 的所有方法签名使用 \texttt{async fn}（通过 \texttt{async\_trait} 宏），在 tokio 运行时上执行。
-
-这种设计允许 MetadataServer 和 DataServer 在未来替换为远程 gRPC 服务时，客户端代码不需要修改——只需要将 EmbeddedClient（进程内直接调用）替换为 gRPC 客户端即可，VfsOps trait 的接口保持不变。
+这也是全文设计边界最需要明确的一点：RucksFS 已经不是单机文件系统原型，而是一个具备真实客户端、元数据服务和数据服务边界的分布式原型；但它也尚未扩展到多元数据分片、多副本容错和完整回收策略。这一定位决定了后续实验的意义：它主要验证的是元数据组织方式与客户端协调逻辑，而不是一个大规模分布式控制面的最终形态。
 
 \subsection{本章小结}
 
-RucksFS 将全部元数据建模为键值对，交给 RocksDB 的 LSM-Tree 引擎\cite{oneil1996lsmtree}处理。存储层按访问模式拆分为 4 个列族，inode 属性使用 57 字节固定长度手工序列化，文件数据则绕过 RocksDB 直接写入原始磁盘——大 value 在 LSM-Tree 中的写放大代价太高，不值得。
-
-并发控制依赖 PCC 事务和 WriteBatch 的原子写入保证。加锁按 inode ID 排序以避免死锁，所有前置条件检查在事务内完成，堵住 TOCTOU 窗口。热目录的竞争问题由增量日志解决：对父 inode 的更新从排他锁变为原子计数器上的追加写，后台压缩线程再将积累的增量合并回基础值。这套读写分摊的策略在高并发创建删除场景下效果明显，具体数据见第~\ref{sec:experiments} 章。
+本章给出了 RucksFS 的具体实现方案。系统以 FUSE 客户端、MetadataServer 和 DataServer 组成三段式请求路径，以 \texttt{VfsCore} 协调元数据与数据操作；元数据被拆分为 4 个 RocksDB 列族，并以大端序编码组织 inode、目录项、增量日志和系统状态；目录操作依赖悲观事务与统一加锁顺序保证并发正确性；父目录热更新则通过增量日志与后台折叠削弱写争用。基于这套设计，第四章将进一步验证其正确性与性能表现。
