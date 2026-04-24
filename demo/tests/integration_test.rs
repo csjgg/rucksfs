@@ -786,8 +786,11 @@ async fn unlink_clears_data_location() {
     let resp = meta.open(file.inode, 0).await.unwrap();
     assert_eq!(resp.data_location.server_id, "test-ds:9001");
 
-    // Unlink the link — nlink goes from 1 to 0, data_location IS deleted.
-    // But inode is also deleted, so open should fail.
+    // Release the handle opened above before unlinking the last link.
+    meta.release(file.inode).await.unwrap();
+
+    // Unlink the link — nlink goes from 1 to 0, no open handles, so
+    // inode and data_location are deleted immediately.
     meta.unlink(ROOT, "f1_link").await.unwrap();
     let err = meta.open(file.inode, 0).await;
     assert!(err.is_err());

@@ -16,3 +16,30 @@ CLAUDE.local.md
 benchmark/results/
 tasks/
 infra/tencent-bench/shunjiecuitest.pem
+
+# Local tooling state
+.codex
+
+# Terraform local plans
+infra/tencent-bench/*.tfplan
+infra/tencent-bench/*.out
+
+# Thesis local build artifacts
+docs/thesis-template/.build/
+docs/thesis-template/_minted-*/
+docs/thesis-template/*.aux
+docs/thesis-template/*.bcf
+docs/thesis-template/*.bbl
+docs/thesis-template/*.blg
+docs/thesis-template/*.fdb_latexmk
+docs/thesis-template/*.fls
+docs/thesis-template/*.out
+docs/thesis-template/*.pdf
+docs/thesis-template/*.run.xml
+docs/thesis-template/*.toc
+docs/thesis-template/*.xdv
+docs/thesis-template/*.synctex.gz
+docs/thesis-template/*.log
+docs/thesis-template/missfont.log
+docs/thesis-template/*.backup
+docs/thesis-template/**/*.backup

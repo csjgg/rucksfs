@@ -30,6 +30,7 @@ fn map_error(err: FsError) -> Status {
         FsError::NotADirectory => Status::invalid_argument(err.to_string()),
         FsError::IsADirectory => Status::invalid_argument(err.to_string()),
         FsError::DirectoryNotEmpty => Status::failed_precondition(err.to_string()),
+        FsError::NameTooLong => Status::out_of_range(err.to_string()),
         FsError::TransactionConflict => Status::aborted(err.to_string()),
         FsError::Other(msg) => Status::internal(msg),
     }

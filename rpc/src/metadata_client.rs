@@ -87,6 +87,7 @@ fn map_error(err: tonic::Status) -> FsError {
         tonic::Code::AlreadyExists => FsError::AlreadyExists,
         tonic::Code::FailedPrecondition => FsError::DirectoryNotEmpty,
         tonic::Code::Aborted => FsError::TransactionConflict,
+        tonic::Code::OutOfRange => FsError::NameTooLong,
         _ => FsError::Io(err.message().to_string()),
     }
 }

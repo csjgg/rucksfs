@@ -29,10 +29,11 @@
 
 %====================== 字体 ======================%
 \setCJKmainfont[
-    BoldFont={FandolHei},
-    ItalicFont={FandolKai}
-]{FandolSong}
-\setmainfont{Times New Roman}
+    Path=/data/home/shunjiecui/texmf/fonts/opentype/public/fandol/,
+    BoldFont=FandolHei-Regular.otf,
+    ItalicFont=FandolKai-Regular.otf
+]{FandolSong-Regular.otf}
+\setmainfont{Liberation Serif}
 
 %====================== 参数 ======================%
 \def\HGP@mode{thesis}
@@ -61,7 +62,10 @@
 
 % 封面
 % \def\@school{计算机科学与技术}
-\newCJKfontfamily\zhzhongsong{STZhongsong}
+\newCJKfontfamily\zhzhongsong[
+    Path=/data/home/shunjiecui/texmf/fonts/opentype/public/fandol/,
+    BoldFont=FandolHei-Regular.otf
+]{FandolSong-Regular.otf}
 \newcommand{\school}[1]{\def\@school{#1}}
 \newcommand{\classnum}[1]{\def\@classnum{#1}}
 \newcommand{\stunum}[1]{\def\@stunum{#1}}
@@ -335,7 +339,7 @@
 }
 
 %================== tikz & plots ==================%
-\pgfplotsset{compat=1.17}
+\pgfplotsset{compat=1.15}
 \usetikzlibrary{quotes,angles}
 \usetikzlibrary{shapes,arrows,positioning}
 \usetikzlibrary{calc,fit,backgrounds,decorations.pathreplacing}

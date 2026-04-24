@@ -9,7 +9,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Configuration (override before sourcing if needed)
 # ---------------------------------------------------------------------------
-SERVER1_IP="${SERVER1_IP:-10.0.1.15}"   # RucksFS MDS+DS
+SERVER1_IP="${SERVER1_IP:-10.0.1.4}"   # RucksFS MDS+DS
 SERVER2_IP="${SERVER2_IP:-10.0.1.8}"   # NFS
 NFS_MOUNT="${NFS_MOUNT:-/mnt/nfs}"
 RUCKSFS_MOUNT="${RUCKSFS_MOUNT:-/mnt/rucksfs-dist}"

@@ -52,6 +52,17 @@ fn now_secs() -> u64 {
 /// Maximum number of retries for transient transaction conflicts.
 const TXN_MAX_RETRIES: usize = 3;
 
+/// POSIX NAME_MAX: maximum length of a single filename component (in bytes).
+const NAME_MAX: usize = 255;
+
+/// Validate that a filename does not exceed NAME_MAX.
+fn validate_name(name: &str) -> FsResult<()> {
+    if name.len() > NAME_MAX {
+        return Err(FsError::NameTooLong);
+    }
+    Ok(())
+}
+
 /// Default capacity for the folded inode cache.
 const DEFAULT_CACHE_CAPACITY: usize = 10_000;
 
@@ -443,6 +454,7 @@ where
     DS: DeltaStore,
 {
     async fn lookup(&self, parent: Inode, name: &str) -> FsResult<FileAttr> {
+        validate_name(name)?;
         let child_inode = self
             .index
             .resolve_path(parent, name)?
@@ -493,6 +505,7 @@ where
                 if new_size != iv.size {
                     let is_shrink = new_size < iv.size;
                     iv.size = new_size;
+                    iv.mtime = ts; // POSIX: truncation updates mtime.
                     do_truncate = is_shrink;
                 }
             }
@@ -538,6 +551,7 @@ where
     }
 
     async fn create(&self, parent: Inode, name: &str, mode: u32, uid: u32, gid: u32) -> FsResult<FileAttr> {
+        validate_name(name)?;
         let name_owned = name.to_string();
 
         let (iv, new_inode) = self.execute_with_retry(|| {
@@ -602,6 +616,7 @@ where
     }
 
     async fn mkdir(&self, parent: Inode, name: &str, mode: u32, uid: u32, gid: u32) -> FsResult<FileAttr> {
+        validate_name(name)?;
         let name_owned = name.to_string();
 
         let (iv, new_inode) = self.execute_with_retry(|| {
@@ -665,6 +680,7 @@ where
     }
 
     async fn unlink(&self, parent: Inode, name: &str) -> FsResult<UnlinkResponse> {
+        validate_name(name)?;
         let name_owned = name.to_string();
 
         let (need_delete_data, parent_ts) = self.execute_with_retry(|| {
@@ -693,9 +709,26 @@ where
             Self::batch_delete_dir_entry(batch.as_mut(), parent, &name_owned);
 
             let result = if child_iv.nlink == 0 {
-                Self::batch_delete_inode(batch.as_mut(), child_inode);
-                Self::batch_delete_data_location(batch.as_mut(), child_inode);
-                Some(child_inode)
+                // Check if the file has open handles. If so, keep the inode
+                // in storage (with nlink=0) so that getattr/read still work
+                // on the open file descriptor. Actual deletion is deferred
+                // until the last handle is closed (via release()).
+                let has_handles = {
+                    let handles = self.open_handles.lock().expect("open_handles poisoned");
+                    handles.get(&child_inode).copied().unwrap_or(0) > 0
+                };
+                if has_handles {
+                    // Keep inode with nlink=0; defer full deletion to release().
+                    let ts = now_secs();
+                    child_iv.ctime = ts;
+                    Self::batch_put_inode(batch.as_mut(), child_inode, &child_iv);
+                    // Mark as pending delete (will be cleaned up in release()).
+                    Some((child_inode, true)) // (inode, deferred)
+                } else {
+                    Self::batch_delete_inode(batch.as_mut(), child_inode);
+                    Self::batch_delete_data_location(batch.as_mut(), child_inode);
+                    Some((child_inode, false)) // (inode, not deferred)
+                }
             } else {
                 let ts = now_secs();
                 child_iv.ctime = ts;
@@ -716,11 +749,20 @@ where
             if !self.index.shares_batch_storage() {
                 let _ = self.index.remove_child(parent, &name_owned);
             }
-            if result.is_some() {
-                let _ = self.delta_store.clear_deltas(child_inode);
-                self.cache.invalidate(child_inode);
-            } else {
-                self.cache.put(child_inode, child_iv);
+            match &result {
+                Some((ino, false)) => {
+                    // Immediately deleted: clear cache and deltas.
+                    let _ = self.delta_store.clear_deltas(*ino);
+                    self.cache.invalidate(*ino);
+                }
+                Some((_, true)) => {
+                    // Deferred: update cache with nlink=0 inode.
+                    self.cache.put(child_inode, child_iv);
+                }
+                None => {
+                    // nlink > 0: update cache with decremented nlink.
+                    self.cache.put(child_inode, child_iv);
+                }
             }
 
             Ok((result, ts))
@@ -728,13 +770,9 @@ where
 
         // Determine which inodes need data deletion.
         let mut purged_inodes = Vec::new();
-        if let Some(inode) = need_delete_data {
-            let has_handles = {
-                let handles = self.open_handles.lock().expect("open_handles poisoned");
-                handles.get(&inode).copied().unwrap_or(0) > 0
-            };
-            if has_handles {
-                // Defer deletion until last handle is closed.
+        if let Some((inode, deferred)) = need_delete_data {
+            if deferred {
+                // File has open handles: defer data+metadata deletion to release().
                 let mut pending = self.pending_deletes.lock().expect("pending_deletes poisoned");
                 pending.insert(inode);
             } else {
@@ -749,6 +787,7 @@ where
     }
 
     async fn rmdir(&self, parent: Inode, name: &str) -> FsResult<()> {
+        validate_name(name)?;
         let name_owned = name.to_string();
 
         let parent_ts = self.execute_with_retry(|| {
@@ -818,6 +857,8 @@ where
         new_parent: Inode,
         new_name: &str,
     ) -> FsResult<RenameResponse> {
+        validate_name(name)?;
+        validate_name(new_name)?;
         let name_owned = name.to_string();
         let new_name_owned = new_name.to_string();
 
@@ -898,15 +939,29 @@ where
                     }
                     dst_was_dir = true;
                 } else {
-                    delete_inode = Some(dst_inode);
+                    // Check nlink of destination file.
+                    let dst_iv = inode_values
+                        .get(&dst_inode)
+                        .ok_or(FsError::NotFound)?;
+                    if dst_iv.nlink > 1 {
+                        // Multiply-linked: decrement nlink, don't delete inode.
+                        let mut updated_dst = dst_iv.clone();
+                        updated_dst.nlink -= 1;
+                        updated_dst.ctime = ts;
+                        Self::batch_put_inode(batch.as_mut(), dst_inode, &updated_dst);
+                    } else {
+                        delete_inode = Some(dst_inode);
+                    }
                 }
             }
 
             // Build atomic batch.
             if let Some((dst_inode, _)) = dst_inode_opt {
                 Self::batch_delete_dir_entry(batch.as_mut(), new_parent, &new_name_owned);
-                Self::batch_delete_inode(batch.as_mut(), dst_inode);
-                Self::batch_delete_data_location(batch.as_mut(), dst_inode);
+                if delete_inode.is_some() {
+                    Self::batch_delete_inode(batch.as_mut(), dst_inode);
+                    Self::batch_delete_data_location(batch.as_mut(), dst_inode);
+                }
             }
 
             Self::batch_delete_dir_entry(batch.as_mut(), parent, &name_owned);
@@ -1013,10 +1068,29 @@ where
         Ok(RenameResponse { purged_inodes })
     }
 
-    async fn open(&self, inode: Inode, _flags: u32) -> FsResult<OpenResponse> {
+    async fn open(&self, inode: Inode, flags: u32) -> FsResult<OpenResponse> {
         let iv = self.load_inode(inode)?;
         if Self::is_dir(iv.mode) {
             return Err(FsError::IsADirectory);
+        }
+
+        // Handle O_TRUNC: truncate the file and update timestamps.
+        const O_TRUNC: u32 = 0o1000;
+        if flags & O_TRUNC != 0 && iv.size > 0 {
+            self.execute_with_retry(|| {
+                let mut batch = self.begin_write();
+                let key = encode_inode_key(inode);
+                let raw = batch.get_for_update_inode(&key)?.ok_or(FsError::NotFound)?;
+                let mut iv = InodeValue::deserialize(&raw)?;
+                let ts = now_secs();
+                iv.size = 0;
+                iv.mtime = ts;
+                iv.ctime = ts;
+                Self::batch_put_inode(batch.as_mut(), inode, &iv);
+                batch.commit()?;
+                self.cache.put(inode, iv);
+                Ok(())
+            })?;
         }
         // Increment open handle count.
         {
@@ -1065,6 +1139,7 @@ where
     }
 
     async fn link(&self, parent: Inode, name: &str, target_inode: Inode) -> FsResult<FileAttr> {
+        validate_name(name)?;
         let name_owned = name.to_string();
 
         let (target_iv, parent_ts) = self.execute_with_retry(|| {
@@ -1149,6 +1224,7 @@ where
         uid: u32,
         gid: u32,
     ) -> FsResult<FileAttr> {
+        validate_name(name)?;
         let name_owned = name.to_string();
         let target_owned = link_target.to_string();
 
@@ -1229,6 +1305,17 @@ where
     async fn release(&self, inode: Inode) -> FsResult<ReleaseResponse> {
         let mut purged_inodes = Vec::new();
         if self.check_and_clear_deferred_delete(inode) {
+            // Now that the last handle is closed, delete the inode and data
+            // location from the metadata store (they were kept alive during
+            // deferred unlink so that getattr/read still worked).
+            self.execute_with_retry(|| {
+                let mut batch = self.begin_write();
+                Self::batch_delete_inode(batch.as_mut(), inode);
+                Self::batch_delete_data_location(batch.as_mut(), inode);
+                batch.commit()
+            })?;
+            let _ = self.delta_store.clear_deltas(inode);
+            self.cache.invalidate(inode);
             purged_inodes.push(inode);
         }
         Ok(ReleaseResponse { purged_inodes })

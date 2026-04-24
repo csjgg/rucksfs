@@ -34,13 +34,12 @@ resource "tencentcloud_instance" "client" {
 }
 
 # ============================================================
-# Server — JuiceFS + TiKV (8C16G + 200GB SSD)
-# TiKV (single-node) + PD for metadata, local disk for data.
-# Same spec as v2 servers for fair comparison.
+# Server — RucksFS MetadataServer + DataServer (8C16G + 200GB SSD)
+# Both services co-located on one machine (same as benchmark setup).
 # ============================================================
 
-resource "tencentcloud_instance" "server_jfs" {
-  instance_name              = "${var.name_prefix}-server-tikv"
+resource "tencentcloud_instance" "server_rucksfs" {
+  instance_name              = "${var.name_prefix}-server-rucksfs"
   availability_zone          = var.availability_zone
   image_id                   = var.image_id
   instance_type              = var.instance_type_server
@@ -61,11 +60,11 @@ resource "tencentcloud_instance" "server_jfs" {
     data_disk_size = var.data_disk_size_server
   }
 
-  user_data = base64encode(file("${path.module}/scripts/init-server-tikv.sh"))
+  user_data = base64encode(file("${path.module}/scripts/init-server-rucksfs.sh"))
 
   tags = {
     billing = "shunjiecui"
     app     = "rucksfs-bench"
-    role    = "server-tikv"
+    role    = "server-rucksfs"
   }
 }

@@ -112,6 +112,8 @@ pub enum FsError {
     IsADirectory,
     #[error("directory not empty")]
     DirectoryNotEmpty,
+    #[error("name too long")]
+    NameTooLong,
     #[error("io error: {0}")]
     Io(String),
     #[error("invalid input: {0}")]
