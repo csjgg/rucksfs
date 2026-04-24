@@ -91,6 +91,15 @@ pub struct RenameResponse {
     pub purged_inodes: Vec<Inode>,
 }
 
+/// Response from `MetadataOps::create_and_open`: combines `create` + `open`
+/// into a single RPC, saving one network round trip per file creation.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CreateAndOpenResponse {
+    pub attr: FileAttr,
+    pub handle: u64,
+    pub data_location: DataLocation,
+}
+
 /// Response from `MetadataOps::release`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ReleaseResponse {
@@ -183,6 +192,31 @@ pub trait MetadataOps: Send + Sync {
     /// Notify that a file handle has been closed. Decrements open handle
     /// count and triggers deferred deletion if nlink=0 and no handles remain.
     async fn release(&self, inode: Inode) -> FsResult<ReleaseResponse>;
+
+    /// Atomic create-and-open: create a new file and return an open handle
+    /// in a single call.  Eliminates one round trip per file creation in
+    /// mdtest-style `openat(O_CREAT)` workloads.
+    ///
+    /// The default implementation calls `create` then `open` sequentially.
+    /// Implementations backed by a local MetadataServer should override this
+    /// to perform both operations in one transaction, avoiding the extra RPC.
+    async fn create_and_open(
+        &self,
+        parent: Inode,
+        name: &str,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+        flags: u32,
+    ) -> FsResult<CreateAndOpenResponse> {
+        let attr = self.create(parent, name, mode, uid, gid).await?;
+        let open_resp = self.open(attr.inode, flags).await?;
+        Ok(CreateAndOpenResponse {
+            attr,
+            handle: open_resp.handle,
+            data_location: open_resp.data_location,
+        })
+    }
 }
 
 /// Pure data I/O operations. Implemented by DataServer.
@@ -236,4 +270,23 @@ pub trait VfsOps: Send + Sync {
     ) -> FsResult<FileAttr>;
     async fn readlink(&self, inode: Inode) -> FsResult<String>;
     async fn release(&self, inode: Inode) -> FsResult<()>;
+
+    /// Atomic create-and-open for the FUSE CREATE callback.
+    /// Returns the new file's attributes and an open handle in a single call.
+    ///
+    /// Default implementation falls back to `create + open`, which keeps
+    /// backward compatibility for callers that haven't been optimized.
+    async fn create_and_open(
+        &self,
+        parent: Inode,
+        name: &str,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+        flags: u32,
+    ) -> FsResult<(FileAttr, u64)> {
+        let attr = self.create(parent, name, mode, uid, gid).await?;
+        let fh = self.open(attr.inode, flags).await?;
+        Ok((attr, fh))
+    }
 }

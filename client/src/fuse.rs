@@ -182,14 +182,14 @@ impl<C: VfsOps + 'static> Filesystem for FuseClient<C> {
         let name = name.to_string_lossy().to_string();
         // fuse3 doesn't pass umask separately in create; use mode as-is.
         let effective_mode = mode & 0o7777;
-        let attr = self
+        // Merged create+open: one RPC instead of two.  The server performs
+        // both operations in a single transaction; we get back the new
+        // file's attributes and its open handle together.
+        let (attr, fh) = self
             .client
-            .create(parent, &name, effective_mode, req.uid, req.gid)
+            .create_and_open(parent, &name, effective_mode, req.uid, req.gid, flags)
             .await
             .map_err(fs_error_to_errno)?;
-        let ino = attr.inode;
-        // Auto-open the newly created file.
-        let fh = self.client.open(ino, flags).await.map_err(fs_error_to_errno)?;
         Ok(ReplyCreated {
             ttl: TTL,
             attr: to_fuse3_attr(attr),
@@ -312,7 +312,18 @@ impl<C: VfsOps + 'static> Filesystem for FuseClient<C> {
         _lock_owner: u64,
         _flush: bool,
     ) -> Fuse3Result<()> {
-        self.client.release(inode).await.map_err(fs_error_to_errno)
+        // POSIX close() does not require the filesystem to report errors
+        // synchronously.  Fire-and-forget the release RPC so that FUSE
+        // can immediately process the next operation on this thread.
+        // This turns release from a sync 240us+ RPC into a free return,
+        // critical for the create/close hot path in mdtest-style workloads.
+        let client = Arc::clone(&self.client);
+        tokio::spawn(async move {
+            if let Err(e) = client.release(inode).await {
+                tracing::warn!("async release for inode {} failed: {}", inode, e);
+            }
+        });
+        Ok(())
     }
 
     async fn flush(

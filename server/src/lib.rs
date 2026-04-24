@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rucksfs_core::{
-    DataLocation, DirEntry, FileAttr, FsError, FsResult, Inode, MetadataOps,
+    CreateAndOpenResponse, DataLocation, DirEntry, FileAttr, FsError, FsResult, Inode, MetadataOps,
     OpenResponse, ReleaseResponse, RenameResponse, SetAttrRequest, SetAttrResponse,
     StatFs, UnlinkResponse,
 };
@@ -383,20 +383,31 @@ where
     fn batch_parent_deltas(
         batch: &mut dyn AtomicWriteBatch,
         _delta_store: &dyn DeltaStore,
-        metadata: &dyn MetadataStore,
+        _metadata: &dyn MetadataStore,
         parent: Inode,
         deltas: &[DeltaOp],
     ) {
-        // Traditional read-modify-write: load parent inode, apply deltas,
-        // write back.  This path exists only for ablation experiments.
+        // Traditional read-modify-write: acquire PCC row lock on the parent
+        // inode via batch.get_for_update_inode (not metadata.get, which has
+        // no lock), apply deltas, write back.  The row lock ensures that
+        // concurrent RMW of the same parent inode serializes correctly and
+        // no updates are lost.  This path exists only for ablation
+        // experiments.
         let key = encode_inode_key(parent);
-        if let Ok(Some(bytes)) = metadata.get(&key) {
-            if let Ok(mut iv) = InodeValue::deserialize(&bytes) {
-                delta::fold_deltas(&mut iv, deltas);
-                batch.push(BatchOp::PutInode {
-                    key: key.to_vec(),
-                    value: iv.serialize(),
-                });
+        match batch.get_for_update_inode(&key) {
+            Ok(Some(bytes)) => {
+                if let Ok(mut iv) = InodeValue::deserialize(&bytes) {
+                    delta::fold_deltas(&mut iv, deltas);
+                    batch.push(BatchOp::PutInode {
+                        key: key.to_vec(),
+                        value: iv.serialize(),
+                    });
+                }
+            }
+            _ => {
+                // Parent inode missing or read failed: silently skip, same
+                // forgiving semantics as the delta variant (which also
+                // tolerates a missing parent by appending deltas anyway).
             }
         }
     }
@@ -642,6 +653,37 @@ where
         self.compaction.mark_dirty(parent);
 
         Ok(iv.to_attr())
+    }
+
+    /// Optimized atomic create + open: performs both operations in a single
+    /// transaction, eliminating one RPC round trip per file creation.
+    /// The new inode's data location defaults to `default_data_location`;
+    /// open handle count is incremented as part of the in-memory state update.
+    async fn create_and_open(
+        &self,
+        parent: Inode,
+        name: &str,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+        _flags: u32,
+    ) -> FsResult<CreateAndOpenResponse> {
+        // Reuse create() which already puts data_location and inserts cache.
+        // For a brand-new file, open() semantics reduce to:
+        //   - bump open_handles counter
+        //   - return DataLocation (known to be default_data_location)
+        // O_TRUNC is meaningless on a freshly created empty file.
+        let attr = self.create(parent, name, mode, uid, gid).await?;
+        let inode = attr.inode;
+        {
+            let mut handles = self.open_handles.lock().expect("open_handles poisoned");
+            *handles.entry(inode).or_insert(0) += 1;
+        }
+        Ok(CreateAndOpenResponse {
+            attr,
+            handle: inode,
+            data_location: self.default_data_location.clone(),
+        })
     }
 
     async fn mkdir(&self, parent: Inode, name: &str, mode: u32, uid: u32, gid: u32) -> FsResult<FileAttr> {

@@ -107,6 +107,26 @@ impl metadata_service_server::MetadataService for MetadataRpcServer {
             .map_err(map_error)
     }
 
+    async fn create_and_open(
+        &self,
+        request: Request<CreateAndOpenRequest>,
+    ) -> Result<Response<CreateAndOpenResponse>, Status> {
+        let req = request.into_inner();
+        self.backend
+            .create_and_open(req.parent, &req.name, req.mode, req.uid, req.gid, req.flags)
+            .await
+            .map(|resp| {
+                Response::new(CreateAndOpenResponse {
+                    attr: Some(to_proto_attr(resp.attr)),
+                    handle: resp.handle,
+                    data_location: Some(DataLocation {
+                        server_id: resp.data_location.server_id,
+                    }),
+                })
+            })
+            .map_err(map_error)
+    }
+
     async fn mkdir(
         &self,
         request: Request<MkdirRequest>,

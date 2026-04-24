@@ -7,7 +7,7 @@
 //! by MetadataOps (purged_inodes for deletion, needs_truncate for setattr)
 //! by calling the appropriate DataOps backend.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -25,6 +25,9 @@ pub struct VfsCore {
     data_servers: Mutex<HashMap<String, Arc<dyn DataOps>>>,
     /// Maps open file handles (inode) to their DataServer identifier.
     handle_map: Mutex<HashMap<u64, String>>,
+    /// Inodes that have been written to since their last open.
+    /// Flush on an unwritten inode is a no-op and can skip the RPC.
+    written_inodes: Mutex<HashSet<u64>>,
 }
 
 impl VfsCore {
@@ -34,6 +37,7 @@ impl VfsCore {
             default_data: data,
             data_servers: Mutex::new(HashMap::new()),
             handle_map: Mutex::new(HashMap::new()),
+            written_inodes: Mutex::new(HashSet::new()),
         }
     }
 
@@ -48,6 +52,7 @@ impl VfsCore {
             default_data,
             data_servers: Mutex::new(data_servers),
             handle_map: Mutex::new(HashMap::new()),
+            written_inodes: Mutex::new(HashSet::new()),
         }
     }
 
@@ -89,6 +94,30 @@ impl VfsOps for VfsCore {
 
     async fn create(&self, parent: Inode, name: &str, mode: u32, uid: u32, gid: u32) -> FsResult<FileAttr> {
         self.metadata.create(parent, name, mode, uid, gid).await
+    }
+
+    async fn create_and_open(
+        &self,
+        parent: Inode,
+        name: &str,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+        flags: u32,
+    ) -> FsResult<(FileAttr, u64)> {
+        // Delegate to the merged RPC in MetadataOps: one round trip instead
+        // of separate create() + open().
+        let resp = self
+            .metadata
+            .create_and_open(parent, name, mode, uid, gid, flags)
+            .await?;
+        // Record the data-server mapping for the new handle so read/write
+        // routing works without a separate open() call.
+        self.handle_map
+            .lock()
+            .expect("handle_map poisoned")
+            .insert(resp.handle, resp.data_location.server_id);
+        Ok((resp.attr, resp.handle))
     }
 
     async fn mkdir(&self, parent: Inode, name: &str, mode: u32, uid: u32, gid: u32) -> FsResult<FileAttr> {
@@ -163,14 +192,25 @@ impl VfsOps for VfsCore {
         let new_end = offset + written as u64;
         let ts = now_secs();
         self.metadata.report_write(inode, new_end, ts).await?;
+        // Mark this inode as dirty so a later flush() actually issues the RPC.
+        self.written_inodes.lock().expect("written_inodes poisoned").insert(inode);
         Ok(written)
     }
 
     async fn flush(&self, inode: Inode) -> FsResult<()> {
+        // Fast path: no writes since last open → flush is a no-op, skip the RPC.
+        // This eliminates one full round trip per create/close in workloads like
+        // mdtest where the file content is never touched.
+        let was_written = self.written_inodes.lock().expect("written_inodes poisoned").remove(&inode);
+        if !was_written {
+            return Ok(());
+        }
         self.resolve_data(inode).flush(inode).await
     }
 
     async fn fsync(&self, inode: Inode, _datasync: bool) -> FsResult<()> {
+        // fsync semantics are stricter than flush: even if no writes happened
+        // we still issue the RPC because userspace asked for durability.
         self.resolve_data(inode).flush(inode).await
     }
 
@@ -204,8 +244,9 @@ impl VfsOps for VfsCore {
                 tracing::warn!("delete_data for inode {} failed: {}", purged_inode, e);
             }
         }
-        let mut map = self.handle_map.lock().expect("handle_map poisoned");
-        map.remove(&inode);
+        self.handle_map.lock().expect("handle_map poisoned").remove(&inode);
+        // In case flush was never called (or write never happened), clean up.
+        self.written_inodes.lock().expect("written_inodes poisoned").remove(&inode);
         Ok(())
     }
 }

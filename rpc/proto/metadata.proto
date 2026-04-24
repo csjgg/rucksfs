@@ -66,6 +66,22 @@ message CreateRequest {
   uint32 gid = 5;
 }
 
+// CreateAndOpen: atomic create + open (1 RPC instead of 2)
+message CreateAndOpenRequest {
+  uint64 parent = 1;
+  string name = 2;
+  uint32 mode = 3;
+  uint32 uid = 4;
+  uint32 gid = 5;
+  uint32 flags = 6;
+}
+
+message CreateAndOpenResponse {
+  FileAttr attr = 1;
+  uint64 handle = 2;
+  DataLocation data_location = 3;
+}
+
 // Mkdir
 message MkdirRequest {
   uint64 parent = 1;
@@ -179,6 +195,7 @@ service MetadataService {
   rpc Getattr(GetattrRequest) returns (FileAttr);
   rpc Readdir(ReaddirRequest) returns (ReaddirResponse);
   rpc Create(CreateRequest) returns (FileAttr);
+  rpc CreateAndOpen(CreateAndOpenRequest) returns (CreateAndOpenResponse);
   rpc Mkdir(MkdirRequest) returns (FileAttr);
   rpc Unlink(UnlinkRequest) returns (UnlinkResponse);
   rpc Rmdir(RmdirRequest) returns (EmptyResponse);

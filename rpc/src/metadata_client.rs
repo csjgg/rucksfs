@@ -5,15 +5,16 @@ use tonic::transport::Channel;
 use tonic::Request;
 
 use rucksfs_core::{
-    DataLocation, DirEntry, FileAttr, FsError, FsResult, Inode, MetadataOps, OpenResponse,
-    ReleaseResponse, RenameResponse, SetAttrRequest, SetAttrResponse, StatFs, UnlinkResponse,
+    CreateAndOpenResponse, DataLocation, DirEntry, FileAttr, FsError, FsResult, Inode, MetadataOps,
+    OpenResponse, ReleaseResponse, RenameResponse, SetAttrRequest, SetAttrResponse, StatFs,
+    UnlinkResponse,
 };
 use crate::metadata_proto::{
     metadata_service_client::MetadataServiceClient,
-    CreateRequest, GetattrRequest, LinkRequest, LookupRequest, MkdirRequest, OpenRequest,
-    ReadlinkRequest, ReaddirRequest, ReleaseRequest, RenameRequest, ReportWriteRequest,
-    RmdirRequest, SetAttrRequest as ProtoSetAttrRequest, StatfsRequest, SymlinkRequest,
-    UnlinkRequest,
+    CreateAndOpenRequest, CreateRequest, GetattrRequest, LinkRequest, LookupRequest, MkdirRequest,
+    OpenRequest, ReadlinkRequest, ReaddirRequest, ReleaseRequest, RenameRequest,
+    ReportWriteRequest, RmdirRequest, SetAttrRequest as ProtoSetAttrRequest, StatfsRequest,
+    SymlinkRequest, UnlinkRequest,
 };
 use crate::tls::ClientTlsConfig as TlsConfig;
 
@@ -183,6 +184,44 @@ impl MetadataOps for MetadataRpcClient {
             .await
             .map(|r| from_proto_attr(r.into_inner()))
             .map_err(map_error)
+    }
+
+    async fn create_and_open(
+        &self,
+        parent: Inode,
+        name: &str,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+        flags: u32,
+    ) -> FsResult<CreateAndOpenResponse> {
+        let req = Request::new(CreateAndOpenRequest {
+            parent,
+            name: name.to_string(),
+            mode,
+            uid,
+            gid,
+            flags,
+        });
+        let resp = self
+            .client
+            .clone()
+            .create_and_open(req)
+            .await
+            .map_err(map_error)?
+            .into_inner();
+        let attr = resp.attr.map(from_proto_attr).unwrap_or_default();
+        let data_location = resp
+            .data_location
+            .map(|dl| DataLocation {
+                server_id: dl.server_id,
+            })
+            .unwrap_or_default();
+        Ok(CreateAndOpenResponse {
+            attr,
+            handle: resp.handle,
+            data_location,
+        })
     }
 
     async fn mkdir(
