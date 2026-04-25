@@ -437,8 +437,15 @@ where
     /// Execute a closure that creates and commits a transaction, retrying
     /// up to `TXN_MAX_RETRIES` times on `FsError::TransactionConflict`.
     ///
-    /// Uses exponential backoff with jitter: 1ms, 2ms, 4ms base delays.
-    fn execute_with_retry<F, T>(&self, mut f: F) -> FsResult<T>
+    /// Uses exponential backoff with jitter starting at 50μs, matching the
+    /// typical single-transaction latency (~10μs). An async `tokio::time::sleep`
+    /// yields the worker thread so other concurrent requests can make progress
+    /// while this one is backing off.
+    ///
+    /// Rationale: a 1ms initial backoff used to punish any conflict by ~100x
+    /// the transaction body cost, which in turn made a ~1% conflict rate at
+    /// T=2 halve throughput. See docs/delta-bottleneck-diagnosis.md.
+    async fn execute_with_retry<F, T>(&self, mut f: F) -> FsResult<T>
     where
         F: FnMut() -> FsResult<T>,
     {
@@ -446,7 +453,7 @@ where
             match f() {
                 Ok(v) => return Ok(v),
                 Err(FsError::TransactionConflict) if attempt + 1 < TXN_MAX_RETRIES => {
-                    let base_us = 1000u64 << attempt; // 1ms, 2ms, 4ms
+                    let base_us = 50u64 << attempt; // 50μs, 100μs, 200μs
                     // Simple deterministic jitter from pointer address + attempt.
                     let jitter_us = {
                         let seed = (&attempt as *const usize as u64)
@@ -454,7 +461,7 @@ where
                             .wrapping_add(attempt as u64);
                         seed % (base_us / 2 + 1)
                     };
-                    std::thread::sleep(Duration::from_micros(base_us + jitter_us));
+                    tokio::time::sleep(Duration::from_micros(base_us + jitter_us)).await;
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -555,7 +562,7 @@ where
 
             self.cache.put(inode, iv.clone());
             Ok((iv.to_attr(), do_truncate))
-        })?;
+        }).await?;
 
         let truncate_needed = if needs_truncate {
             truncate_size
@@ -635,7 +642,7 @@ where
             batch.commit()?;
 
             Ok((iv, new_inode))
-        })?;
+        }).await?;
 
         // Persist allocator counter outside the transaction (hot-key avoidance).
         self.allocator.maybe_persist(self.metadata.as_ref())?;
@@ -729,7 +736,7 @@ where
             batch.commit()?;
 
             Ok((iv, new_inode))
-        })?;
+        }).await?;
 
         // Persist allocator counter outside the transaction.
         self.allocator.maybe_persist(self.metadata.as_ref())?;
@@ -839,7 +846,7 @@ where
             }
 
             Ok((result, ts))
-        })?;
+        }).await?;
 
         // Determine which inodes need data deletion.
         let mut purged_inodes = Vec::new();
@@ -911,7 +918,7 @@ where
             self.cache.invalidate(child_inode);
 
             Ok(ts)
-        })?;
+        }).await?;
 
         // Update parent cache for deltas written inside the transaction.
         self.cache.apply_deltas(parent, &[
@@ -1120,7 +1127,7 @@ where
                 dst_was_dir,
                 ts,
             })
-        })?;
+        }).await?;
 
         // Update cache for deltas written inside the transaction.
         let ts = result.ts;
@@ -1169,7 +1176,7 @@ where
                 batch.commit()?;
                 self.cache.put(inode, iv);
                 Ok(())
-            })?;
+            }).await?;
         }
         // Increment open handle count.
         {
@@ -1214,7 +1221,7 @@ where
 
             self.cache.put(inode, iv);
             Ok(())
-        })
+        }).await
     }
 
     async fn link(&self, parent: Inode, name: &str, target_inode: Inode) -> FsResult<FileAttr> {
@@ -1287,7 +1294,7 @@ where
             }
 
             Ok((target_iv, ts))
-        })?;
+        }).await?;
 
         // Update parent cache for deltas written inside the transaction.
         self.cache.apply_deltas(parent, &[DeltaOp::SetMtime(parent_ts), DeltaOp::SetCtime(parent_ts)]);
@@ -1347,7 +1354,7 @@ where
             batch.commit()?;
 
             Ok((iv, new_inode))
-        })?;
+        }).await?;
 
         // Persist allocator counter outside the transaction.
         self.allocator.maybe_persist(self.metadata.as_ref())?;
@@ -1394,7 +1401,7 @@ where
                 Self::batch_delete_inode(batch.as_mut(), inode);
                 Self::batch_delete_data_location(batch.as_mut(), inode);
                 batch.commit()
-            })?;
+            }).await?;
             let _ = self.delta_store.clear_deltas(inode);
             self.cache.invalidate(inode);
             purged_inodes.push(inode);

@@ -11,7 +11,7 @@ rucksfs-core = { path = "../core" }
 rucksfs-storage = { path = "../storage" }
 async-trait = { workspace = true }
 libc = "0.2"
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "macros"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "macros", "time"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 lru = "0.12"
