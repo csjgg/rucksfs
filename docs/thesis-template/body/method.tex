@@ -159,7 +159,7 @@ RucksFS 从一棵目录树出发理解命名空间。用户看到的是按目录
     \label{fig:key_mapping}
 \end{figure}
 
-这种设计遵循的是“以边为中心”的命名空间建模思路。目录树中的每一条父子边，都对应 \texttt{dir\_entries} 列族中的一条记录。\texttt{lookup(parent, name)} 退化为点查一条目录项键；\texttt{readdir(parent)} 退化为扫描同一前缀下的全部目录项键；\texttt{rename} 则退化为删除旧边、插入新边。与使用全路径作为键相比，这种建模方式避免了跨目录重命名时对子树全量重写。
+这种设计遵循的是”以边为中心”的命名空间建模思路。目录树中的每一条父子边，都对应 \texttt{dir\_entries} 列族中的一条记录。\texttt{lookup(parent, name)} 退化为点查一条目录项键；\texttt{readdir(parent)} 退化为扫描同一前缀下的全部目录项键；\texttt{rename} 则退化为删除旧边、插入新边。与使用全路径作为键相比，这种建模方式避免了跨目录重命名时对子树全量重写。第~\ref{sec:pjdfstest}~节中 pjdfstest 的 \texttt{rename}、\texttt{readdir}、\texttt{lookup} 用例将直接检验这一建模方式的正确性。
 
 \textbf{与 TableFS 键编码方案的对比。} 最早将 KV 存储应用于文件系统元数据的 TableFS（Ren et al., 2013）同样采用“父 inode + 文件名”作为目录项键。但 TableFS 使用原生字节序编码 inode 编号，导致同一父目录下的所有目录项在 LSM-tree 的键空间中不一定物理相邻——因为 LevelDB 按字节序比较键值，inode 编号 256 的字节序表示为 \texttt{\textbackslash x01\textbackslash x00\textbackslash x00\textbackslash x01}，而 inode 编号 257 表示为 \texttt{\textbackslash x01\textbackslash x00\textbackslash x00\textbackslash x02}，两者之间可能隔着大量其他 inode 的键。RucksFS 采用大端序编码，使得 inode 编号的大小顺序与字典序一致，同一父目录下的所有子项天然在键空间中连续排列。这一差异在 \texttt{readdir} 场景下尤为关键：TableFS 需要在扫描时额外过滤父目录编号，而 RucksFS 只需一次前缀迭代即可获得全部目录项。此外，大端序也使得前缀 Bloom 过滤器在同一父目录内的假阳性率更低。
 
@@ -198,11 +198,13 @@ RucksFS 的处理方式是把这类更新从基值重写改为增量追加。写
 
 读取路径则负责把“基础值 + 增量”重新合成为最新视图。MetadataServer 在加载 inode 时，优先从 \texttt{InodeFoldedCache} 读取已经折叠好的结果；若缓存未命中，则先读取 \texttt{inodes} 中的基础值，再扫描属于该 inode 的全部 \texttt{DeltaOp}，按顺序完成折叠。为了避免读路径的折叠成本无限增长，后台的 \texttt{DeltaCompactionWorker} 会周期性检查 dirty inode，并在增量条目超过阈值时，将折叠后的新基值写回 \texttt{inodes}，同时删除已消费的增量。当前实现的默认阈值为 32 条，检查周期为 5 秒。其核心思想可以概括为：用受控的读路径折叠成本，换取写路径上的冲突削减。与 Mantle 的 Delta Record 相比，RucksFS 的 DeltaOp 机制沿用了“以增量换写放大”的基本思路，但将追加、折叠和提交都约束在同一 RocksDB 实例内完成，因而实现更轻量。
 
+这一机制带来的收益不容易在低并发下显形：父目录上的写争抢必须达到一定密度，覆盖式更新与增量追加的差距才会拉开。第~\ref{sec:delta-vs-nodelta}~节将用 Delta 与 NoDelta 两种编译变体的对照实验直接量化这一点——在共享父目录的元数据负载下，关闭 DeltaOp 的构建在客户端数从 32 增长到 64 时出现 40\% 的吞吐下滑，而启用 DeltaOp 的构建保持线性增长。
+
 \subsubsection{删除语义与句柄生命周期}
 
 事务原子性之外，元数据一致性还体现在删除语义上。POSIX 允许目录项已经消失，而已打开句柄仍继续访问原文件。要满足这一点，仅靠一次 \texttt{unlink} 事务并不够，因为名字空间可见性与数据回收时机并不总是重合。RucksFS 因此在 MetadataServer 中维护了 \texttt{open\_handles} 与 \texttt{pending\_deletes} 两类状态。\texttt{open()} 成功后，系统递增对应 inode 的打开计数；\texttt{release()} 则递减该计数。
 
-当 \texttt{unlink} 或覆盖式 \texttt{rename} 使某个普通文件的 \texttt{nlink} 降到 0 时，MetadataServer 并不会一律立刻删除其数据。若该 inode 仍有打开句柄，系统只把它加入 \texttt{pending\_deletes}，并在最后一个句柄关闭时再通知客户端执行数据侧清理。这样，目录项删除、链接计数归零和物理数据回收就被明确区分为三个阶段：名字首先从命名空间中消失，可达性随后由 \texttt{nlink} 表示，而物理删除则延迟到没有进程再持有该对象时进行。对外部观察者而言，这正对应了 POSIX 所要求的“名字已删除，但已有句柄仍然有效”的语义。
+当 \texttt{unlink} 或覆盖式 \texttt{rename} 使某个普通文件的 \texttt{nlink} 降到 0 时，MetadataServer 并不会一律立刻删除其数据。若该 inode 仍有打开句柄，系统只把它加入 \texttt{pending\_deletes}，并在最后一个句柄关闭时再通知客户端执行数据侧清理。这样，目录项删除、链接计数归零和物理数据回收就被明确区分为三个阶段：名字首先从命名空间中消失，可达性随后由 \texttt{nlink} 表示，而物理删除则延迟到没有进程再持有该对象时进行。对外部观察者而言，这正对应了 POSIX 所要求的”名字已删除，但已有句柄仍然有效”的语义。pjdfstest 中的 \texttt{unlink::open\_file\_not\_freed} 用例直接检验了这一行为，测试结果见第~\ref{sec:pjdfstest-semantic}~节。
 
 有了上述事务与一致性机制，接下来就可以具体讨论各个 POSIX 操作在 RucksFS 中如何落到实际流程上。
 
@@ -321,7 +323,7 @@ RucksFS 的处理方式是把这类更新从基值重写改为增量追加。写
 
 \subsubsection{FUSE 可见语义与缓存策略}
 
-在用户态文件系统中，很多“性能表现”实际上首先体现为“内核缓存会如何看待这个文件系统”。因此，第三章必须在实验之前把 FUSE 层的几个关键可见语义讲清楚，否则第四章中的结果很难被正确理解。RucksFS 在这里主要控制三件事：目录项缓存、属性缓存以及目录遍历接口的选择。
+在用户态文件系统中，很多”性能表现”实际上首先体现为”内核缓存会如何看待这个文件系统”。因此，本节需要在实验之前把 FUSE 层的几个关键可见语义讲清楚，否则第~\ref{sec:experiments}~章中的结果很难被正确理解。RucksFS 在这里主要控制三件事：目录项缓存、属性缓存以及目录遍历接口的选择。
 
 第一，目录项缓存（entry cache）决定了内核在多长时间内相信“名字到 inode”的映射仍然有效。RucksFS 在 \texttt{lookup} 响应中设置了 1 秒的 entry TTL，使目录变更不会被过久地隐藏在内核缓存之后。第二，属性缓存（attr cache）决定了 \texttt{stat}、\texttt{getattr} 等请求的放大程度。RucksFS 默认同样使用 1 秒的属性 TTL，以在一致性和 RPC 次数之间取得折中。第三，客户端显式启用 \texttt{readdirplus} 路径，使目录遍历能够在返回目录项的同时附带基本属性，从而减少“先 \texttt{readdir}、再对每个条目逐个 \texttt{getattr}”带来的往返开销。
 
@@ -339,7 +341,7 @@ RucksFS 的处理方式是把这类更新从基值重写改为增量追加。写
 
 \subsection{错误处理与恢复机制}
 
-一旦系统从单进程存储引擎扩展到“客户端 + MetadataServer + DataServer”的三段式路径，正确性问题就不再只来自事务冲突，还来自 RPC 失败、服务崩溃和跨服务状态不一致。由于第四章主要评估正确性与性能结果，而不再解释系统行为本身，因此这里需要先把故障模型和恢复边界讲清楚。
+一旦系统从单进程存储引擎扩展到”客户端 + MetadataServer + DataServer”的三段式路径，正确性问题就不再只来自事务冲突，还来自 RPC 失败、服务崩溃和跨服务状态不一致。由于第~\ref{sec:experiments}~章主要评估正确性与性能结果，而不再解释系统行为本身，因此这里需要先把故障模型和恢复边界讲清楚。
 
 \subsubsection{事务冲突、RPC 失败与错误码映射}
 
@@ -357,13 +359,13 @@ DataServer 的崩溃语义更简单，也更受当前实现边界约束。若负
 
 在介绍完正常路径和故障路径之后，还需要进一步明确本文的讨论边界。RucksFS 当前有意保持“单 MetadataServer + 单默认 DataServer”的主路径。虽然 \texttt{DataLocation} 与 \texttt{VfsCore::with\_data\_servers()} 已经为多 DataServer 路由预留了接口，但元数据分片、多副本一致性、物理空间回收以及严格双阶段 \texttt{fsync} 都尚未纳入本文实现范围。
 
-这一定义并不是缺省性的“未做完”，而是本文研究目标的一部分：本论文更关注在元数据面与数据面分离的前提下，如何通过键编码、事务控制、客户端协调和增量更新优化元数据关键路径，而不是讨论完整的大规模分布式控制面。也正因为如此，第四章中的实验结果主要验证的是这套设计在当前边界内的正确性与性能特征，而不意图证明系统已经覆盖多副本容错、跨节点故障转移或空间回收等更大范围的工程能力。
+这一定义并不是缺省性的”未做完”，而是本文研究目标的一部分：本论文更关注在元数据面与数据面分离的前提下，如何通过键编码、事务控制、客户端协调和增量更新优化元数据关键路径，而不是讨论完整的大规模分布式控制面。也正因为如此，第~\ref{sec:experiments}~章中的实验结果主要验证的是这套设计在当前边界内的正确性与性能特征，而不意图证明系统已经覆盖多副本容错、跨节点故障转移或空间回收等更大范围的工程能力。
 
 \subsection{本章小结}
 
-本章从系统实现的角度完整展开了 RucksFS 的设计。首先，围绕 inode 与 dentry 两个核心对象，本文说明了元数据如何被组织到不同列族中，并通过边中心键建模把目录树映射到 RocksDB 键空间。随后，借助悲观事务、统一加锁顺序和 DeltaOp 增量更新机制，系统把目录操作中的原子性、并发正确性和热点目录写放大问题统一纳入同一套元数据执行路径中。
+本章从系统实现的角度完整展开了 RucksFS 的设计。围绕 inode 与 dentry 两个核心对象，本文说明了元数据如何被组织到不同列族中，并通过边中心键建模把目录树映射到 RocksDB 键空间。借助悲观事务、统一加锁顺序和 DeltaOp 增量更新机制，系统把目录操作中的原子性、并发正确性和热点目录写放大问题统一纳入同一套元数据执行路径中。
 
-在此基础上，本章进一步讨论了这些机制如何落到具体操作实现：\texttt{create}、\texttt{mkdir}、\texttt{unlink}、\texttt{rmdir}、\texttt{rename}、\texttt{readdir} 与 \texttt{open} 共同展示了前文的键编码、事务与删除语义并不是彼此孤立的设计点，而是在真实 POSIX 操作中被反复组合和复用。随后，\texttt{VfsCore} 的路由编排、RawDiskDataStore 的简化数据路径、FUSE 缓存策略以及 gRPC 接口边界，又把这些单点机制拼接成了一条端到端的跨服务执行链路。
+在此基础上，本章讨论了这些机制如何落到具体操作实现：\texttt{create}、\texttt{mkdir}、\texttt{unlink}、\texttt{rmdir}、\texttt{rename}、\texttt{readdir} 与 \texttt{open} 共同展示了前文的键编码、事务与删除语义并不是彼此孤立的设计点，而是在真实 POSIX 操作中被反复组合和复用。\texttt{VfsCore} 的路由编排、RawDiskDataStore 的简化数据路径、FUSE 缓存策略以及 gRPC 接口边界，又把这些单点机制拼接成了一条端到端的跨服务执行链路。
 
-最后，本章明确了系统在故障处理和实现范围上的边界：RucksFS 已经具备完整的元数据事务路径、客户端协调逻辑和可解释的错误语义，但仍然停留在单 MetadataServer、单默认 DataServer、无副本、无物理空间回收的原型阶段。到这里为止，第四章所需要依赖的设计前提、语义假设和系统边界都已经交代完毕；接下来便可以转入测试与实验，验证这些设计在当前实现中的正确性和有效性。
+最后，本章明确了系统在故障处理和实现范围上的边界：RucksFS 已经具备完整的元数据事务路径、客户端协调逻辑和可解释的错误语义，但仍然停留在单 MetadataServer、单默认 DataServer、无副本、无物理空间回收的原型阶段。到这里为止，第~\ref{sec:experiments}~章所需要依赖的设计前提、语义假设和系统边界都已经交代完毕；接下来便可以转入测试与实验，通过 pjdfstest 合规性测试、mdtest 多系统对比和 Delta/NoDelta 消融实验，验证这些设计在分布式部署下的正确性和有效性。
 

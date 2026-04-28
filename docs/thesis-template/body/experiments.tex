@@ -1,544 +1,442 @@
-\section{实验与结果分析}
+\section{测试与结果分析}
 \label{sec:experiments}
 
-本章评估 RucksFS 在分布式部署下的元数据操作性能。实验聚焦两个核心对比对象——NFS v4.2 与 JuiceFS+TiKV，分别代表"传统内核文件系统"和"通用分布式键值存储之上的分层文件系统"两条主流路线。为了消除早期粗放测试中的若干干扰因素，本章采用对称 2 服务器拓扑、控制变量设计，并对每个系统各自调到最优配置。测试工具为 mdtest，评估维度为文件创建、stat 查询和删除三类操作在 $N=1,2,4,8,16,32$ 并发进程下的吞吐量。
+第三章从设计角度给出了 RucksFS 的元数据组织方案、事务模型和增量更新机制。本章的任务是检验这些设计在真实分布式部署下是否能站住脚。为此，本章安排了两类实验。
+
+第一类是 POSIX 语义合规性测试。它回答的问题是：RucksFS 作为一个运行在 FUSE 之上、元数据存储在 RocksDB 中的文件系统实现，能否正确表达 POSIX 接口所要求的行为约定。这一测试使用 pjdfstest 套件，在分布式部署（客户端与服务器分属不同节点）环境下运行，覆盖 13 类系统调用共 398 个用例。
+
+第二类是分布式场景下的元数据性能评估。它分为两个层次。外部对比层面，将 RucksFS 与 NFS v4.2 和 JuiceFS+TiKV 一同在相同硬件上压测，回答"在与同类系统横比时，RucksFS 是否具备竞争力"。内部对比层面，利用编译期特性开关构造 Delta 与 NoDelta 两种变体，在严格控制变量的条件下直接量化增量更新机制的实际收益。
+
+两类实验共享同一套硬件环境和测试工具，数据可直接交叉引用。在展开具体实验之前，表~\ref{tab:design-test-map} 先列出第三章中提出的几项关键设计决策，以及本章中用来验证它们的对应实验。后续各节可按此表回溯。
+
+\begin{table}[htbp]
+    \centering
+    \caption{设计要点与实验验证的对应关系}
+    \label{tab:design-test-map}
+    \small
+    \setlength{\tabcolsep}{4pt}
+    \begin{tabular}{p{4.5cm}p{3.5cm}p{3.2cm}}
+    \toprule
+    \textbf{第三章设计要点} & \textbf{验证实验} & \textbf{对应章节} \\
+    \midrule
+    边中心键建模 + 大端序编码 & pjdfstest 中 rename、readdir、lookup 用例 & \ref{sec:pjdfstest} \\
+    PCC 事务 + 统一加锁顺序 & pjdfstest 中并发语义用例 & \ref{sec:pjdfstest} \\
+    删除语义与句柄生命周期 & \texttt{unlink::open\_file\_not\_freed} & \ref{sec:pjdfstest-semantic} \\
+    DeltaOp 增量追加 & Delta vs NoDelta 对照 & \ref{sec:delta-vs-nodelta} \\
+    VfsCore 路由与 FUSE 缓存 & 全链路 mdtest 性能 & \ref{sec:perf-comparison} \\
+    \bottomrule
+    \end{tabular}
+\end{table}
 
 \subsection{实验环境}
+\label{sec:expr-env}
 
-\subsubsection{硬件环境}
+\subsubsection{集群拓扑}
 
-测试集群部署在腾讯云香港二区（ap-hongkong-2），三台实例位于同一 VPC（10.0.1.0/24）和同一可用区内。三台机器的硬件规格完全一致（见表~\ref{tab:hw-env}）——这是 v1 版本测试未满足的条件，当时 NFS 服务器与 RucksFS DataServer 共用同一台机器，破坏了拓扑对称性。
-
-\begin{table}[htbp]
-    \centering
-    \caption{测试集群硬件配置（全部三台完全一致）}
-    \label{tab:hw-env}
-    \begin{tabular}{ll}
-        \toprule
-        项目 & 配置 \\
-        \midrule
-        机型          & SA5.2XLARGE16 \\
-        vCPU          & 8（AMD EPYC 9754, 4 核 $\times$ 2 超线程） \\
-        内存          & 15\,GiB DDR5 \\
-        系统盘        & 50\,GB CLOUD\_BSSD \\
-        数据盘        & 200\,GB CLOUD\_SSD（ext4, noatime） \\
-        网络          & VPC 10\,Gbps, RTT $\approx$ 0.15\,ms \\
-        操作系统      & Ubuntu 22.04 LTS, kernel 5.15.0-171 \\
-        \bottomrule
-    \end{tabular}
-\end{table}
-
-三台机器的角色分工如下：
-
-\begin{itemize}
-    \item \textbf{Client}：运行 mdtest，通过 FUSE / NFS 客户端挂载待测文件系统。
-    \item \textbf{Server-1}：部署 RucksFS MetadataServer + DataServer，或 NFS 服务器，或 JuiceFS 的 TiKV+PD 实例（各实验互斥，单时刻只运行一种服务）。
-    \item \textbf{Server-2}：v2 对照实验中专供 NFS；在 JuiceFS 对照中并不使用，保证 JuiceFS 与 RucksFS 面对相同的单服务端拓扑。
-\end{itemize}
-
-RTT 在实验前用 ping 和 iperf3 校验：Client → Server 的平均 RTT 为 0.137--0.154\,ms，带宽 3.35--3.77\,Gbps，两条路径差异小于 15\%。
-
-\subsubsection{软件环境}
-
-所有节点运行 Ubuntu 22.04 LTS 与内核 5.15.0-171。各被测系统的软件栈汇总于表~\ref{tab:sw-env}。
+测试集群部署在腾讯云香港二区（ap-hongkong-2），所有节点处于同一 VPC 与同一可用区内，内网 RTT 不超过 0.5\,ms。集群由一台大规格服务器和若干等规格客户端组成，硬件配置见表~\ref{tab:hw-env-v2}。
 
 \begin{table}[htbp]
     \centering
-    \caption{被测系统软件配置}
-    \label{tab:sw-env}
+    \caption{测试集群硬件配置}
+    \label{tab:hw-env-v2}
     \begin{tabular}{lll}
         \toprule
-        系统 & FUSE / 协议 & 元数据后端 \\
+        角色 & 机型 & 关键参数 \\
         \midrule
-        RucksFS       & fuse3 + tokio async          & 自研 MetadataServer + RocksDB \\
-        JuiceFS+TiKV  & go-fuse                       & TiKV v8.5.0（单节点）+ PD \\
-        NFS v4.2      & 内核 NFS 客户端               & nfsd + ext4 \\
+        Server  & SA5.16XLARGE256 & 64\,vCPU、256\,GiB DDR5、200\,GB CLOUD\_BSSD \\
+        Client  & SA5.MEDIUM2     & 2\,vCPU、2\,GiB DDR5、50\,GB CLOUD\_BSSD \\
+        \midrule
+        \multicolumn{3}{l}{客户端数量按测试档位递增，依次为 $N=2,8,32,64,96$} \\
+        \multicolumn{3}{l}{操作系统：Ubuntu 22.04 LTS（kernel 5.15）} \\
         \bottomrule
     \end{tabular}
 \end{table}
 
-\paragraph{RucksFS} Rust 实现，FUSE 层基于 fuse3 0.8 的 async/tokio 运行时；元数据通过 gRPC 访问自研 MetadataServer，后者以 RocksDB 为唯一持久化后端；数据通过 gRPC 访问 DataServer，使用裸磁盘裸块存储（RawDisk）。
+服务器选用 64 核大规格机型，目的是确保在所有并发档位下，被测系统的元数据后端都不会因 CPU 饱和而先于测试本身触顶。客户端则选用 2\,vCPU、2\,GiB 内存的最小规格。mdtest 的单 rank 在 FUSE 路径上的有效吞吐受内核 VFS 串行化限制，约为 1\,000\,ops/s 量级，2 核即可饱和；更大规格只会增加成本而不会改变结果，且会占用配额导致无法继续扩展客户端总数。所有客户端的硬件规格保持一致，排除横向不可比的因素。
 
-\paragraph{JuiceFS+TiKV} 开源版 JuiceFS 1.2.3；元数据通过 TiKV 客户端库直接访问 TiKV 集群；TiKV v8.5.0 部署在单节点模式，配合 PD（Placement Driver）协调。本实验中 JuiceFS 的数据后端使用本地文件（\texttt{file:///var/jfs/}）——因为 mdtest 创建的是空文件，数据路径实际不承担 I/O 压力，这一选择对元数据性能无影响，反而避免了对象存储引入的额外网络变量。
+\subsubsection{被测系统}
 
-\paragraph{NFS v4.2} Linux 内核原生 NFS 服务端（\texttt{nfs-kernel-server}）；服务端导出位于 ext4 上的目录；客户端以 \texttt{noac,vers=4.2} 选项挂载（禁用属性缓存），原因详见 \ref{sec:nfs-cache} 节。nfsd 线程数通过 \ref{sec:nfsd-tuning} 节的扫描实验确定为 16。
-
-\subsubsection{对比系统的选择}
-
-在本研究的早期轮次中曾同时引入 JuiceFS+MySQL、JuiceFS+Redis、CubeFS 等作为参考系统。在本章最终评估中，主对比对象收窄至 NFS 与 JuiceFS+TiKV 两个，理由如下：
-
-\paragraph{NFS 作为"传统内核文件系统"的基线} NFS v4.2 是 Linux 生态中最成熟、最广泛部署的网络文件系统，其服务端通过内核 VFS 直接访问 ext4——ext4 使用 B-tree 管理目录项、通过 journal 保证元数据崩溃一致性。选择 NFS 作为基线的意义在于：它代表了"不使用键值存储、直接使用内核文件系统做元数据"这条技术路线。RucksFS 相对 NFS 的性能差异，可以干净地归因于"LSM-Tree 键值存储 vs.\ B-tree + journal"这一核心架构选择。同时 NFS 的 FUSE 路径在内核态实现，不经过用户态上下文切换，理论上对 NFS 有利——RucksFS 若仍能在此条件下胜出，说明 LSM-Tree 在元数据工作负载下的写放大优化足够抵消 FUSE 的额外开销。
-
-\paragraph{JuiceFS+TiKV 作为"通用分布式 KV 之上的分层文件系统"的代表} JuiceFS 是目前云原生场景中应用最广泛的开源 FUSE 文件系统之一；TiKV 是一个基于 RocksDB 的分布式键值存储，底层存储引擎与 RucksFS 完全相同。选择 JuiceFS+TiKV 作为对比对象的意义在于：它和 RucksFS 共享 RocksDB 这个底层存储引擎，性能差异可以纯粹归因于上层架构——JuiceFS 把元数据存储委托给一个通用分布式 KV 系统（Raft + MVCC），而 RucksFS 自研了一个专用的 MetadataServer（PCC + WriteBatch，无 Raft）。这组对比回答一个关键问题：\textbf{"基于同一底层存储引擎，专用元数据服务器能否显著优于通用分布式 KV？"}
-
-\paragraph{其他系统为何不作为主对比} MySQL 作为关系数据库与 LSM-Tree KV 差异过大，对比意义弱；JuiceFS+Redis 使用内存 KV，与 RucksFS 的磁盘存储不在同一量级（附录 D 保留其数据作为"内存 KV 性能上限"的参考）；CubeFS 在本实验的单机部署下无法发挥其多节点 Raft 架构的设计意图，数据不具参考价值。
-
-\subsection{测试方法}
-
-\subsubsection{mdtest 基准测试工具}
-
-mdtest 是 IOR/mdtest 套件的组成部分，专门用于测量文件系统的元数据操作速率\cite{ior2024mdtest}。它支持 MPI 多进程并发、可精确控制每进程的文件数量和目录布局，在 HPC 领域是事实上的元数据性能标准工具。
-
-与 fio 或 IOZone 等数据面工具不同，mdtest 操作粒度极细——每次只创建、stat 或删除一个空文件——能够精确暴露 FUSE 层、RPC 层和存储引擎在单次操作上的延迟。这正是元数据密集型工作负载的核心瓶颈所在。
-
-\subsubsection{测试参数与负载模式}
-
-mdtest 的调用命令如下：
-
-\begin{verbatim}
-mpirun --allow-run-as-root --oversubscribe -np $N \
-    mdtest -d <mountpoint>/mdtest_run \
-           -n 5000 -F -C -T -r -u -i 3
-\end{verbatim}
-
-各参数的含义：\texttt{-C} 执行文件创建阶段，\texttt{-T} 执行 stat 阶段，\texttt{-r} 执行删除阶段，\texttt{-F} 限定仅测试文件（不测目录树），\texttt{-n 5000} 表示每个进程操作 5\,000 个文件，\texttt{-u} 使每个进程在独立子目录下工作，\texttt{-i 3} 表示每次 mdtest 调用内部重复 3 轮，取最大值作为单次运行的结果。
-
-并发度 $N$ 从 1 依次增至 2、4、8、16、32，共 6 档。每档下独立运行 3 次，每次运行前执行完整的缓存清理（Client + Server 两侧都执行 \texttt{sync \&\& echo 3 > /proc/sys/vm/drop\_caches}），以消除冷热缓存对 stat 操作的影响。每档的最终报告值为 3 次运行的算术平均。
-
-为防止跨文件系统的测试互相干扰，测试采用严格的串行执行：一个文件系统的全部 $N$ 档跑完后，卸载挂载点、清理服务端残留目录，再开始下一个系统。
-
-\subsubsection{POSIX 合规性测试}
-
-除性能测试外，还使用 pjdfstest\cite{pjdfstest2013nectec} 套件检验 RucksFS 的 POSIX 语义正确性。pjdfstest 包含约 8\,000 个测试用例，覆盖 chmod、chown、link、mkdir、mkfifo、open、rename、rmdir、symlink、truncate、unlink 等 12 类操作。
-
-RucksFS 通过了 chmod、chown、mkdir、open、rename、rmdir、truncate、unlink 8 个类别的全部测试。未通过的 4 个类别——link、symlink、mkfifo、mknod——是因为 RucksFS 当前版本尚未实现硬链接、符号链接和特殊文件节点。这些功能不在毕业设计的范围之内，但接口预留已完成，后续可以逐步补充。
-
-\subsection{对比系统的元数据操作路径分析}
-\label{sec:metadata-path-analysis}
-
-理解后续性能数据的关键，是先看清 RucksFS 和 JuiceFS+TiKV 在"一次 create"这件事上到底做了哪些工作。两者底层都用 RocksDB 存储键值对，但进入 RocksDB 之前的路径差异巨大。本节以文件创建为例，对比两者的元数据操作流程。
-
-\subsubsection{RucksFS 的 create 路径}
-
-RucksFS 为每个 inode 在 RocksDB 中维护如下键值对（具体编码见第二章第三节）：
+本章设置了三套被测系统和 RucksFS 自身的两种构建变体，每次只运行一套，切换时彻底清场。
 
 \begin{itemize}
-    \item \texttt{I/\textless inode\_be\textgreater} $\to$ \texttt{InodeValue}（大端编码保证字节序与数值序一致）
-    \item \texttt{D/\textless parent\_be\textgreater/\textless name\textgreater} $\to$ \texttt{\textless child\_inode\_be\textgreater}
-    \item \texttt{L/\textless inode\_be\textgreater} $\to$ \texttt{DataLocation}（数据位置元信息）
-    \item \texttt{X/\textless parent\_be\textgreater/\textless seq\_be\textgreater} $\to$ \texttt{DeltaOp}（父目录更新的 delta 记录）
+    \item \textbf{RucksFS-Delta}：默认构建，启用第三章第~\ref{sec:txn_model}~节描述的 DeltaOp 增量追加机制。父目录的 \texttt{mtime}、\texttt{ctime}、\texttt{nlink} 更新走增量路径。
+    \item \textbf{RucksFS-NoDelta}：编译期通过 \texttt{cargo} 特性开关关闭 DeltaOp。父目录属性更新退化为对父 inode 基值的读--改--写，其余代码与 Delta 变体完全相同。该变体仅作消融对照，不是生产构建。
+    \item \textbf{NFS}：Linux 内核 NFS v4.2 服务端（\texttt{nfs-kernel-server}），导出本地 ext4 目录。客户端以 \texttt{vers=4.2,noac} 挂载，关闭属性缓存，确保每次 \texttt{stat} 都到达服务端。\texttt{nfsd} 线程数为 128。
+    \item \textbf{JuiceFS+TiKV}：JuiceFS 1.3.1，元数据后端为单节点 TiKV 8.5.6（含 PD），数据存储指向同机本地目录。这一组合对应业界常见的"通用分布式 KV + 分层文件系统"路线。JuiceFS 与 RucksFS 共用 RocksDB 作为底层存储引擎（TiKV 内部即使用 RocksDB），便于隔离上层架构差异。
 \end{itemize}
 
-一次 create 在 MetadataServer 内部以单次 \texttt{AtomicWriteBatch} 原子提交，伪代码如下：
+服务器在切换被测系统时执行严格的清场流程：停止所有守护进程，删除数据目录，确认监听端口释放，再启动下一系统。客户端侧同样卸载挂载点、清理 FUSE 残留连接并重建挂载目录。该流程由统一的 orchestrator 脚本驱动，保证每次测试从干净状态开始。
 
-\begin{verbatim}
-fn create(parent, name, mode, uid, gid) -> InodeAttr:
-    loop:  // 乐观并发控制重试循环（最多 3 次）
-        batch = begin_write()
-        // 1. 读父目录 inode，加行锁
-        parent_iv = batch.get_for_update(encode_inode_key(parent))
-        if parent_iv is None: return ENOENT
-        // 2. 检查重名
-        dentry_key = encode_dentry_key(parent, name)
-        if batch.get(dentry_key) is not None: return EEXIST
-        // 3. 分配新 inode
-        child_ino = inode_allocator.next()
-        child_iv  = InodeValue::new_file(child_ino, mode, uid, gid)
-        // 4. 一次性写入四类键
-        batch.put(encode_inode_key(child_ino), child_iv.serialize())
-        batch.put(dentry_key, child_ino.to_be_bytes())
-        batch.put(encode_data_location_key(child_ino), default_loc)
-        batch.append_delta(parent, DeltaOp::ChildAdded { mtime, nlink_delta: +1 })
-        // 5. 单次 fsync 提交 WAL
-        match batch.commit():
-            Ok => return child_iv.to_attr()
-            Err(Conflict) => continue  // 仅 get_for_update 行锁冲突时重试
-\end{verbatim}
+\subsubsection{评估工具与执行流程}
 
-关键点：\textbf{整个 create 在 MetadataServer 侧展开为一次 \texttt{WriteBatch::commit()}，包含 4 次 KV 写入和一次 WAL \texttt{fsync}}。客户端与 MetadataServer 之间只有 1 次 gRPC 往返。乐观并发控制（PCC）仅在同一父目录下并发创建时才可能触发重试，且由于 \texttt{-u} 参数让每个进程使用独立子目录，重试率在本实验中近乎为零。
+POSIX 合规性使用 pjdfstest（Rust 实现版本），共 398 个用例，覆盖 \texttt{chmod}、\texttt{chown}、\texttt{link}、\texttt{mkdir}、\texttt{mkfifo}、\texttt{mknod}、\texttt{open}、\texttt{rename}、\texttt{rmdir}、\texttt{symlink}、\texttt{truncate}、\texttt{unlink}、\texttt{ftruncate} 等系统调用。
 
-\subsubsection{JuiceFS+TiKV 的 create 路径}
-
-JuiceFS 在 TiKV 中存储的元数据键值（\texttt{jfs\_} 前缀已省略）：
-
-\begin{itemize}
-    \item \texttt{i\textless inode\textgreater} $\to$ \texttt{Attr}（inode 属性，序列化结构）
-    \item \texttt{d\textless parent\textgreater/\textless name\textgreater} $\to$ \texttt{(child\_inode, type)}
-    \item \texttt{c\textless inode\textgreater\textless chunk\_idx\textgreater} $\to$ \texttt{Slice[]}（数据分片位置）
-    \item \texttt{p\textless inode\textgreater} $\to$ \texttt{parent\_inode}（硬链接场景下的父目录记录）
-    \item 以及用于统计、配额、session、delete 队列等的多类辅助键
-\end{itemize}
-
-JuiceFS 的 create 通过 TiKV 客户端发起，TiKV 支持"乐观事务"和"悲观事务"两种模式。JuiceFS 默认走乐观事务（Percolator 协议），一次 create 的简化流程如下：
-
-\begin{verbatim}
-fn create(parent, name, mode, uid, gid) -> Attr:
-    retry_count = 0
-    loop:
-        txn = tikv_client.begin_optimistic_txn()
-        // 1. 读父目录 inode（客户端缓存 + TiKV Get）
-        parent_attr = txn.get("i" + parent)
-        if parent_attr is None: return ENOENT
-        // 2. 检查重名（TiKV Get）
-        if txn.get("d" + parent + "/" + name) is not None: return EEXIST
-        // 3. 分配新 inode（原子计数器，独立一次 TiKV 事务）
-        child_ino = allocate_inode_via_counter()  // 内部另走一次事务
-        child_attr = Attr::new_file(...)
-        // 4. 写入 4 类键
-        txn.put("i" + child_ino, child_attr.serialize())
-        txn.put("d" + parent + "/" + name, (child_ino, FILE))
-        txn.put("p" + child_ino, parent)  // 若启用 ACL/硬链接
-        txn.put("u" + parent, updated_parent_attr)  // 更新父目录 mtime
-        // 5. Percolator 两阶段提交
-        //    5a. Prewrite：每个 key 写 lock + data
-        //    5b. Commit：每个 key 写 commit ts，清 lock
-        //    中间 PD 分配 commit_ts
-        match txn.commit():
-            Ok => return child_attr
-            Err(WriteConflict) if retry_count < N => retry_count += 1; continue
-            Err(e) => return e
-\end{verbatim}
-
-关键点：
-
-\begin{enumerate}
-    \item \textbf{TiKV 事务是 Percolator 两阶段提交}\cite{peng2010large}：Prewrite 阶段为事务涉及的每个 key 写入 \texttt{lock} 列和 \texttt{data} 列；Commit 阶段为每个 key 写入 \texttt{commit\_ts} 并清除 lock。每个 key 的写入在 TiKV 服务端还要经过一次 Raft 日志复制（即使单节点也要落 Raft log）。因此一次 4-key 的事务在 TiKV 内部产生 8 次 Raft log 追加 + 8 次 RocksDB 写入。
-    \item \textbf{获取时间戳需要访问 PD}：事务开始时要从 PD 获取 \texttt{start\_ts}，提交时再获取 \texttt{commit\_ts}。两次 PD RPC 串联在事务关键路径上。
-    \item \textbf{inode 分配本身是独立事务}：TiKV 用一个全局计数器 key 管理 inode 分配，每次分配走一次独立的 CAS（compare-and-swap）事务。
-    \item \textbf{MVCC 版本标记}：每次写入都带 \texttt{start\_ts}/\texttt{commit\_ts} 版本号，旧版本由 TiKV GC 后台任务回收。这在存储和读路径上都引入额外开销。
-\end{enumerate}
-
-\subsubsection{两者关键差异}
-
-表~\ref{tab:path-diff} 汇总一次 create 在两个系统中的操作量。
+性能测试使用 mdtest 4.1.0（IOR 套件子项），以 OpenMPI 4.1.2 跨客户端调度 mpi 进程。每台客户端挂载一次目标文件系统，在该挂载点上启动一个 mdtest rank，因此并发度 $N$ 等于客户端数量。按 $N=2,8,32,64,96$ 五档运行；每档分别在共享父目录（hard 模式，所有 rank 写同一目录）和独立父目录（easy 模式，每 rank 写自己的子目录）下各执行一次完整的 \texttt{create-stat-remove} 流程。为防止大 $N$ 时单次测试过长，每 rank 的文件数随 $N$ 递减，具体数值见表~\ref{tab:files-per-rank}。
 
 \begin{table}[htbp]
     \centering
-    \caption{单次 create 操作的工作量对比}
-    \label{tab:path-diff}
-    \begin{tabular}{lcc}
+    \caption{各并发档位下的每 rank 文件数}
+    \label{tab:files-per-rank}
+    \begin{tabular}{rrr}
         \toprule
-        维度 & RucksFS & JuiceFS+TiKV \\
+        $N$ & 每 rank 文件数 & 总文件数 \\
         \midrule
-        客户端$\to$服务端 RPC     & 1 次 gRPC                    & 1 次 Begin + 多次 Get/Put + Commit \\
-        Timestamp 分配             & 无                            & 2 次（start\_ts, commit\_ts from PD） \\
-        服务端事务协议             & 本地 PCC + WriteBatch         & Percolator 2PC \\
-        底层 KV 写入次数           & 4（同一 WriteBatch）          & 8（Prewrite 4 + Commit 4） \\
-        Raft 日志追加              & 无                            & $\geq$8（每次 KV 写都要 Raft） \\
-        WAL fsync 次数             & 1                             & $\geq$8（每次 Raft log 落盘） \\
-        MVCC 版本管理              & 无                            & 有（带 ts 的每个 key 两列） \\
-        后台 GC                    & 无（inode 号不复用）          & 必需（回收旧 MVCC 版本） \\
+        2  & 2{,}000 & 4{,}000 \\
+        8  & 1{,}500 & 12{,}000 \\
+        32 & 1{,}000 & 32{,}000 \\
+        64 & 800     & 51{,}200 \\
+        96 & 600     & 57{,}600 \\
         \bottomrule
     \end{tabular}
 \end{table}
 
-可以看出，虽然两者都用 RocksDB 做最底层存储，JuiceFS+TiKV 在一次 create 上产生的工作量（Raft log + MVCC + 多轮 2PC）比 RucksFS 高出将近一个数量级。这是 \ref{sec:metadata-perf} 节性能差距的根源。
+mdtest 的核心参数为 \texttt{-F -C -T -r -i 1}：\texttt{-F} 仅测文件操作，\texttt{-C}/\texttt{-T}/\texttt{-r} 分别执行创建、查询、删除三个阶段，\texttt{-i 1} 不做内部重复。hard 与 easy 的区别由 \texttt{-u} 控制：默认所有 rank 在同一父目录下操作（hard），加 \texttt{-u} 后各 rank 在独立子目录下操作（easy）。本章默认讨论 hard 模式数据，easy 模式数据用于对照。
 
-NFS 的 create 路径相对简单：客户端发送 NFS4 COMPOUND 请求（通常将 OPEN4\_CREATE + GETATTR 打包成一个 RPC），服务端在 ext4 上完成 B-tree 目录项插入、inode 位图分配、journal 提交，然后返回。NFS 的瓶颈不在协议层，而在 ext4 元数据的 journal 序列化——我们在 \ref{sec:nfsd-tuning} 节会通过线程扫描实验证明这一点。
+每次 mdtest 调用前，服务端与所有客户端同步执行 \texttt{echo 3 > /proc/sys/vm/drop\_caches}，清除上一轮遗留的页缓存。
 
-\subsection{NFS 配置的正确性验证}
+\subsection{POSIX 合规性评估}
+\label{sec:pjdfstest}
 
-NFS 作为基线对比系统，其配置直接决定对比的公平性。本节说明两项关键调参的依据：为什么必须禁用属性缓存（\texttt{noac}），以及为什么 16 线程是 8 核机器的最优 nfsd 线程数。
+POSIX 合规性测试在分布式部署下运行——客户端与 MetadataServer 分属不同节点，请求经过 gRPC 传输。也就是说，用例要通过的前提条件不仅包括 MetadataServer 内部的事务逻辑正确，还包括错误码能够穿过 gRPC 与 FUSE 后保持不变。这一点在后续的失败分析中会被反复提到。
 
-\subsubsection{属性缓存对基准测试的影响}
-\label{sec:nfs-cache}
+\subsubsection{总体结果}
 
-NFS v4 客户端默认启用属性缓存，缓存时长 3--30 秒不等（由 \texttt{acregmin}/\texttt{acregmax} 参数控制）。mdtest 的 stat 阶段对同一批文件连续执行 stat 调用，如果属性缓存生效，绝大部分请求会直接命中客户端缓存，根本不产生到服务端的网络 I/O。这种行为在生产中是有利的，但在基准测试中会严重扭曲结果——测的不再是 NFS 服务端性能，而是内核 VFS 的缓存命中速率。
-
-为量化这一失真，本实验在单进程下对比了 \texttt{ac}（默认）和 \texttt{noac}（禁用）两种挂载方式的 stat 吞吐量：
+pjdfstest 的 398 个用例运行结果汇总于表~\ref{tab:pjdfstest-summary}。
 
 \begin{table}[htbp]
     \centering
-    \caption{NFS 属性缓存对 stat 吞吐量的影响（$N=1$）}
-    \label{tab:nfs-ac}
-    \begin{tabular}{lr}
-        \toprule
-        配置 & stat 吞吐量（ops/s） \\
-        \midrule
-        NFS \texttt{ac}（默认，客户端缓存启用） & 345,402 \\
-        NFS \texttt{noac}（客户端缓存禁用）     & 1,972   \\
-        \bottomrule
-    \end{tabular}
-\end{table}
-
-差距达到 175 倍。启用缓存时 NFS "看起来"比任何 KV 存储方案都快两个数量级，但这个数字衡量的是内核 VFS 缓存的命中速度，与 NFS 协议本身、ext4 元数据性能无关。本章后续全部 NFS 实验均使用 \texttt{noac,vers=4.2} 挂载以获得服务端真实吞吐。
-
-\subsubsection{nfsd 线程数扫描}
-\label{sec:nfsd-tuning}
-
-为确定公平比较所需的 nfsd 线程数，在固定 $N=16$ 并发下扫描了 8、16、32、64 四档线程配置，每档 3 轮独立测试取均值。结果如表~\ref{tab:nfsd-scan} 所示。
-
-\begin{table}[htbp]
-    \centering
-    \caption{nfsd 线程数对 NFS 性能的影响（$N=16$）}
-    \label{tab:nfsd-scan}
-    \begin{tabular}{rrrr}
-        \toprule
-        nfsd 线程数 & Create (ops/s) & Stat (ops/s) & Remove (ops/s) \\
-        \midrule
-        8  & 3,275 & 6,593 & 2,933 \\
-        \textbf{16} & \textbf{3,565} & \textbf{6,571} & \textbf{3,338} \\
-        32 & 3,544 & 6,598 & 3,361 \\
-        64 & 3,510 & 6,606 & 3,322 \\
-        \bottomrule
-    \end{tabular}
-\end{table}
-
-规律非常清晰：8$\to$16 线程带来 9\% create 提升和 14\% remove 提升；16$\to$32$\to$64 线程的数值波动在 2\% 以内，已属于随机误差范围。这表明 NFS 在 8 核机器上的瓶颈并非线程数，而是 ext4 元数据路径本身——journal 提交的串行化使得增加 nfsd 线程无法进一步提升吞吐量。本章后续实验固定 nfsd 线程数为 16。
-
-\subsection{元数据性能评估}
-\label{sec:metadata-perf}
-
-以下三节分别报告文件创建、stat 查询和删除三类操作在 $N=1,2,4,8,16,32$ 下的吞吐量。所有数据为 3 轮独立运行 $\times$ 3 次 mdtest 内部迭代的算术平均，单位 ops/s。
-
-\subsubsection{文件创建性能}
-
-\begin{table}[htbp]
-    \centering
-    \caption{文件创建吞吐量（ops/s）}
-    \label{tab:create-perf}
-    \begin{tabular}{rrrrcc}
-        \toprule
-        $N$ & NFS & JuiceFS+TiKV & RucksFS & RFS/NFS & RFS/TiKV \\
-        \midrule
-        1  & 462   & 338   & 630    & 1.36$\times$ & 1.86$\times$ \\
-        2  & 856   & 572   & 1,236  & 1.44$\times$ & 2.16$\times$ \\
-        4  & 1,340 & 835   & 2,313  & 1.73$\times$ & 2.77$\times$ \\
-        8  & 2,388 & 1,369 & 3,770  & 1.58$\times$ & 2.75$\times$ \\
-        16 & 3,576 & 2,016 & 5,398  & 1.51$\times$ & 2.68$\times$ \\
-        32 & 4,733 & 3,363 & 7,348  & 1.55$\times$ & 2.18$\times$ \\
-        \bottomrule
-    \end{tabular}
-\end{table}
-
-\begin{figure}[htbp]
-    \centering
-    \begin{tikzpicture}
-    \begin{axis}[
-        width=0.85\textwidth,
-        height=6.5cm,
-        xlabel={并发进程数 $N$},
-        ylabel={文件创建吞吐量 (ops/s)},
-        xmode=log,
-        log basis x=2,
-        xtick={1, 2, 4, 8, 16, 32},
-        xticklabels={1, 2, 4, 8, 16, 32},
-        ymin=0, ymax=8000,
-        legend style={at={(0.02,0.98)}, anchor=north west, font=\small},
-        grid=major,
-        grid style={gray!20},
-        thick,
-        mark size=2pt
-    ]
-    \addplot[color=black, mark=square*, thick] coordinates {(1,630) (2,1236) (4,2313) (8,3770) (16,5398) (32,7348)};
-    \addlegendentry{RucksFS}
-    \addplot[color=black!40, mark=o, thick, dashdotted] coordinates {(1,462) (2,856) (4,1340) (8,2388) (16,3576) (32,4733)};
-    \addlegendentry{NFS}
-    \addplot[color=black!60, mark=triangle*, thick, dashed] coordinates {(1,338) (2,572) (4,835) (8,1369) (16,2016) (32,3363)};
-    \addlegendentry{JuiceFS+TiKV}
-    \end{axis}
-    \end{tikzpicture}
-    \caption{文件创建吞吐量随并发度变化。RucksFS 全并发度领先，$N=32$ 时比 NFS 快 1.55 倍、比 JuiceFS+TiKV 快 2.18 倍。}
-    \label{fig:create-scalability}
-\end{figure}
-
-\paragraph{RucksFS 对 NFS 领先 1.36--1.73 倍} 在所有 6 档并发度下 RucksFS 均领先 NFS，比值稳定在 1.5 倍左右。这一差距完全来自服务端元数据引擎——RocksDB 的 LSM-Tree 将 create 涉及的 4 次 KV 写入合并为一次顺序 WAL 追加 + memtable 插入，单次 \texttt{fsync} 搞定；而 ext4 的 journal 则需要写目录项块、inode 表、inode 位图三类日志记录，每次 commit 都涉及多个磁盘块的写入与同步。LSM-Tree 将"随机元数据写"转化为"顺序日志追加"的设计，在元数据密集场景下优势明显。
-
-\paragraph{RucksFS 对 JuiceFS+TiKV 领先 1.86--2.77 倍} 这组数据尤其值得关注：两者底层都是 RocksDB，所有性能差距都来自上层架构。结合 \ref{sec:metadata-path-analysis} 节的路径分析可以看出，JuiceFS+TiKV 在一次 create 中产生的工作量（Percolator 两阶段提交 $\times$ 4 key + 2 次 PD ts 分配 + 独立的 inode 分配事务 + Raft log 复制 + MVCC 版本）比 RucksFS（单次 WriteBatch + 单次 WAL fsync）多出近一个数量级。在本实验的单节点 TiKV 配置下，Raft 复制因只有一个副本而不涉及网络，但即便如此，Raft log 的本地落盘、MVCC 版本标记、以及 Percolator 的 2PC 协议本身的开销，已经将 TiKV 的元数据写入 throughput 压到 RucksFS 的 40\% 左右。
-
-\paragraph{扩展性均保持近线性} 三个系统从 $N=1$ 到 $N=32$ 的扩展因子分别为：RucksFS 11.7$\times$、NFS 10.2$\times$、JuiceFS+TiKV 9.9$\times$。三者都没有表现出明显的扩展瓶颈，RucksFS 略优但差距不大。这表明在本实验的并发规模下（$N \leq 32$），单节点存储引擎尚未进入饱和，性能差距主要体现在绝对吞吐而非扩展性上。
-
-\subsubsection{文件 stat 性能}
-
-\begin{table}[htbp]
-    \centering
-    \caption{文件 stat 吞吐量（ops/s）}
-    \label{tab:stat-perf}
-    \begin{tabular}{rrrrcc}
-        \toprule
-        $N$ & NFS & JuiceFS+TiKV & RucksFS & RFS/NFS & RFS/TiKV \\
-        \midrule
-        1  & 1,279 & 1,266  & 3,176   & 2.48$\times$ & 2.51$\times$ \\
-        2  & 1,709 & 1,998  & 6,094   & 3.57$\times$ & 3.05$\times$ \\
-        4  & 2,767 & 3,160  & 11,552  & 4.17$\times$ & 3.66$\times$ \\
-        8  & 4,555 & 5,682  & 18,621  & 4.09$\times$ & 3.28$\times$ \\
-        16 & 6,608 & 10,445 & 25,778  & 3.90$\times$ & 2.47$\times$ \\
-        32 & 7,102 & 19,040 & 34,210  & 4.82$\times$ & 1.80$\times$ \\
-        \bottomrule
-    \end{tabular}
-\end{table}
-
-\begin{figure}[htbp]
-    \centering
-    \begin{tikzpicture}
-    \begin{axis}[
-        width=0.85\textwidth,
-        height=6.5cm,
-        xlabel={并发进程数 $N$},
-        ylabel={文件 stat 吞吐量 (ops/s)},
-        xmode=log,
-        log basis x=2,
-        xtick={1, 2, 4, 8, 16, 32},
-        xticklabels={1, 2, 4, 8, 16, 32},
-        ymin=0, ymax=38000,
-        legend style={at={(0.02,0.98)}, anchor=north west, font=\small},
-        grid=major,
-        grid style={gray!20},
-        thick,
-        mark size=2pt
-    ]
-    \addplot[color=black, mark=square*, thick] coordinates {(1,3176) (2,6094) (4,11552) (8,18621) (16,25778) (32,34210)};
-    \addlegendentry{RucksFS}
-    \addplot[color=black!60, mark=triangle*, thick, dashed] coordinates {(1,1266) (2,1998) (4,3160) (8,5682) (16,10445) (32,19040)};
-    \addlegendentry{JuiceFS+TiKV}
-    \addplot[color=black!40, mark=o, thick, dashdotted] coordinates {(1,1279) (2,1709) (4,2767) (8,4555) (16,6608) (32,7102)};
-    \addlegendentry{NFS}
-    \end{axis}
-    \end{tikzpicture}
-    \caption{stat 吞吐量。注意 NFS 使用 \texttt{noac} 挂载，停止客户端属性缓存。RucksFS 在 $N=32$ 时达 NFS 的 4.82 倍。}
-    \label{fig:stat-scalability}
-\end{figure}
-
-\paragraph{NFS 在 noac 下真实表现} 在禁用属性缓存后，NFS 的 stat 吞吐量降到与其 create 相近的水平（$N=1$ 时 1,279\,ops/s）——这是 NFS 服务端真实处理速率。作为对比，若启用属性缓存，$N=1$ 的 stat 可达 345,402\,ops/s（\ref{sec:nfs-cache} 节），其中绝大多数请求未到达服务端。
-
-\paragraph{RucksFS 的 stat 性能显著领先} RucksFS 在 stat 上对 NFS 领先 2.48--4.82 倍，对 JuiceFS+TiKV 领先 1.80--3.66 倍。差距在 $N=32$ 时达到相对 NFS 的最大值 4.82$\times$——这是 RocksDB 的优势最充分发挥的场景：点查询命中 bloom filter + block cache 的 L0/L1 层，延迟在微秒级；RocksDB 的读路径无锁，多线程并发读线性扩展。而 ext4 的 inode 查找涉及 B-tree 遍历和可能的磁盘 I/O，且 inode 读取有 per-inode spin lock 的竞争。
-
-\paragraph{TiKV 在高并发下对 NFS 反超} 值得注意的是 JuiceFS+TiKV 的 stat 从 $N=8$ 起反超 NFS，$N=32$ 时达到 19,040\,ops/s（NFS 的 2.68 倍）。原因是 TiKV 底层 RocksDB 的读路径同样无锁，在并发提升后 TiKV 的 MVCC 开销（每次读要检查版本链）被摊薄，而 ext4 的 inode 锁成为瓶颈。但即便如此，TiKV 的 stat 仍低于 RucksFS 的 55\%——TiKV 每次读都要检查 MVCC 版本、跨越 gRPC + client-side transaction layer，而 RucksFS 直接走 gRPC + RocksDB Get。
-
-\subsubsection{文件删除性能}
-
-\begin{table}[htbp]
-    \centering
-    \caption{文件删除吞吐量（ops/s）}
-    \label{tab:remove-perf}
-    \begin{tabular}{rrrrcc}
-        \toprule
-        $N$ & NFS & JuiceFS+TiKV & RucksFS & RFS/NFS & RFS/TiKV \\
-        \midrule
-        1  & 479   & 297   & 805     & 1.68$\times$ & 2.71$\times$ \\
-        2  & 860   & 438   & 1,560   & 1.81$\times$ & 3.56$\times$ \\
-        4  & 1,278 & 697   & 2,952   & 2.31$\times$ & 4.24$\times$ \\
-        8  & 2,176 & 1,032 & 5,058   & 2.32$\times$ & 4.90$\times$ \\
-        16 & 3,433 & 1,658 & 7,523   & 2.19$\times$ & 4.54$\times$ \\
-        32 & 4,387 & 2,560 & 10,376  & 2.36$\times$ & 4.05$\times$ \\
-        \bottomrule
-    \end{tabular}
-\end{table}
-
-\paragraph{RucksFS 对 JuiceFS+TiKV 领先 2.71--4.90 倍} 删除操作是 RucksFS 对 JuiceFS+TiKV 领先幅度最大的场景，在 $N=8$ 时达到 4.90 倍。原因是双重的：
-
-\begin{enumerate}
-    \item \textbf{TiKV 删除的重开销}：TiKV 不是物理删除 key，而是写入 MVCC tombstone（带 commit\_ts 的墓碑记录），由 GC worker 在超过 gc-life-time（默认 10 分钟）后异步回收。这意味着每次 JuiceFS unlink 在 TiKV 侧等价于一次全新的 Percolator 事务——prewrite tombstone、commit tombstone、Raft log 复制，开销与 create 基本相同。
-    \item \textbf{RucksFS 的轻量 unlink}：RucksFS 的 unlink 仅在元数据 RocksDB 中执行目录项、inode、data\_location 三个 key 的原子删除（单次 WriteBatch），不触发数据文件的物理删除（利用 inode 号不复用的不变式，废数据永远不可达）。对于 mdtest 的空文件负载，unlink 退化为"纯元数据删除"，单次延迟接近极限。
-\end{enumerate}
-
-这一设计权衡值得说明：RucksFS 放弃了物理回收磁盘空间，换来了极低的 unlink 延迟。在 POSIX 语义下这是合规的——POSIX 仅要求"最后一个 fd 关闭后空间应被释放"，但对释放时机没有约束；ext4 自身也采用延迟回收（通过 \texttt{orphan list}）。不过，生产部署确实需要后台 GC 来最终回收废数据——这部分工作在本实现中尚未完成，作为未来工作列入第六章。
-
-\paragraph{RucksFS 对 NFS 领先 1.68--2.36 倍} 相对 NFS 的优势比 create 更明显（1.5$\times$ $\to$ 2.3$\times$），原因同样是 ext4 的 unlink 要走 journal：更新目录项、回收 inode 位图、标记 inode 可释放——每一步都写 journal。而 RucksFS 只需一次 WriteBatch。
-
-\subsection{扩展性与稳定性分析}
-
-\subsubsection{扩展因子对比}
-
-\begin{table}[htbp]
-    \centering
-    \caption{从 $N=1$ 到 $N=32$ 的扩展因子}
-    \label{tab:scale-factor}
-    \begin{tabular}{lrrr}
-        \toprule
-        系统          & Create      & Stat        & Remove       \\
-        \midrule
-        RucksFS       & 11.7$\times$ & 10.8$\times$ & 12.9$\times$ \\
-        NFS           & 10.2$\times$ & 5.6$\times$  & 9.2$\times$  \\
-        JuiceFS+TiKV  & 9.9$\times$  & 15.0$\times$ & 8.6$\times$  \\
-        \bottomrule
-    \end{tabular}
-\end{table}
-
-RucksFS 在三项操作上均维持 10$\times$ 以上的扩展因子，整体优于对比系统。NFS 在 stat 上扩展因子仅 5.6$\times$——这是禁用属性缓存后的真实扩展能力，瓶颈在 ext4 的 inode 并发读。JuiceFS+TiKV 的 stat 扩展 15$\times$ 高于 RucksFS，但这主要因为 TiKV 单进程 stat 基线过低（1,266\,ops/s），绝对值仍远低于 RucksFS。扩展因子只能作为辅助指标，绝对吞吐量才是更可靠的性能衡量。
-
-\subsubsection{结果可重复性}
-\label{sec:cross-validation}
-
-每档并发度均独立运行 3 次，每次运行前执行完整缓存清理。以 $N=32$ 的文件创建为例，RucksFS 三次运行分别为 7,344.3、7,345.9、7,353.6\,ops/s，标准差 $\pm$5（0.07\%）；NFS 为 4,742.6、4,731.3、4,724.9\,ops/s，标准差 $\pm$9（0.2\%）；JuiceFS+TiKV 为 3,427.8、3,298.3、—（第三轮因脚本清理卡死未获完整数据），两轮均值 3,363。变异系数均低于 1\%，表明数据稳定可信。v1 版本实验中观察到的较大波动（2--3\%）源于当时的拓扑不对称与缓存管理不完整，在本轮对称 v2 拓扑下已消除。
-
-\subsection{性能瓶颈分析：分层开销}
-
-为理解 RucksFS 各层引入的延迟开销，进行了一组控制变量实验：分别测量进程内直接调用 RocksDB、经 gRPC 调用 MetadataServer、以及经 FUSE 挂载后通过系统调用访问的创建吞吐量。测试固定 $N=4$，结果如表~\ref{tab:layer-overhead} 所示。
-
-\begin{table}[htbp]
-    \centering
-    \caption{RucksFS 分层开销（$N=4$，文件创建）}
-    \label{tab:layer-overhead}
+    \caption{pjdfstest 总体通过情况}
+    \label{tab:pjdfstest-summary}
     \begin{tabular}{lrr}
         \toprule
-        访问层 & ops/s & 相对上层开销 \\
+        结果 & 用例数 & 占比 \\
         \midrule
-        Local RocksDB（进程内）    & 172,814 & 基线     \\
-        gRPC（经 MetadataServer） & 3,557   & 48.6$\times$ \\
-        FUSE（fuse3 async）       & 2,313   & 1.5$\times$  \\
+        通过 & 182 & 45.7\% \\
+        失败 & 168 & 42.2\% \\
+        跳过 & 48  & 12.1\% \\
+        \midrule
+        合计 & 398 & 100\% \\
         \bottomrule
     \end{tabular}
 \end{table}
+
+45.7\% 的通过率初看偏低。但 pjdfstest 的展开方式决定了不能直接用这个百分比衡量语义完整度——它对同一条 POSIX 规则会按文件类型（regular、dir、symlink、fifo、socket、char、block）展开为多条用例，只要其中一种文件类型不被支持，整组用例都会被计入"失败"。要判断 RucksFS 是否真正违反了 POSIX 语义，必须把失败用例的根因拆开看。
+
+\subsubsection{按操作类别的分布}
+
+表~\ref{tab:pjdfstest-by-category} 按 13 类操作给出通过、失败、跳过数和各类通过率。
+
+\begin{table}[htbp]
+    \centering
+    \caption{pjdfstest 各操作类别的结果分布}
+    \label{tab:pjdfstest-by-category}
+    \small
+    \begin{tabular}{lrrrrr}
+        \toprule
+        操作 & 通过 & 失败 & 跳过 & 合计 & 通过率 \\
+        \midrule
+        \texttt{ftruncate}  & 6   & 0   & 0   & 6   & 100.0\% \\
+        \texttt{truncate}   & 14  & 4   & 1   & 19  & 73.7\%  \\
+        \texttt{open}       & 18  & 7   & 2   & 27  & 66.7\%  \\
+        \texttt{chown}      & 16  & 8   & 2   & 26  & 61.5\%  \\
+        \texttt{rmdir}      & 14  & 8   & 1   & 23  & 60.9\%  \\
+        \texttt{mkdir}      & 12  & 8   & 1   & 21  & 57.1\%  \\
+        \texttt{symlink}    & 12  & 11  & 1   & 24  & 50.0\%  \\
+        \texttt{chmod}      & 16  & 16  & 1   & 33  & 48.5\%  \\
+        \texttt{mkfifo}     & 9   & 11  & 1   & 21  & 42.9\%  \\
+        \texttt{mknod}      & 15  & 23  & 0   & 38  & 39.5\%  \\
+        \texttt{rename}     & 23  & 28  & 9   & 60  & 38.3\%  \\
+        \texttt{unlink}     & 13  & 20  & 1   & 34  & 38.2\%  \\
+        \texttt{link}       & 14  & 24  & 3   & 41  & 34.1\%  \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+表面上看，\texttt{rename}、\texttt{unlink}、\texttt{link} 三类失败数都很高。但逐条比对原始日志后发现，这些类别的失败几乎全部出现在"以特殊文件类型为前提"的派生用例中——用例本身要求先通过 \texttt{mknod} 或 \texttt{mkfifo} 创建一个 fifo、socket 或设备节点，而 RucksFS 对这两个接口返回 \texttt{EOPNOTSUPP}，导致用例在前置阶段就中断了，根本没有执行到被测操作本身。
+
+\subsubsection{失败原因归类}
+
+表~\ref{tab:pjdfstest-rootcause} 把 168 个失败用例按根因聚类。
+
+\begin{table}[htbp]
+    \centering
+    \caption{pjdfstest 失败用例的根因分布}
+    \label{tab:pjdfstest-rootcause}
+    \begin{tabular}{lrl}
+        \toprule
+        根因 & 失败数 & 说明 \\
+        \midrule
+        前置依赖特殊文件类型     & 161 & 用例需先以 \texttt{mknod}/\texttt{mkfifo} 创建 fifo、socket、设备节点 \\
+        \texttt{mknod}/\texttt{mkfifo} 接口本身  & 6   & 接口返回 \texttt{EOPNOTSUPP} \\
+        单文件大小上限           & 1   & \texttt{open::interact\_2gb}（DataServer 当前限制 64\,MiB） \\
+        \midrule
+        合计                     & 168 & \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+以一条典型用例说明。pjdfstest 中"当 \texttt{rename} 的目标路径前缀不是目录时应返回 \texttt{ENOTDIR}"这条规则，会按 regular、dir、symlink、fifo、socket、char、block 七种文件类型各生成一条用例。后四种依赖 \texttt{mknod} 或 \texttt{mkfifo} 来准备测试对象。RucksFS 没有实现这两个接口，用例在前置阶段就因 \texttt{EOPNOTSUPP} 中断，无法进入 \texttt{rename} 本身的语义检查。测试记录为"\texttt{rename} 的某条规则失败"，但实际上 RucksFS 的 \texttt{rename} 对常规文件、目录和符号链接都返回了正确结果。168 个失败中有 161 个属于这一模式。
+
+去掉特殊文件类型相关的 167 个失败和 1 个文件大小上限失败后，与核心元数据语义直接相关的失败为零。换言之，RucksFS 未实现的接口仅限于 \texttt{mknod} 和 \texttt{mkfifo}，由此引发的 161 条派生失败是 pjdfstest 展开方式的放大效应，并不构成对元数据正确性的实际反例。
+
+\subsubsection{与第三章设计决策的对照}
+\label{sec:pjdfstest-semantic}
+
+为避免"因为没实现所以不会失败"的误读，下面列出几条容易被忽视的边界语义，它们都属于 pjdfstest 通过列，且与第三章的具体设计决策直接对应。
+
+\begin{itemize}
+    \item \textbf{\texttt{unlink::open\_file\_not\_freed}}（验证目标：删除语义与句柄生命周期，第~\ref{sec:txn_model}~节）。文件被 \texttt{unlink} 后若仍有打开句柄，应可继续读写，物理回收延迟到最后一个句柄关闭。这条用例要求 MetadataServer 同时维护 \texttt{nlink} 与打开计数：当 \texttt{nlink} 归零但计数仍大于零时，对象进入 \texttt{pending\_deletes}，由 \texttt{release} 触发最终清理。如果事务未能正确处理"删除目录项"与"维持 inode 可达性"之间的分离，这条用例就会失败。
+    \item \textbf{\texttt{rename::to\_multiply\_linked::regular}}（验证目标：rename 覆盖逻辑，算法~\ref{alg:rename}）。若 \texttt{rename} 目标是一个有多条硬链接的文件，覆盖动作只能将目标的 \texttt{nlink} 减一，不能直接删除目标 inode。这对应第三章 \texttt{rename} 中"按覆盖删除逻辑处理目标对象"的步骤。
+    \item \textbf{12 条 \texttt{*::enametoolong\_component} 用例}（验证目标：错误码穿透）。文件名长度超过 \texttt{NAME\_MAX} 时必须返回 \texttt{ENAMETOOLONG}。该约束在 MetadataServer 所有接受 \texttt{name} 字段的 RPC 入口统一校验，错误码经 gRPC 与 FUSE 两层传递后保持不变。
+    \item \textbf{\texttt{open::open\_trunc}}（验证目标：VfsCore 协调路径，第~\ref{sec:data_path}~节）。以 \texttt{O\_TRUNC} 打开已有文件时，\texttt{size} 必须在打开操作中被同步清零，同时刷新 \texttt{mtime} 和 \texttt{ctime}。FUSE 不一定额外发起独立的 \texttt{setattr}，因此这一行为必须在 \texttt{open} 的实现中一并完成。
+    \item \textbf{\texttt{rmdir::eexist\_enotempty\_non\_empty\_dir} 系列}（验证目标：事务内空目录检查，第~\ref{sec:posix_impl}~节）。删除非空目录应返回 \texttt{ENOTEMPTY}。第三章说明 \texttt{rmdir} 把空目录检查放进了事务内部，通过一致性视图下的前缀扫描完成，避免检查结果在事务外失效。
+\end{itemize}
+
+上述用例覆盖的不是孤立的接口行为，而是第三章描述的跨列族原子提交、句柄生命周期维护、统一加锁顺序和客户端协调路径在实际运行中的综合表现。它们的通过说明，这些设计在分布式部署条件下确实达到了预期的语义效果。
+
+\subsubsection{已知不实现项的取舍}
+
+RucksFS 对 \texttt{mknod} 与 \texttt{mkfifo} 的处理是显式不实现，而非未完成。理由有二。其一，这两个接口管理的是 Unix 域 socket、命名管道、字符设备节点和块设备节点，其运行语义与内核设备号、内核管道缓冲区强绑定，与"通过键值对持久化命名空间"的核心研究目标正交。其二，本文聚焦的负载（容器镜像、训练数据、日志、构建产物）几乎不产生这类对象。把工程预算用于不会被使用的接口，对论证元数据机制本身没有帮助。\texttt{open::interact\_2gb} 涉及的单文件大小上限属于 DataServer 当前的开发期参数，调整分片策略即可放开。
+
+48 个跳过用例中，27 个来自 \texttt{utimensat} 系列（该功能需要单独的 feature flag，当前未启用），其余 21 个涉及 \texttt{remount}（FUSE 配置不允许运行时重新挂载）和跨文件系统操作（测试环境未配置第二文件系统）。这些跳过项与 RucksFS 的元数据设计无关。
+
+综上，pjdfstest 的结果可以这样理解：在 RucksFS 选择实现的接口范围内，POSIX 语义被完整地表达；未实现的接口被显式标记，且不以错误形式遮蔽真实问题。这一结论给后续的性能对比确立了一个前提——后面看到的吞吐数字，都建立在"语义正确"的基础之上。
+
+\subsection{分布式性能对比}
+\label{sec:perf-comparison}
+
+性能比较分两个层次。本节先将 RucksFS-Delta 与 NFS、JuiceFS+TiKV 一同压测，回答外部竞争力问题；下一节再单独考察 Delta 与 NoDelta 的差距，回答增量更新机制是否真正发挥了第三章预期的作用。
+
+本节所有数据均来自 mdtest 共享父目录（hard）模式。在这种模式下，所有客户端在同一个父目录下创建、查询和删除文件，是最容易暴露并发瓶颈、也最能区分系统设计差异的场景——第三章设计的 DeltaOp 正是为了应对这种热点目录写竞争。
+
+\subsubsection{原始测量结果}
+
+表~\ref{tab:perf-create-hard}--\ref{tab:perf-remove-hard} 分别给出 create、stat、remove 三类操作在五档并发下的吞吐量。
+
+\begin{table}[htbp]
+    \centering
+    \caption{文件创建吞吐量（hard 模式，单位 ops/s）}
+    \label{tab:perf-create-hard}
+    \begin{tabular}{rrrr}
+        \toprule
+        $N$ & RucksFS-Delta & NFS & JuiceFS+TiKV \\
+        \midrule
+        2  & 1{,}853  & 605 & 663   \\
+        8  & 7{,}313  & 671 & 2{,}119 \\
+        32 & 27{,}501 & 718 & 6{,}838 \\
+        64 & 50{,}943 & 906 & ---     \\
+        96 & 68{,}588 & 911 & ---     \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+    \centering
+    \caption{文件查询吞吐量（hard 模式，单位 ops/s）}
+    \label{tab:perf-stat-hard}
+    \begin{tabular}{rrrr}
+        \toprule
+        $N$ & RucksFS-Delta & NFS & JuiceFS+TiKV \\
+        \midrule
+        2  & 7{,}467     & 2{,}100  & 3{,}749 \\
+        8  & 37{,}041    & 5{,}934  & 14{,}485 \\
+        32 & 357{,}020   & 20{,}021 & 52{,}661 \\
+        64 & 7{,}024{,}348 & 38{,}813 & ---     \\
+        96 & 17{,}920{,}919 & 45{,}294 & ---     \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+    \centering
+    \caption{文件删除吞吐量（hard 模式，单位 ops/s）}
+    \label{tab:perf-remove-hard}
+    \begin{tabular}{rrrr}
+        \toprule
+        $N$ & RucksFS-Delta & NFS & JuiceFS+TiKV \\
+        \midrule
+        2  & 1{,}674   & 611    & 552   \\
+        8  & 6{,}879   & 1{,}609  & 1{,}336 \\
+        32 & 22{,}958  & 2{,}517  & 5{,}864 \\
+        64 & 41{,}528  & 3{,}065  & ---     \\
+        96 & 70{,}859  & 3{,}136  & ---     \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+JuiceFS+TiKV 在 $N \geq 64$ 时未给出数据。原因是单节点 TiKV 在大量客户端同时建立 FUSE 挂载时出现连接初始化超时，属于单节点部署的容量限制而非元数据后端在稳态下的性能问题。生产环境通常采用三节点及以上的 TiKV 集群，本章不做补测。已有的 $N \leq 32$ 数据已足以反映 JuiceFS+TiKV 的相对位置。
+
+\subsubsection{创建吞吐随并发度的变化}
+
+图~\ref{fig:perf-create-curve} 将表~\ref{tab:perf-create-hard} 的数据画成吞吐曲线。
 
 \begin{figure}[htbp]
     \centering
     \begin{tikzpicture}
     \begin{axis}[
-        width=0.75\textwidth,
-        height=6cm,
-        ybar,
-        bar width=1.8cm,
-        ymode=log,
-        log basis y=10,
-        ylabel={创建吞吐量 (ops/s)},
-        symbolic x coords={Local RocksDB, gRPC, FUSE},
-        xtick=data,
-        ymin=1000, ymax=300000,
-        nodes near coords,
-        nodes near coords style={font=\small, above},
-        every node near coord/.append style={anchor=south},
-        grid=major,
-        grid style={gray!20},
-        thick
+        width=0.85\textwidth,
+        height=6.5cm,
+        xlabel={客户端数 $N$},
+        ylabel={Create 吞吐量 (ops/s)},
+        xmode=log, log basis x=2,
+        xtick={2, 8, 32, 64, 96},
+        xticklabels={2, 8, 32, 64, 96},
+        ymin=0, ymax=75000,
+        legend style={at={(0.02,0.98)}, anchor=north west, font=\small},
+        grid=major, grid style={gray!20},
+        thick, mark size=2pt
     ]
-    \addplot[fill=black!20, draw=black!60] coordinates {(Local RocksDB, 172814) (gRPC, 3557) (FUSE, 2313)};
+    \addplot[color=black, mark=square*, thick] coordinates {(2,1853) (8,7313) (32,27501) (64,50943) (96,68588)};
+    \addlegendentry{RucksFS-Delta}
+    \addplot[color=black!60, mark=triangle*, thick, dashed] coordinates {(2,663) (8,2119) (32,6838)};
+    \addlegendentry{JuiceFS+TiKV}
+    \addplot[color=black!40, mark=o, thick, dashdotted] coordinates {(2,605) (8,671) (32,718) (64,906) (96,911)};
+    \addlegendentry{NFS}
     \end{axis}
-
-    \node[font=\scriptsize, text=black!60] at (4.5, 3.5) {$\times 48.6$};
-    \draw[->, thick, black!50] (3.4, 3.3) -- (4.1, 2.3);
-    \node[font=\scriptsize, text=black!60] at (7.0, 2.3) {$\times 1.5$};
-    \draw[->, thick, black!50] (6.3, 2.1) -- (6.9, 1.9);
-
     \end{tikzpicture}
-    \caption{分层开销对比（$N=4$，文件创建）。gRPC 网络栈引入 48.6 倍性能衰减，FUSE 层额外叠加 1.5 倍，从 172,814\,ops/s 到 2,313\,ops/s 共损耗约 75 倍。}
-    \label{fig:layer-overhead}
+    \caption{共享父目录场景下文件创建吞吐量随客户端数变化}
+    \label{fig:perf-create-curve}
 \end{figure}
 
-进程内直接操作 RocksDB，$N=4$ 时吞吐量达到 172,814\,ops/s。引入 gRPC 后骤降至 3,557\,ops/s，损耗 48.6 倍。这一损耗主要来自：gRPC 层的请求打包/解包、HTTP/2 网络传输、服务端的 async 任务调度。即使内网 RTT 仅 0.15\,ms，每次 RPC 的净开销仍有 280\,$\mu$s 左右——相比 RocksDB 单次写入 6\,$\mu$s 的延迟，RPC 栈成为绝对的主导。
+三条曲线呈现出截然不同的扩展形态，差异根源可以追溯到各自的元数据写入路径。
 
-FUSE 层在 gRPC 之上额外引入 1.5 倍开销。这 50\% 的增量主要来自两个方面：内核与用户空间之间通过 \texttt{/dev/fuse} 设备的数据拷贝（每次操作至少两次 \texttt{read}/\texttt{write} 系统调用），以及 FUSE 协议本身的请求/响应封装。相比 gRPC 的 48.6 倍损耗，FUSE 层的开销相对温和。
+NFS 的曲线几乎是平的：从 $N=2$ 的 605\,ops/s 到 $N=96$ 的 911\,ops/s，增幅不到 1.5 倍。瓶颈在 ext4 的目录互斥锁（\texttt{i\_rwsem}）——所有 \texttt{nfsd} 线程在同一父目录上的 \texttt{create} 都要先拿到该目录 inode 的写锁，再走 journal 提交。无论加多少客户端，实际能并发执行的 \texttt{create} 数量被这把锁限制在很低的水平。
 
-从 172,814 到 2,313，总开销约 75 倍。这一数字揭示了用户态分布式文件系统在元数据操作上面对的结构性挑战：即使底层存储引擎足够快，网络 RPC 的串行延迟也会将吞吐量压缩两个数量级。这也是为什么 RucksFS 要尽量把"一次 create"压缩成"一次 gRPC"——每减少一次串行 RPC，就能在 FUSE + gRPC 开销主导的环境下换来线性的性能提升。
+JuiceFS+TiKV 在可测的三个档位上保持准线性增长。其元数据更新经 Percolator 两阶段提交，每次 \texttt{create} 在 TiKV 内部表现为一组对独立键的写入加 \texttt{commit\_ts} 写入。共享父目录会引发对父 inode 键的并发更新，但 MVCC 按时间戳排序，冲突被推迟到后台 GC 而非在事务路径上同步等待。不过 RucksFS-Delta 在同一区间内始终高出 2.8--4 倍。差距来源于上层架构：RucksFS 的一次 \texttt{create} 是 MetadataServer 内部的单次 \texttt{AtomicWriteBatch}，跨四类键共享同一次 WAL 同步；TiKV 的一次 \texttt{create} 仍要走完整的两阶段提交并经过 Raft 日志（即便单节点也未跳过 Raft 模块）。
 
-\subsection{优化效果验证}
+RucksFS-Delta 在整个区间保持近线性增长，从 $N=2$ 的 1\,853\,ops/s 到 $N=96$ 的 68\,588\,ops/s，每客户端贡献约 714\,ops/s。$N=96$ 时对 NFS 的吞吐倍数为 75，对 JuiceFS+TiKV 在 $N=32$ 处（其最高数据点）的倍数为 4。这一差距并非偶然，与第三章的设计直接对应：\texttt{create} 被拆解成"一条目录项写入、若干 inode 记录写入、一次父目录属性增量追加"的组合，而 DeltaOp 又把父目录更新从"读--改--写"转变为追加写，恰好把 LSM-tree 擅长的顺序追加发挥到了端到端层面。
 
-\subsubsection{增量内联优化}
-\label{sec:inline-opt}
+\subsubsection{查询吞吐：写路径未阻塞读路径}
 
-RucksFS 使用 delta 机制处理父目录的时间戳和 nlink 更新：每次 create/unlink 操作向父目录的 delta 列表追加一条记录，读取时将 delta 折叠到基线属性上。这种设计避免了对父目录 inode 的读-改-写竞争，但每条 delta 若独立写入则是一次独立的 WAL 写入。
+stat 的差距比 create 更悬殊。$N=96$ 时 RucksFS-Delta 达到 1\,792 万 ops/s，NFS 为 4.5 万 ops/s，相差约 400 倍。之所以差距如此之大，需要分别看两侧的路径。
 
-增量内联优化将 delta 追加操作合并到同一个 \texttt{WriteBatch} 中，与 inode 创建/删除共享一次 WAL 同步。由于 RocksDB 的 WAL 写入是整个路径中最重的 I/O 操作（一次 \texttt{fsync} 约 50--100\,$\mu$s），减少一半的 WAL 写次数直接带来了 create 和 unlink 两类写操作约 2 倍的吞吐量提升。以 $N=4$ 为例，优化前 create 吞吐量约 1,200\,ops/s，优化后达到 2,313\,ops/s。
+NFS 客户端使用 \texttt{noac} 挂载，每次 \texttt{stat} 都经网络到达服务端，再经 ext4 的 inode 查找返回。本测试中所有文件都在同一父目录下，\texttt{lookup} 阶段要拿父目录读锁，会被 \texttt{create} 留下的目录元数据更新挤占。对 RucksFS 而言，MetadataServer 的 \texttt{stat} 只是 RocksDB 的一次点查；在 \texttt{create} 阶段写入的 inode 记录已经在 BlockCache 中驻留，命中后延迟在微秒级，且与写路径不争同一把锁——这是 LSM-tree 读写不互锁的天然优势。
 
-\subsubsection{异步删除优化}
-\label{sec:async-delete}
+更关键的是，DeltaOp 在这里起了间接作用：它把父目录的属性写从热路径上拿走，使得 \texttt{stat} 的 \texttt{lookup} 阶段不再被父 inode 的写锁阻塞。这一点将在第~\ref{sec:delta-vs-nodelta}~节的 NoDelta 对照中得到直接量化。
 
-RucksFS 最初的 unlink 实现是同步的：先删除元数据，再通过 gRPC 请求 DataServer 删除对应的数据文件，两步串行完成。对于有实际数据的文件，数据删除涉及磁盘 I/O；即使对于空文件，gRPC 往返本身也消耗约 0.3\,ms。
+\subsubsection{删除吞吐}
 
-第一轮优化将数据删除改为异步：unlink 仅删除元数据并立即返回，数据清理由客户端在后台 best-effort 触发。这一改动使得 unlink 延迟从约 1.6\,ms 降至约 0.01\,ms。第二轮"no-op 数据删除"进一步利用 inode 号不复用的不变式，直接跳过空文件的数据删除 RPC，同时修复了异步模式下的多线程竞争问题。这一轮额外带来显著提升，使得删除性能达到表~\ref{tab:remove-perf} 中的水平。
+remove 的整体形态与 create 相似。NFS 的 \texttt{unlink} 同样要拿父目录写锁再写 journal，扩展性曲线与 create 平行。JuiceFS+TiKV 的 \texttt{unlink} 在 TiKV 中表现为写入 tombstone，物理回收延迟到 GC，事务体量与 \texttt{create} 接近。RucksFS-Delta 的 \texttt{unlink} 同样只动几条键值记录加一次父目录增量追加，因此性能曲线也与 create 相近。$N=96$ 时 RucksFS-Delta 达到 70\,859\,ops/s，对 NFS 约 23 倍，对 JuiceFS+TiKV 在 $N=32$ 处约 4 倍。
 
-值得记录的是两个失败的优化尝试。启用 RocksDB 块缓存（block cache 设为 256\,MiB）反而导致 stat 性能下降 22\%--35\%，推测原因是测试负载的工作集较小（inode 数据量不超过几 MiB），额外的缓存查找和内存分配开销超过了缓存命中带来的收益。禁用 delta 列表的 WAL 同步也导致 stat 性能回退 39\%——这个结果出乎预料，可能与 RocksDB 内部的 WAL 和 memtable 刷写调度耦合有关。两项优化均已回滚。
+\subsection{DeltaOp 增量机制的内部对比}
+\label{sec:delta-vs-nodelta}
+
+第三章第~\ref{sec:txn_model}~节的核心设计假设是：把父目录属性更新从"覆盖父 inode 基值"改为"向独立列族追加 DeltaOp"，可以避免热点目录下的事务冲突，使元数据写入在并发度提升时仍维持线性扩展。本节用 Delta 与 NoDelta 两种构建变体在同一硬件、同一负载下的直接对比来检验这一假设。这是本章最重要的消融实验：如果假设成立，应该满足三个可预测的条件——（1）低并发时两者无差距，（2）高并发共享目录下 NoDelta 出现非线性下滑而 Delta 保持线性，（3）独立目录（easy 模式）下两者始终重合。
+
+\subsubsection{两种构建变体的吞吐对比}
+
+表~\ref{tab:delta-vs-nodelta} 列出了 Delta 与 NoDelta 在 hard 与 easy 两种模式下的 \texttt{create} 吞吐量及比值。
+
+\begin{table}[htbp]
+    \centering
+    \caption{Delta 与 NoDelta 在 hard 和 easy 模式下的 create 吞吐量（单位 ops/s）}
+    \label{tab:delta-vs-nodelta}
+    \setlength{\tabcolsep}{4pt}
+    \small
+    \begin{tabular}{rrrrrrr}
+        \toprule
+        & \multicolumn{3}{c}{hard 模式（共享父目录）} & \multicolumn{3}{c}{easy 模式（独立父目录）} \\
+        \cmidrule(lr){2-4} \cmidrule(lr){5-7}
+        $N$ & Delta & NoDelta & 比值 & Delta & NoDelta & 比值 \\
+        \midrule
+        2  & 1{,}853  & 1{,}869  & 0.99 & 1{,}842  & 1{,}860  & 0.99 \\
+        8  & 7{,}313  & 7{,}213  & 1.01 & 7{,}293  & 7{,}302  & 1.00 \\
+        32 & 27{,}501 & 26{,}914 & 1.02 & 27{,}580 & 27{,}396 & 1.01 \\
+        64 & 50{,}943 & 16{,}175 & \textbf{3.15} & 51{,}653 & 51{,}703 & 1.00 \\
+        96 & 68{,}588 & 11{,}799 & \textbf{5.81} & 69{,}060 & 68{,}136 & 1.01 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+前文预测的三个条件在数据中全部成立：
+
+\textbf{条件一：低并发无差距。} hard 模式下 $N=2,8,32$ 时，Delta 与 NoDelta 的比值稳定在 0.99--1.02，几乎没有差距。DeltaOp 在低并发场景中不产生额外收益——因为此时写冲突本身就很少，有没有增量路径结果一样。这与第三章的设计预期一致：增量追加的目标是消除高竞争下的锁冲突，而非在无冲突时"白送"性能。
+
+\textbf{条件二：高并发共享目录下分叉。} 从 $N=32$ 到 $N=64$，NoDelta 的吞吐从 26\,914 骤降到 16\,175\,ops/s（下滑 40\%）；到 $N=96$ 进一步降到 11\,799\,ops/s。同一区间内 Delta 反而从 27\,501 增长到 50\,943 再到 68\,588，保持线性。比值从 1.02 跳到 3.15 再到 5.81。这是一个清晰的"崩溃 vs 延续"对照——同一台服务器、同批客户端、同样的负载，唯一的变量是父目录属性更新的写入路径。
+
+\textbf{条件三：独立目录下始终重合。} easy 模式下两者在所有档位的比值都稳定在 1.00 附近。easy 模式让每个 rank 在自己的子目录下操作，父目录键不再是热点。如果 Delta 的优势来自其他系统层面的副作用（比如更好的内存布局或 CPU 利用率），easy 模式下也应该看到差距。事实是没有。这说明 hard 模式下的差距完全可以归因于父目录的写冲突，而不是随机扰动或测试噪声。
+
+图~\ref{fig:delta-nodelta-curve} 把 hard 模式的数据画成曲线，分叉形态更为直观。
+
+\begin{figure}[htbp]
+    \centering
+    \begin{tikzpicture}
+    \begin{axis}[
+        width=0.85\textwidth,
+        height=6.5cm,
+        xlabel={客户端数 $N$},
+        ylabel={Create 吞吐量 (ops/s)},
+        xmode=log, log basis x=2,
+        xtick={2, 8, 32, 64, 96},
+        xticklabels={2, 8, 32, 64, 96},
+        ymin=0, ymax=75000,
+        legend style={at={(0.02,0.98)}, anchor=north west, font=\small},
+        grid=major, grid style={gray!20},
+        thick, mark size=2pt
+    ]
+    \addplot[color=black, mark=square*, thick] coordinates {(2,1853) (8,7313) (32,27501) (64,50943) (96,68588)};
+    \addlegendentry{Delta (hard)}
+    \addplot[color=black!50, mark=triangle*, thick, dashed] coordinates {(2,1869) (8,7213) (32,26914) (64,16175) (96,11799)};
+    \addlegendentry{NoDelta (hard)}
+    \end{axis}
+    \end{tikzpicture}
+    \caption{Delta 与 NoDelta 的 create 吞吐量对比（hard 模式）}
+    \label{fig:delta-nodelta-curve}
+\end{figure}
+
+\subsubsection{NoDelta 吞吐崩溃的机理}
+
+NoDelta 从 $N=32$ 起出现急剧下滑，其原因可以从 MetadataServer 端的事务执行细节中解释。
+
+NoDelta 路径下，一次 \texttt{create} 的事务序列为：对父目录 inode 键执行 \texttt{get\_for\_update} 获取写锁，读出当前基值，改写 \texttt{mtime}/\texttt{ctime} 后 \texttt{put} 回去，连同新建的目录项与 inode 一起提交。在共享父目录下，所有 \texttt{create} 事务都竞争同一条父 inode 键的写锁。第三章描述的悲观并发控制使拿不到锁的事务进入等待；等待超时则回滚并由服务端重试。当并发度足够高时，重试本身会形成放大效应：被拒绝的事务在释放已持有的其他锁、回滚已写入的 batch 后再次进入争抢，但此时队列中已经堆积了更多重试请求。这就是写冲突重试风暴。
+
+Delta 路径下，同一次 \texttt{create} 不触碰父 inode 基值。父目录的属性变化被编码为一条 DeltaOp，写入 \texttt{delta\_entries} 列族，键由 \texttt{[X][parent\_inode][seq]} 组成，其中 \texttt{seq} 单调递增——每次写入的目标键都不同，根本不会与其他事务在同一键上发生锁冲突。父 inode 基值只在后台 \texttt{DeltaCompactionWorker} 折叠增量时被写入一次，且发生在测试关键路径之外。从锁的角度看，共享目录下的写冲突在 Delta 路径上被消除了；从 LSM-tree 的角度看，热点目录上的随机写被转换为顺序追加。
+
+把机理对照数字：NoDelta 在 $N=32$ 时尚能保持线性（锁等待尚未触发明显放大），$N=64$ 处的 40\% 下滑对应冲突重试开始堆积，$N=96$ 处的进一步下降对应重试窗口趋近饱和。Delta 不进入这种状态，因此一直保持线性。
+
+\subsubsection{对 remove 和 stat 的影响}
+
+DeltaOp 的设计目标是父目录属性更新，但它的影响不限于 \texttt{create}。表~\ref{tab:delta-impact-other} 给出 \texttt{remove} 与 \texttt{stat} 在 $N=64$ 和 $N=96$ 下两种构建的对比。
+
+\begin{table}[htbp]
+    \centering
+    \caption{DeltaOp 对 remove 与 stat 的影响（hard 模式，单位 ops/s）}
+    \label{tab:delta-impact-other}
+    \begin{tabular}{rrrrrrr}
+        \toprule
+        & \multicolumn{3}{c}{remove} & \multicolumn{3}{c}{stat} \\
+        \cmidrule(lr){2-4} \cmidrule(lr){5-7}
+        $N$ & Delta & NoDelta & 比值 & Delta & NoDelta & 比值 \\
+        \midrule
+        64 & 41{,}528 & 17{,}337 & 2.40 & 7{,}024{,}348 & 203{,}907 & 34.4 \\
+        96 & 70{,}859 & 11{,}588 & 6.12 & 17{,}920{,}919 & 131{,}583 & 136.2 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\textbf{remove} 与 \texttt{create} 的形态一致。\texttt{unlink} 同样要更新父目录的 \texttt{mtime}/\texttt{ctime}，机制完全相同。$N=96$ 时比值达到 6.12（略高于 create 的 5.81），可解释为 \texttt{unlink} 路径中 NoDelta 同时还要更新目标 inode 的 \texttt{nlink}，延长了锁持有时间。
+
+\textbf{stat} 的差距更引人注目——$N=96$ 时比值达到 136。\texttt{stat} 在 RocksDB 端是只读路径，理论上不会被 DeltaOp 直接影响。但在 NoDelta 路径下，并发的 \texttt{create} 持续争抢父 inode 键的写锁，而 \texttt{stat} 在 \texttt{lookup} 阶段需要读取父目录的键状态。RocksDB 悲观事务的实现要求读路径在写锁持有期间等待，父 inode 的写锁就成了 \texttt{stat} 的隐性瓶颈。DeltaOp 把父 inode 写从关键路径上拿走之后，\texttt{stat} 不再被这把锁拖累，吞吐重新由 RocksDB 的点查能力决定。可以这样概括：DeltaOp 不仅消除了写路径的冲突，也间接把读路径从写争抢中解放出来。这一效应是第三章未明确预测、但与设计逻辑一致的额外收益。
+
+\subsubsection{对第三章设计假设的实验验证}
+
+把上述观察整理为对第三章设计陈述的逐点回应：
+
+\begin{itemize}
+    \item \textbf{"DeltaOp 在低并发下不引入额外开销"}（第~\ref{sec:txn_model}~节）。$N \leq 32$ 时 Delta 与 NoDelta 的吞吐差距在 2\% 以内。增量追加路径只在事务热路径上节省锁竞争，不增加固定开销。
+    \item \textbf{"DeltaOp 在高并发下消除父目录事务冲突"}（第~\ref{sec:txn_model}~节）。$N=64$ 起 NoDelta 出现典型的冲突崩溃，Delta 维持线性。两条曲线的分叉位置恰好对应 PCC 争抢窗口被放大的临界点。
+    \item \textbf{"DeltaOp 的优势仅在共享目录场景中出现"}。easy 模式下二者吞吐完全重合，hard 模式下才出现差距。这排除了 DeltaOp 收益来自其他系统层面副作用的可能性。
+    \item \textbf{读路径间接受益}。\texttt{stat} 在 NoDelta 下被父 inode 写锁阻塞，在 Delta 下不再受阻。这一效应说明 DeltaOp 的收益不止于写入路径。
+\end{itemize}
+
+四个观察互相印证，构成对 DeltaOp 增量机制的端到端实验验证：第三章的理论设计在分布式部署中确实落到了可被实测的性能差异上，且差异方向、幅度和并发拐点都与机制本身的工作原理吻合。
 
 \subsection{本章小结}
 
-本章通过一组控制变量实验，对比了 RucksFS、NFS v4.2 和 JuiceFS+TiKV 三者在元数据操作上的性能表现。三个系统共享相同的硬件（8C16G）、相同的内核（5.15）、相同的数据盘（200GB SSD on ext4）、相同的网络（VPC 内 RTT $\approx$ 0.15\,ms）和相同的 mdtest 参数（$-n 5000 -F -C -T -r -u -i 3$，3 轮重复）。各系统按各自最优配置运行：NFS 使用 \texttt{noac} 挂载与扫描确认的 16 nfsd 线程，RucksFS 使用 tokio 8 线程运行时，TiKV 使用 v8.5.0 默认参数。
+本章围绕两条线展开实验。
 
-三项核心观察：
+第一条线是 POSIX 合规性。pjdfstest 的 398 个用例中，182 条直接通过；168 条失败里 167 条来自 \texttt{mknod}/\texttt{mkfifo} 派生出的特殊文件类型用例，1 条来自 DataServer 的开发期文件大小上限。与核心元数据语义直接相关的失败为零。打开后 \texttt{unlink}、硬链接覆盖、长名称错误码、\texttt{O\_TRUNC} 时间戳、事务内空目录检查等边界用例全部通过，对应验证了第三章的跨列族原子提交、句柄生命周期维护、统一加锁顺序和客户端协调路径。\texttt{mknod}/\texttt{mkfifo} 的不实现是面向典型分布式存储负载的显式取舍，不遮蔽真实问题。
 
-\begin{enumerate}
-    \item \textbf{RucksFS 对 NFS 的 1.5--4.8 倍领先来自 LSM-Tree 元数据引擎}。NFS 的 ext4 后端使用 B-tree 和 journal，每次元数据修改触发 journal 提交的串行化；RucksFS 的 RocksDB 后端将元数据修改转换为顺序 WAL 追加和 memtable 插入，在写入密集的 create/remove 场景下优势明显。nfsd 线程扫描证明瓶颈不在 NFS 协议层或线程数，而在 ext4 元数据路径本身。
-    \item \textbf{RucksFS 对 JuiceFS+TiKV 的 1.9--4.9 倍领先来自去 Raft 和去 MVCC 的架构选择}。两者底层都是 RocksDB，但 JuiceFS 通过 TiKV 的 Percolator 2PC + Raft + MVCC 访问元数据，一次 create 产生近 10 倍于 RucksFS 的底层工作量（见 \ref{sec:metadata-path-analysis} 节的路径分析）。RucksFS 作为专用元数据服务器，用 PCC + 单次 WriteBatch 绕开了通用 KV 存储的一致性和版本管理代价。
-    \item \textbf{gRPC 仍是 RucksFS 内部最大的瓶颈}。分层开销实验显示，去掉 gRPC（进程内 embedded 模式）时 RocksDB 可以达到 172,814\,ops/s——现有 RucksFS 分布式模式的 2,313\,ops/s 只发挥了底层引擎 1.3\% 的能力。进一步压缩 RPC 次数（例如把 open-create-release 合并为一次 RPC）是未来性能优化的主线。
-\end{enumerate}
+第二条线是分布式性能。在 1 台 64 核服务器加最多 96 台 2 核客户端的集群上，RucksFS-Delta 在 \texttt{create}、\texttt{stat}、\texttt{remove} 三类操作上均对 NFS 与 JuiceFS+TiKV 保持大幅领先。$N=96$ 时 \texttt{create} 达到 6.86 万 ops/s，\texttt{remove} 达到 7.09 万 ops/s，对 NFS 分别为 75 倍与 23 倍；对 JuiceFS+TiKV 在其可完成的最高档位 $N=32$ 处分别为 4 倍与 4 倍。NFS 的扩展瓶颈在 ext4 目录锁，TiKV 的瓶颈在两阶段提交叠加 Raft 日志。
 
-本章的数据足以支持一个核心结论：在元数据操作密集的工作负载下，\textbf{使用专用元数据服务器直接访问 LSM-Tree 键值存储}（RucksFS 的架构选择）优于传统内核文件系统（NFS+ext4），也优于基于通用分布式键值存储的分层文件系统（JuiceFS+TiKV）。专用服务器舍弃了通用 KV 存储的 Raft/MVCC 能力，换取了两个数量级的写路径简化；LSM-Tree 舍弃了就地更新，换取了顺序 I/O 友好的写放大特性。两项选择叠加，使得 RucksFS 在用户态 FUSE + 单节点部署的约束下仍能稳定领先主流参照系统。
+DeltaOp 的消融实验是本章的核心结论。在仅切换编译特性开关的条件下，hard 模式从 $N=64$ 起 Delta 与 NoDelta 发生显著分叉：$N=96$ 时 \texttt{create} 比值 5.81，\texttt{remove} 比值 6.12，\texttt{stat} 比值 136。easy 模式下二者完全重合。这种"同硬件、同负载、只换一个机制开关"的对照直接说明：第三章描述的增量追加机制在分布式部署中真实承担了消除写冲突与缓解读路径阻塞两项职责——它不是停留在设计图纸上的优化思路，而是在 $N=96$ 客户端的真实压力下被实验数据所验证的有效机制。
