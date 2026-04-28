@@ -52,7 +52,7 @@ RucksFS 的运行时由三个主要角色组成：挂载在客户端机器上的
 
 客户端不直接持有 RocksDB，也不直接管理原始磁盘布局。它只负责在 FUSE 请求、MetadataServer 和 DataServer 之间做语义编排。这样做的直接好处是，文件系统的正确性主要集中在元数据事务设计与客户端协调逻辑中，边界较清晰，调试路径也更可控。
 
-上述三段式架构确定了 RucksFS 的全局布局。接下来的几节将逐一展开各层的具体设计：首先讨论元数据如何在 RocksDB 键空间中组织（列族划分与键编码），然后分析保证并发正确性的事务模型，接着给出核心 POSIX 操作的具体实现流程，最后说明客户端如何协调元数据面与数据面的语义边界。
+上述三段式架构确定了 RucksFS 的全局布局。接下来的几节将依次展开各层的具体设计：元数据如何在 RocksDB 键空间中组织，事务模型如何保证并发正确性，核心 POSIX 操作如何映射到这套键空间和事务上，以及客户端如何协调元数据面与数据面。
 
 \subsection{元数据模型与存储布局}
 \label{sec:datamodel}
@@ -95,7 +95,7 @@ RucksFS 从一棵目录树出发理解命名空间。用户看到的是按目录
 
 \subsubsection{列族划分与设计考量}
 
-在上述全景布局之上，RucksFS 进一步需要回答的问题是：为什么这些逻辑对象要被这样分组，而不是落入一个统一键空间。有鉴于此，RucksFS 没有采用“所有元数据混放”的做法，而是按访问模式把 RocksDB 实例拆成 4 个列族：\texttt{inodes}、\texttt{dir\_entries}、\texttt{delta\_entries} 和 \texttt{system}。它们分别承担 inode 相关点查、目录项存储、属性增量追加以及系统状态保存。
+在上述全景布局之上，RucksFS 需要回答的下一个问题是：为什么这些逻辑对象要被这样分组，而不是落入一个统一键空间。有鉴于此，RucksFS 没有采用“所有元数据混放”的做法，而是按访问模式把 RocksDB 实例拆成 4 个列族：\texttt{inodes}、\texttt{dir\_entries}、\texttt{delta\_entries} 和 \texttt{system}。它们分别承担 inode 相关点查、目录项存储、属性增量追加以及系统状态保存。
 
 \texttt{inodes} 列族承担“对象本体”的点查负载。inode 基础属性、\texttt{DataLocation} 和符号链接目标虽然在语义上并不完全同类，但其访问模式一致，均表现为按 inode 直接定位的点查，因此被组织在同一列族中。把这些内容放在一起，可以避免为了少量辅助元数据再额外维护新的 MemTable 和压缩状态。
 
@@ -109,7 +109,7 @@ RucksFS 从一棵目录树出发理解命名空间。用户看到的是按目录
 
 \subsubsection{键编码与目录映射}
 
-在列族边界确定之后，接下来要解决的问题是：目录树中的 inode 和目录项，如何进一步映射为 RocksDB 中可比较、可扫描、可点查的字节串键。RucksFS 对所有多字节整数统一采用大端序编码，以保证数值顺序与字节序顺序一致；不同类型的键再通过单字节前缀区分，其中 \texttt{[I]} 表示 inode 属性记录，\texttt{[D]} 表示目录项记录，\texttt{[X]} 表示增量记录，\texttt{[L]} 表示数据位置记录，\texttt{[S]} 表示符号链接目标记录。在此基础上，表~\ref{tab:key_encoding} 给出几类核心键的具体编码格式。
+在列族边界确定之后，接下来要解决的问题是：目录树中的 inode 和目录项，如何映射为 RocksDB 中可比较、可扫描、可点查的字节串键。RucksFS 对所有多字节整数统一采用大端序编码，以保证数值顺序与字节序顺序一致；不同类型的键再通过单字节前缀区分，其中 \texttt{[I]} 表示 inode 属性记录，\texttt{[D]} 表示目录项记录，\texttt{[X]} 表示增量记录，\texttt{[L]} 表示数据位置记录，\texttt{[S]} 表示符号链接目标记录。在此基础上，表~\ref{tab:key_encoding} 给出几类核心键的具体编码格式。
 
 \begin{table}[htbp]
     \centering
@@ -192,7 +192,7 @@ RucksFS 中的大多数元数据操作都不是单键更新。以 \texttt{create
 
 \subsubsection{增量更新与读写一致性}
 
-仅靠事务并不能解决所有热点问题。目录修改还会带来一个更隐蔽的瓶颈：父目录属性更新。按照 POSIX 语义，\texttt{create}、\texttt{unlink}、\texttt{mkdir} 和 \texttt{rmdir} 都会影响父目录的 \texttt{mtime}/\texttt{ctime}，而涉及子目录的操作还会进一步影响 \texttt{nlink}。如果每次都直接读取并重写父目录 inode，那么在热点目录下，冲突会集中到同一条基值记录上，LSM-tree 的追加写优势也会被频繁的“读--改--写”抵消。
+仅靠事务并不能解决所有热点问题。目录修改还会带来一个更隐蔽的瓶颈：父目录属性更新。按照 POSIX 语义，\texttt{create}、\texttt{unlink}、\texttt{mkdir} 和 \texttt{rmdir} 都会影响父目录的 \texttt{mtime}/\texttt{ctime}，而涉及子目录的操作还会影响 \texttt{nlink}。如果每次都直接读取并重写父目录 inode，那么在热点目录下，冲突会集中到同一条基值记录上，LSM-tree 的追加写优势也会被频繁的“读--改--写”抵消。
 
 RucksFS 的处理方式是把这类更新从基值重写改为增量追加。写路径不直接修改父目录在 \texttt{inodes} 中的基础值，而是把变化编码为 \texttt{DeltaOp}，追加到 \texttt{delta\_entries} 中。当前增量类型包括 \texttt{IncrementNlink}、\texttt{SetMtime}、\texttt{SetCtime} 和 \texttt{SetAtime}。其中，普通文件的创建与删除只影响父目录时间戳；\texttt{mkdir}、\texttt{rmdir} 以及跨目录移动目录时，才会额外引入 \texttt{nlink} 增量。这样一来，热点目录上的高频更新就从覆盖同一条 inode 基值，转变为向独立增量记录追加。
 
@@ -238,7 +238,7 @@ RucksFS 的处理方式是把这类更新从基值重写改为增量追加。写
 
 从键空间组织的角度看，\texttt{create} 恰好体现了“以边为中心”的好处：它不需要改写整条路径，也不需要搬移任何子树，只需在 \texttt{dir\_entries} 中插入一条新边，并在 \texttt{inodes} 中补齐目标对象的基础记录和数据位置记录。换言之，新对象的可见性是由一条目录项记录与一组 inode 相关记录共同建立起来的，而不是由某个单一结构承担。
 
-与此同时，父目录属性并不通过覆盖写回基础 inode 来更新，而是追加 \texttt{SetMtime} 与 \texttt{SetCtime} 两条 \texttt{DeltaOp}。这一点把 \texttt{create} 从“目录项插入 + 父目录基值重写”的组合，变成了“目录项插入 + 少量新记录写入 + 增量追加”的组合。前者在热点目录下很容易把竞争集中到父目录 inode 上，后者则更符合 LSM-tree 擅长的追加写模式。
+另一方面，父目录属性并不通过覆盖写回基础 inode 来更新，而是追加 \texttt{SetMtime} 与 \texttt{SetCtime} 两条 \texttt{DeltaOp}。这一点把 \texttt{create} 从“目录项插入 + 父目录基值重写”的组合，变成了“目录项插入 + 少量新记录写入 + 增量追加”的组合。前者在热点目录下很容易把竞争集中到父目录 inode 上，后者则更符合 LSM-tree 擅长的追加写模式。
 
 \texttt{mkdir} 与 \texttt{create} 共享同一事务骨架，但语义上比普通文件创建多出一层目录约束。新对象的类型位变为目录，初始 \texttt{nlink} 为 2；同时，父目录除了更新时间戳之外，还需要追加 \texttt{IncrementNlink(+1)}，因为新增了一个子目录。普通文件创建不会改变父目录 \texttt{nlink}，而目录创建会，这一差异看似细小，却直接决定了后续 \texttt{rename}、\texttt{rmdir} 和一致性检查的正确性。
 
@@ -293,7 +293,7 @@ RucksFS 的处理方式是把这类更新从基值重写改为增量追加。写
 
 \texttt{open} 则是元数据面和数据面的衔接点。它本身不承担数据读写，而是负责把“这个 inode 的数据应该去哪台 DataServer 读写”这一信息交给客户端。因此，\texttt{open} 返回的不只是句柄，还包括对应的 \texttt{DataLocation}。这样，后续 \texttt{read}、\texttt{write} 和 \texttt{truncate} 就不必每次都回到 MetadataServer 重新查询路由，而可以直接访问正确的数据后端。
 
-写入完成后的元数据更新进一步体现了 RucksFS 的职责划分：DataServer 只负责把字节写到正确位置，并不主动维护文件长度或 \texttt{mtime}；这些语义仍由 MetadataServer 统一掌握。因此，客户端在 \texttt{write\_data} 成功后，会显式调用 \texttt{report\_write(inode, new\_size, mtime)} 回写元数据。这种设计的好处是边界清晰：数据路径保持简单，元数据语义集中维护；代价则是客户端需要承担一次额外的协调动作。更完整的路由与服务编排细节将在下一节展开。
+写入完成后的元数据更新同样体现了 RucksFS 的职责划分：DataServer 只负责把字节写到正确位置，并不主动维护文件长度或 \texttt{mtime}；这些语义仍由 MetadataServer 统一掌握。因此，客户端在 \texttt{write\_data} 成功后，会显式调用 \texttt{report\_write(inode, new\_size, mtime)} 回写元数据。这种设计的好处是边界清晰：数据路径保持简单，元数据语义集中维护；代价则是客户端需要承担一次额外的协调动作。更完整的路由与服务编排细节将在下一节展开。
 \subsection{数据服务与客户端协调}
 \label{sec:data_path}
 
@@ -315,9 +315,9 @@ RucksFS 的处理方式是把这类更新从基值重写改为增量追加。写
 \]
 计算物理偏移；随后通过 \texttt{pread} 与 \texttt{pwrite} 完成读取和写入。也就是说，DataServer 并不维护复杂的块映射结构，而是把 inode 编号直接解释为数据文件中的一个逻辑槽位。
 
-这种固定地址映射的优点非常直接：数据路径不需要空闲空间位图、extent 树或块分配器，寻址是常数时间，服务端状态也非常简单。对于本文关注的“元数据关键路径优化”而言，这种极简设计还有一个额外收益：它把数据侧复杂度尽量压低，使第四章中的性能结果更容易归因于元数据组织、客户端协调和网络通信，而不是被复杂的数据块管理逻辑所掩盖。
+这种固定地址映射的优点非常直接：数据路径不需要空闲空间位图、extent 树或块分配器，寻址是常数时间，服务端状态也非常简单。对于本文关注的“元数据关键路径优化”而言，这种极简设计还有一个额外收益：它把数据侧复杂度尽量压低，使第~\ref{sec:experiments}~章中的性能结果更容易归因于元数据组织、客户端协调和网络通信，而不是被复杂的数据块管理逻辑所掩盖。
 
-当然，这一设计也有明显代价。每个 inode 都会预留 \texttt{max\_file\_size} 大小的逻辑地址空间，当前默认值为 128\,MiB，因此大量小文件会带来很低的空间利用率。与此同时，\texttt{delete\_data} 目前仍是空操作，这意味着对象删除后物理空间不会立即回收。本文之所以仍采用这一方案，并不是忽视空间管理，而是有意把工程复杂度留给后续扩展，以换取当前原型在数据路径上的可解释性与实现简洁性。
+当然，这一设计也有明显代价。每个 inode 都会预留 \texttt{max\_file\_size} 大小的逻辑地址空间，当前默认值为 128\,MiB，因此大量小文件会带来很低的空间利用率。此外，\texttt{delete\_data} 目前仍是空操作，这意味着对象删除后物理空间不会立即回收。本文之所以仍采用这一方案，并不是忽视空间管理，而是有意把工程复杂度留给后续扩展，以换取当前原型在数据路径上的可解释性与实现简洁性。
 
 并发语义方面，由于写入偏移由调用方显式指定，不同客户端若写入同一 inode 的不同偏移，不会因为 DataServer 内部再分配地址而产生额外竞争；\texttt{pread}/\texttt{pwrite} 也保证每次 I/O 以调用为边界完成。若不同写入请求本身覆盖了重叠区域，则那属于上层应用的并发语义问题，而不是 DataServer 需要额外裁决的状态冲突。
 
@@ -353,11 +353,11 @@ RucksFS 的处理方式是把这类更新从基值重写改为增量追加。写
 
 当 MetadataServer 崩溃时，其持有的 RocksDB TransactionDB 会依赖 WAL 执行恢复：已经提交但尚未刷入 MemTable 的内容会在重启后恢复，未完成提交的事务则不会伪装成已成功操作。这意味着，只要某次元数据操作已经向客户端返回成功，它对应的持久化结果就不会因为 MetadataServer 进程退出而丢失。客户端侧则会把崩溃表现为一次 RPC 失败或重试；必要时，像 \texttt{open} 这样的操作可以重新向 MetadataServer 获取新的 \texttt{DataLocation}。
 
-DataServer 的崩溃语义更简单，也更受当前实现边界约束。若负责某个文件的 DataServer 不可达，则对应的 \texttt{read} 或 \texttt{write} 会直接向上返回 \texttt{EIO}。由于当前原型没有引入数据副本或多 DataServer 故障切换，数据服务故障不会被透明掩蔽，而是直接暴露为该文件暂时不可访问。与此同时，由于 \texttt{delete\_data} 目前仍是空操作，删除路径也不存在“删除已提交但物理空间未及时回收”的额外恢复问题。
+DataServer 的崩溃语义更简单，也更受当前实现边界约束。若负责某个文件的 DataServer 不可达，则对应的 \texttt{read} 或 \texttt{write} 会直接向上返回 \texttt{EIO}。由于当前原型没有引入数据副本或多 DataServer 故障切换，数据服务故障不会被透明掩蔽，而是直接暴露为该文件暂时不可访问。由于 \texttt{delete\_data} 目前仍是空操作，删除路径也不存在“删除已提交但物理空间未及时回收”的额外恢复问题。
 
 \subsubsection{当前实现边界与论文讨论范围}
 
-在介绍完正常路径和故障路径之后，还需要进一步明确本文的讨论边界。RucksFS 当前有意保持“单 MetadataServer + 单默认 DataServer”的主路径。虽然 \texttt{DataLocation} 与 \texttt{VfsCore::with\_data\_servers()} 已经为多 DataServer 路由预留了接口，但元数据分片、多副本一致性、物理空间回收以及严格双阶段 \texttt{fsync} 都尚未纳入本文实现范围。
+在介绍完正常路径和故障路径之后，还需要明确本文的讨论边界。RucksFS 当前有意保持“单 MetadataServer + 单默认 DataServer”的主路径。虽然 \texttt{DataLocation} 与 \texttt{VfsCore::with\_data\_servers()} 已经为多 DataServer 路由预留了接口，但元数据分片、多副本一致性、物理空间回收以及严格双阶段 \texttt{fsync} 都尚未纳入本文实现范围。
 
 这一定义并不是缺省性的”未做完”，而是本文研究目标的一部分：本论文更关注在元数据面与数据面分离的前提下，如何通过键编码、事务控制、客户端协调和增量更新优化元数据关键路径，而不是讨论完整的大规模分布式控制面。也正因为如此，第~\ref{sec:experiments}~章中的实验结果主要验证的是这套设计在当前边界内的正确性与性能特征，而不意图证明系统已经覆盖多副本容错、跨节点故障转移或空间回收等更大范围的工程能力。
 
