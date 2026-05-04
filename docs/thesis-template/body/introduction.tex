@@ -287,6 +287,6 @@ MetaHive\cite{heidari2024metahive}在 2024 年针对 KV 存储引擎在元数据
 
 第三章系统设计与实现。展开 RucksFS 的整体架构（Client、MetadataServer、DataServer 与 7 个 crate 组成的 workspace 模块划分），元数据键编码方案，增量更新与懒折叠机制，PCC 事务封装与冲突重试策略，以及各 POSIX 操作的具体实现。
 
-第四章测试与结果分析。先交代测试环境和实验口径，然后给出 RucksFS 与 JuiceFS、NFS 在元数据操作吞吐、延迟、POSIX 合规性上的对比数据，并对结果做分析。
+第四章测试与结果分析。先交代测试环境和具体怎么做的，然后给出 RucksFS 与 JuiceFS、NFS 在元数据操作吞吐、延迟、POSIX 合规性上的对比数据，并对结果做分析。
 
 第五章总结与展望。回顾主要成果，讨论当前设计的局限，给出元数据分片、副本容错、RPC 路径优化和智能预取等方向的后续改进思路。
