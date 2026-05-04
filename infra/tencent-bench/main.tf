@@ -32,9 +32,10 @@ locals {
 # ============================================================
 
 resource "tencentcloud_vpc" "bench" {
-  count      = local.use_existing_vpc ? 0 : 1
-  name       = "${var.name_prefix}-vpc"
-  cidr_block = var.vpc_cidr
+  count        = local.use_existing_vpc ? 0 : 1
+  name         = "${var.name_prefix}-vpc"
+  cidr_block   = var.vpc_cidr
+  is_multicast = false
 }
 
 resource "tencentcloud_subnet" "bench" {
@@ -43,6 +44,7 @@ resource "tencentcloud_subnet" "bench" {
   vpc_id            = local.vpc_id
   cidr_block        = var.subnet_cidr
   availability_zone = var.availability_zone
+  is_multicast      = false
 }
 
 # ============================================================
@@ -53,6 +55,10 @@ resource "tencentcloud_security_group" "bench" {
   name        = "${var.name_prefix}-sg"
   description = "RucksFS benchmark: internal full access, external SSH only"
   project_id  = var.project_id
+
+  lifecycle {
+    ignore_changes = [tags]
+  }
 }
 
 resource "tencentcloud_security_group_rule_set" "bench" {

@@ -102,3 +102,11 @@ variable "name_prefix" {
   type        = string
   default     = "rucksfs-bench"
 }
+
+# ---------- Round 3: multi-client topology ----------
+
+variable "num_clients" {
+  description = "Number of client/MPI-worker VMs to provision. Round 3 uses 6."
+  type        = number
+  default     = 6
+}

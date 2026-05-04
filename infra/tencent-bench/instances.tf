@@ -1,9 +1,12 @@
 # ============================================================
-# Machine A — Client / Test Driver (8C16G + 200GB SSD)
+# Machine A — Client / Test Driver fleet (2C2G)
+# Round 3+: scaled to var.num_clients for multi-node MPI.
 # ============================================================
 
 resource "tencentcloud_instance" "client" {
-  instance_name              = "${var.name_prefix}-client"
+  for_each = toset([for i in range(var.num_clients) : tostring(i)])
+
+  instance_name              = "${var.name_prefix}-client-${each.key}"
   availability_zone          = var.availability_zone
   image_id                   = var.image_id
   instance_type              = var.instance_type_client
@@ -19,10 +22,7 @@ resource "tencentcloud_instance" "client" {
   system_disk_type = "CLOUD_BSSD"
   system_disk_size = 50
 
-  data_disks {
-    data_disk_type = "CLOUD_SSD"
-    data_disk_size = var.data_disk_size_client
-  }
+  # No data disk — clients only need binaries and mount point
 
   user_data = base64encode(file("${path.module}/scripts/init-client.sh"))
 
@@ -34,8 +34,7 @@ resource "tencentcloud_instance" "client" {
 }
 
 # ============================================================
-# Server — RucksFS MetadataServer + DataServer (8C16G + 200GB SSD)
-# Both services co-located on one machine (same as benchmark setup).
+# Server — RucksFS MetadataServer + DataServer (+ NFS + TiKV)
 # ============================================================
 
 resource "tencentcloud_instance" "server_rucksfs" {
@@ -53,12 +52,9 @@ resource "tencentcloud_instance" "server_rucksfs" {
   key_ids                    = var.ssh_key_ids
 
   system_disk_type = "CLOUD_BSSD"
-  system_disk_size = 50
+  system_disk_size = 200
 
-  data_disks {
-    data_disk_type = "CLOUD_SSD"
-    data_disk_size = var.data_disk_size_server
-  }
+  # No separate data disk — use enlarged system disk for /data
 
   user_data = base64encode(file("${path.module}/scripts/init-server-rucksfs.sh"))
 
