@@ -43,3 +43,18 @@ docs/thesis-template/*.log
 docs/thesis-template/missfont.log
 docs/thesis-template/*.backup
 docs/thesis-template/**/*.backup
+
+# Third-party tooling / skill bundles (kept locally, not versioned in this repo)
+claude-scientific-skills/
+research-to-diagram/
+
+# IOR / mdtest upstream source (fetched into testing/tools at benchmark time)
+testing/tools/ior/
+
+# Terraform state / private keys for alternate clusters
+infra/tencent-grpc-direct/*.pem
+infra/tencent-grpc-direct/*.tfstate
+infra/tencent-grpc-direct/*.tfstate.*
+infra/tencent-grpc-direct/.terraform/
+infra/tencent-grpc-direct/.terraform.lock.hcl
+infra/tencent-grpc-direct/terraform.tfvars

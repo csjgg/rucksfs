@@ -275,6 +275,8 @@ MetaHive\cite{heidari2024metahive}在 2024 年针对 KV 存储引擎在元数据
 
 （5）搭了一套多层次测试：192 个左右的单元测试盖核心逻辑，pjdfstest 套件验 POSIX 兼容性，再加一套自定义的元数据基准（\texttt{create}/\texttt{stat}/\texttt{unlink}/\texttt{readdir} 吞吐和延迟）用于跨系统对比。在同一硬件条件下和 JuiceFS、NFS 一起做了评测。
 
+上述实现的完整源代码、测试编排脚本、本文所用的原始测量数据以及本论文的 LaTeX 源码均公开在 \url{https://github.com/csjgg/rucksfs}，按第~\ref{sec:experiments}~章的参数即可复现。
+
 \subsubsection{论文结构}
 
 本论文共分为五章，各章安排如下：
