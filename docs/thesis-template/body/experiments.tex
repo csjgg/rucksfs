@@ -206,13 +206,22 @@ pjdfstest 是业界常用的 POSIX 文件系统合规性测试套件，覆盖 \t
 \subsection{分布式性能对比}
 \label{sec:perf-comparison}
 
-性能比较分两个层次。本节先把 RucksFS-Delta 和 NFS、JuiceFS+TiKV 一起压测，回答“横向位置如何”的问题；下一节再单独看 Delta 与 NoDelta 的差距，回答“增量更新机制有没有真正发挥第~\ref{sec:design}~章预期的作用”。
+本节的目标是在干净的对比区间里，把 RucksFS-Delta 和 NFS、JuiceFS+TiKV 一起压测一遍，看 KV 方案相对本地文件系统 (NFS+ext4) 和通用分布式 KV (JuiceFS+TiKV) 的横向位置。下一节（§\ref{sec:delta-vs-nodelta}）再单独做 Delta/NoDelta 的受控消融，回答高并发下增量更新机制有没有真正发挥预期的作用。
 
-本节所有数据都来自 mdtest 共享父目录（hard）模式。这种模式下所有客户端在同一个父目录下创建、查询和删除文件，是最容易暴露并发瓶颈、也最能把系统设计差异区分开的场景——第~\ref{sec:design}~章设计的 DeltaOp 正是为了应对这种热点目录写竞争。
+本节所有数据都来自 mdtest 共享父目录（hard）模式。这种模式下所有客户端在同一个父目录下创建、查询和删除文件，是最容易暴露并发瓶颈、也最能把系统设计差异区分开的场景。
+
+\textbf{讨论口径说明。} 为了把对比建立在公平的基础上，本节只讨论 $N \in \{2, 8, 32\}$ 这一中低并发区间——三套系统在该区间内都能给出稳态数据。$N \geq 64$ 的数据在下面的表里仍保留（便于审阅），但在文字分析里不展开，原因如下：
+
+\begin{itemize}
+    \item JuiceFS+TiKV 在 $N \geq 64$ 时没给出数据。单节点 TiKV 在大量客户端同时建立 FUSE 挂载的时候出现连接初始化超时，这属于单节点部署的容量限制，不是元数据后端在稳态下的性能问题；生产环境通常用三节点及以上的 TiKV 集群，本章不做补测。
+    \item NFS 的吞吐从 $N=32$ 起就已经被 ext4 目录互斥锁（\texttt{i\_rwsem}）压住：所有 \texttt{nfsd} 线程在共享父目录上的写操作必须串行拿锁，不管加多少客户端都停在 900\,ops/s 附近。这是本地文件系统面对共享热点目录的通用短板，继续拉高 $N$ 只会放大这个先天差距，并不能增加新的信息量。
+\end{itemize}
+
+换句话说，$N \geq 64$ 时 RucksFS 在“对照组已经走不动”的背景下继续线性增长，这件事本身更适合放到下一节的消融实验里去说明——那里同一台服务器、同一批客户端、同样的负载，只换一个机制开关，能给出更干净的归因。本节则聚焦“可比较的区间”，让横向数字站得住。
 
 \subsubsection{原始测量结果}
 
-表~\ref{tab:perf-create-hard}--\ref{tab:perf-remove-hard} 分别给出 create、stat、remove 三类操作在五档并发下的吞吐量。
+表~\ref{tab:perf-create-hard}--\ref{tab:perf-remove-hard} 分别给出 create、stat、remove 三类操作在五档并发下的吞吐量；其中 $N \geq 64$ 的行按上述原因仅作为参考给出。
 
 \begin{table}[htbp]
     \centering
@@ -265,11 +274,11 @@ pjdfstest 是业界常用的 POSIX 文件系统合规性测试套件，覆盖 \t
     \end{tabular}
 \end{table}
 
-JuiceFS+TiKV 在 $N \geq 64$ 时没给出数据。原因是单节点 TiKV 在大量客户端同时建立 FUSE 挂载的时候出现连接初始化超时，这属于单节点部署的容量限制，不是元数据后端在稳态下的性能问题。生产环境通常用三节点及以上的 TiKV 集群，本章不做补测。已有的 $N \leq 32$ 数据已经足够反映 JuiceFS+TiKV 的相对位置了。
+JuiceFS+TiKV 在 $N \geq 64$ 时没给出数据，原因已在本节开头说明。下面分别看 create、stat、remove 三类操作在 $N \in \{2, 8, 32\}$ 区间里的表现。
 
-\subsubsection{创建吞吐随并发度的变化}
+\subsubsection{创建吞吐}
 
-表~\ref{tab:perf-create-hard} 的数字已经能看出相对关系，但三套系统的扩展形态还是要从曲线形状才看得清楚。图~\ref{fig:perf-create-curve} 把同一组数据画成吞吐曲线，方便观察随并发度变化的趋势差异。
+在可比较区间 $N \in \{2, 8, 32\}$ 内，三套系统的 \texttt{create} 吞吐量对比如图~\ref{fig:perf-create-curve} 所示（为完整起见，图里也画出了 RucksFS-Delta 和 NFS 在 $N=64, 96$ 处的数据点，但下面的分析只基于可比区间）。
 
 \begin{figure}[htbp]
     \centering
@@ -295,34 +304,44 @@ JuiceFS+TiKV 在 $N \geq 64$ 时没给出数据。原因是单节点 TiKV 在大
     \addlegendentry{NFS}
     \end{axis}
     \end{tikzpicture}
-    \caption{共享父目录场景下文件创建吞吐量随客户端数变化}
+    \caption{共享父目录场景下文件创建吞吐量随客户端数变化（分析范围 $N \leq 32$）}
     \label{fig:perf-create-curve}
 \end{figure}
 
-三条曲线扩展形态差别挺大，根源要追到各自的元数据写入路径上。
+\textbf{对 JuiceFS+TiKV：稳定的 2.8--4 倍优势。} $N=2$ 时二者比值 2.8，$N=8$ 为 3.5，$N=32$ 为 4.0。这个区间里两套系统都在线性扩展，RucksFS 的绝对领先幅度和相对比值都相当稳定——这是本节最想说明的一点。差距的来源不是一次性的量级差异，而是上层架构的结构性差异：RucksFS 的一次 \texttt{create} 是 MetadataServer 内部的一次 \texttt{AtomicWriteBatch}，几类键（目录项、子 inode、父 inode 属性 delta、计数器）共享一次 WAL 同步就完事；TiKV 的一次 \texttt{create} 则要走完整的 Percolator 两阶段提交，再过一遍 Raft 日志（即便是单节点部署，Raft 模块也在跑）。代价也要坦白：TiKV 的那套机制换来的是跨节点事务和副本容错，这些在 RucksFS 原型上是暂时没有的。所以这个 3--4 倍更准确的读法是“单机直连 RocksDB + 针对文件系统元数据专门设计的键布局”相对“通用分布式 KV 叠 FUSE”在元数据关键路径上的开销差。
 
-NFS 的曲线几乎是平的：从 $N=2$ 的 605\,ops/s 到 $N=96$ 的 911\,ops/s，增幅不到 1.5 倍。瓶颈在 ext4 的目录互斥锁（\texttt{i\_rwsem}）——所有 \texttt{nfsd} 线程在同一父目录上的 \texttt{create} 都要先拿到该目录 inode 的写锁，再走 journal 提交。不管客户端加到多少，能真正并发执行的 \texttt{create} 都被这把锁压在了很低的水位。
+\textbf{对 NFS：从 3 倍到 38 倍的拉开。} $N=2$ 时 RucksFS 是 NFS 的 3.1 倍，到 $N=32$ 已经变成 38 倍。拉开的过程能很好地说明“为什么本地文件系统的 B+ 树方案不适合做元数据热点”：NFS 服务端的 \texttt{nfsd} 线程数够多，但所有 \texttt{create} 到了 ext4 这一层都要先拿目录 inode 的 \texttt{i\_rwsem} 写锁，再走 journal 提交，结果从 $N=2$ 的 605\,ops/s 到 $N=32$ 的 718\,ops/s 一共只涨了不到 20\%。RucksFS 同区间从 1\,853\,ops/s 涨到 27\,501\,ops/s、接近线性。$N=2$ 处的 3 倍差距相对“诚实”一些——那时候 NFS 的锁竞争还没被放大，反映的更接近两种方案的结构差：一次文件创建在 ext4 上要写 6 个磁盘区域（见图~\ref{fig:ext4-create-path}），而在 KV 里只是几条键值对追加。到 $N=32$ 的 38 倍则主要来自共享目录锁的放大效应，不能全部记在“设计更好”上。
 
-JuiceFS+TiKV 在可测的三档里保持了准线性增长。它的元数据更新走 Percolator 两阶段提交，每次 \texttt{create} 在 TiKV 内部表现为对几个独立键的写入加上一次 \texttt{commit\_ts} 写入。共享父目录确实会引发对父 inode 键的并发更新，但 MVCC 按时间戳排序，冲突被推到后台 GC 里处理，不用在事务路径上同步等。不过同区间内 RucksFS-Delta 始终高出 2.8--4 倍。差距主要来自上层架构的不同：RucksFS 的一次 \texttt{create} 是 MetadataServer 内部的一次 \texttt{AtomicWriteBatch}，四类键共享一次 WAL 同步就完事了；TiKV 的一次 \texttt{create} 还要走完整的两阶段提交、过一遍 Raft 日志（单节点部署下 Raft 模块照样跑）。
+把两条线合起来看：在可比区间里 RucksFS 对两种对照系统都保持了明确且稳定的横向优势。对 JuiceFS+TiKV 的 3--4 倍说明本文的 KV 建模思路选得对，对 NFS 的 3--38 倍说明 LSM-tree + 边中心键编码相对传统 B+ 树 + 目录锁的方案有结构性优势。这两组数字共同构成本节的主要结论。
 
-RucksFS-Delta 在整个区间基本是近线性增长的，从 $N=2$ 的 1\,853\,ops/s 一直到 $N=96$ 的 68\,588\,ops/s，每客户端贡献大约 714\,ops/s。$N=96$ 时相对 NFS 有 75 倍左右，相对 JuiceFS+TiKV 在 $N=32$ 处有 4 倍。这两个倍数得分开看。对 NFS 的大幅领先主要是架构层面的差异，NFS 被 ext4 目录互斥锁串行化在了那里，这是本地文件系统面对共享热点目录的通用短板，和 RucksFS “设计得多好”关系不大。对 JuiceFS+TiKV 的 4 倍差距也不能简单地说成“设计更好”，更靠谱的说法是：RucksFS 作为单机直连 RocksDB 的原型，天然省掉了 TiKV 的 Percolator 两阶段提交和 Raft 日志开销——代价是当前实现没有副本容错，也没有跨节点事务。DeltaOp 把父目录更新从“读--改--写”改成追加写这件事，在这个背景下起到的作用是让共享父目录不会成为事务冲突热点，而不是把一条本来就很慢的路径“变快若干倍”。
+\subsubsection{查询吞吐}
 
-\subsubsection{查询吞吐：写路径未阻塞读路径}
+\texttt{stat} 在可比区间里的数字见表~\ref{tab:perf-stat-hard}：$N=2$ 时 RucksFS 是 JuiceFS+TiKV 的约 2.0 倍、NFS 的约 3.6 倍；$N=8$ 对应 2.6/6.2 倍；$N=32$ 为 6.8/17.8 倍。
 
-stat 的差距数字看起来挺大（$N=96$ 时 RucksFS-Delta 达到 1\,792 万 ops/s，NFS 约 4.5 万 ops/s），但这组数不能直接拿去做“某系统快几百倍”的宣传。两侧路径根本不一样。
+这里有一点要先说清楚：NFS 客户端挂载时加了 \texttt{noac}，是为了不让客户端属性缓存把服务端能力盖住，代价就是每次 \texttt{stat} 都被逼着走一遍网络。实际部署中 NFS 一般是允许客户端缓存属性的，真实吞吐会高得多。所以“对 NFS 的 stat 倍数”这个指标本身不是很干净，本节不重点讨论。
 
-NFS 客户端挂载时加了 \texttt{noac}，是为了不让客户端属性缓存把服务端能力盖住，代价就是每次 \texttt{stat} 都被逼着走一遍网络。实际部署中 NFS 一般是允许客户端缓存属性的，真实吞吐会高得多。再看 RucksFS 这边，MetadataServer 的 \texttt{stat} 就是 RocksDB 的一次点查，上一轮 \texttt{create} 刚写进去的 inode 记录还在 BlockCache 里，命中后延迟在微秒级。另外 LSM-tree 的读写不共用同一把锁，\texttt{stat} 不会被写路径挤占——这是 KV 引擎本身自带的特性，不是本文另外做的设计。
-
-更关键的是，DeltaOp 在这里起了个间接作用：把父目录的属性写从热路径上拿走之后，\texttt{stat} 的 \texttt{lookup} 阶段就不会再被父 inode 的写锁挡住。这一点会在下一节 NoDelta 对照里被直接量化。
+相对干净的是和 JuiceFS+TiKV 的 2--6.8 倍差距——两套系统都走网络、都在服务端做点查。RucksFS 端的 \texttt{stat} 就是 RocksDB 的一次点查，上一轮 \texttt{create} 刚写进去的 inode 记录还在 BlockCache 里，命中后延迟在微秒级；TiKV 端则要经过一次带时间戳的 MVCC 读，再走一层键路由。LSM-tree 的读写不共用同一把锁、\texttt{stat} 不会被写路径挤占这件事是 KV 引擎本身自带的特性，但“\texttt{stat} 能够持续快”还需要一个前提——写路径不会长时间锁住 \texttt{lookup} 要读的父 inode。这一点在下一节 Delta 和 NoDelta 的对照里会被直接量化。
 
 \subsubsection{删除吞吐}
 
-remove 的整体形态和 create 很像，但对比口径要单独说一下：本文的 DataServer 当前没实现真正的空间回收，\texttt{delete\_data} 是空操作；而 NFS 的 \texttt{unlink} 要触发 ext4 的 inode 位图翻转和 journal 提交，TiKV 的 \texttt{unlink} 要写 tombstone 并最终参与 GC。在 mdtest 这种空文件负载下，这部分工作量差异会被放大。NFS 的扩展曲线形状和 create 差不多，瓶颈还是父目录写锁加 journal 提交。$N=96$ 时 RucksFS-Delta 达到 70\,859\,ops/s，对 NFS 约 23 倍，对 JuiceFS+TiKV 在 $N=32$ 处约 4 倍。这里给出数字，主要不是为了强调倍数本身，而是想说明“元数据路径在 hard 模式下不会成为瓶颈”这个结论在删除侧也站得住；要把它当作一个完整文件系统的删除吞吐来解读，还得把真实的数据回收路径补上。
+\texttt{remove} 在可比区间的形态和 \texttt{create} 很像：$N=2$ 时 RucksFS 是 JuiceFS+TiKV 的约 3.0 倍、NFS 的 2.7 倍；$N=8$ 为 5.1/4.3 倍；$N=32$ 为 3.9/9.1 倍。
+
+这里要先交代一个对比口径：本文的 DataServer 当前没实现真正的空间回收，\texttt{delete\_data} 是空操作；而 NFS 的 \texttt{unlink} 要触发 ext4 的 inode 位图翻转和 journal 提交，TiKV 的 \texttt{unlink} 要写 tombstone 并最终参与 GC。在 mdtest 这种空文件负载下，这部分工作量差异会被放大，读者在对着数字看时需要把这一点纳入考虑——这一点在第~\ref{sec:expr-env}~节也专门说明过。
+
+在这个口径下的数字可以这样解读：RucksFS 的 \texttt{remove} 路径在事务结构上和 \texttt{create} 几乎对称（同样是 \texttt{AtomicWriteBatch} 提交，同样按 inode 编号排序加锁），所以它相对两套对照系统的横向位置与 \texttt{create} 一致——说明元数据删除这条路径在当前实现里不是瓶颈。真实数据回收一旦补上，这个倍数会相应收敛，这是后续工程的问题，不是当前机制设计的问题。
+
+\subsubsection{本节小结}
+
+把上面三类操作的可比区间数据合起来看，本节得到两个结论。一是 RucksFS 相对 JuiceFS+TiKV 在 \texttt{create}/\texttt{stat}/\texttt{remove} 上保持了稳定的 2--5 倍优势，这说明“针对文件系统元数据专门设计的 KV 布局 + 单机直连 RocksDB”相对“通用分布式 KV 叠 FUSE”在元数据关键路径上省下的开销是实实在在的；代价是 RucksFS 原型目前没有跨节点事务和副本容错，只在元数据机制的维度上对等比较。二是 RucksFS 相对 NFS 在 $N=2$ 处已经有 3 倍左右的领先，说明 KV 方案相对 B+ 树在元数据写入这条路径上有结构性优势；$N$ 增大后倍数继续拉开，反映的是共享目录下 ext4 的 \texttt{i\_rwsem} 锁问题，这一部分不完全等于 RucksFS 的设计收益，但也从侧面说明 LSM-tree 的写路径天然对并发热点更友好。
+
+$N \geq 64$ 区间内，两套对照系统因为各自的外部原因（TiKV 单节点部署上限、ext4 目录锁）失去了可比性，继续用它们做横向对比信息量已经不大。恰好这个区间又是检验 RucksFS 内部机制（DeltaOp）是否有效的最好舞台——下一节用 Delta 和 NoDelta 两种只差一个编译开关的构建变体，在同硬件、同负载下做受控消融，把“高并发共享目录下元数据机制到底起没起作用”这件事讲清楚。
 
 \subsection{DeltaOp 增量机制的内部对比}
 \label{sec:delta-vs-nodelta}
 
-第~\ref{sec:design}~章第~\ref{sec:txn_model}~节的核心设计假设是这样的：把父目录属性更新从“覆盖父 inode 基值”改成“向独立列族追加一条 DeltaOp”，就可以避开热点目录下的事务冲突，让元数据写入在并发度提升时还能维持线性扩展。本节要做的，是用 Delta 和 NoDelta 两种构建变体在同一硬件、同一负载下的直接对比来验证这个假设。这是本章最重要的一组消融实验：假设要是成立，应该能看到三个可预测的现象——（1）低并发时两者没差距，（2）高并发共享目录下 NoDelta 出现非线性下滑而 Delta 保持线性，（3）独立目录（easy 模式）下两者始终重合。
+上一节把讨论范围收敛在 $N \leq 32$，是因为 $N \geq 64$ 区间里两套对照系统各自因为外部原因失去了可比性。但高并发共享目录恰恰是本文 DeltaOp 增量机制被设计出来要处理的场景——这一节就来把“高并发下 RucksFS 的元数据机制究竟起了多大作用”这件事说清楚。
+
+思路是做一组受控消融：Delta 和 NoDelta 是只差一个 \texttt{cargo} 特性开关的两种构建变体，除了父目录属性更新路径之外的代码完全一样，在同一台服务器、同一批客户端、同样的负载下直接对照。第~\ref{sec:design}~章第~\ref{sec:txn_model}~节的核心设计假设是：把父目录属性更新从“覆盖父 inode 基值”改成“向独立列族追加一条 DeltaOp”，就可以避开热点目录下的事务冲突，让元数据写入在并发度提升时还能维持线性扩展。如果这个假设成立，应该能看到三个可预测的现象——（1）低并发时两者没差距；（2）高并发共享目录下 NoDelta 出现非线性下滑而 Delta 保持线性；（3）独立目录（easy 模式）下两者始终重合。这一节就按这三个条件逐一检查。
 
 \subsubsection{两种构建变体的吞吐对比}
 
@@ -438,6 +457,6 @@ DeltaOp 的设计目标虽然是父目录属性更新，但它的影响不只限
 
 第一条线是 POSIX 合规性。pjdfstest 的 398 条用例按本文实现范围拆开看：排除掉 \texttt{mknod}/\texttt{mkfifo} 相关用例（167 条）、DataServer 单文件大小用例（1 条）和 pjdfstest 框架自身跳过的用例（48 条）之后，剩下 182 条“实现范围内”用例全部通过，通过率 100\%。“打开后 \texttt{unlink}”、硬链接覆盖、长名称错误码、\texttt{O\_TRUNC} 时间戳、事务内空目录检查等边界用例同样都在通过列里，正好对上第~\ref{sec:design}~章的跨列族原子提交、句柄生命周期维护、统一加锁顺序和客户端协调路径。\texttt{mknod}/\texttt{mkfifo} 的不实现是针对典型分布式存储负载做出的显式取舍，接口统一返回 \texttt{EOPNOTSUPP}，不用错误来遮盖真实问题。
 
-第二条线是分布式性能。在 1 台 64 核服务器加最多 96 台 2 核客户端的集群上，RucksFS-Delta 在 \texttt{create}、\texttt{stat}、\texttt{remove} 三类操作上相对 NFS 和 JuiceFS+TiKV 都保持了稳定的扩展优势。$N=96$ 时 \texttt{create} 达到 6.86 万 ops/s，\texttt{remove} 达到 7.09 万 ops/s。具体倍数不在这里复述，但有几句话需要强调：对 NFS 的大幅差距主要来自 ext4 目录锁对本地文件系统的天然制约；对 JuiceFS+TiKV 的 4 倍差距更多反映的是“单机直连 RocksDB”相对“通用分布式 KV 叠 FUSE”在 2PC+Raft 开销上的取舍，而不是 RucksFS 作为一个完整分布式系统已经实现了质的超越。此外，空文件负载、DataServer 的最小实现以及 \texttt{noac} 挂载这些实验设置都会影响对比口径，这些限制已经在第~\ref{sec:expr-env}~节单独说明过。
+第二条线是分布式性能，按“可比区间 + 受控消融”两段展开。可比区间（$N \in \{2, 8, 32\}$）里做三方横向对比：RucksFS 相对 JuiceFS+TiKV 在 \texttt{create}/\texttt{stat}/\texttt{remove} 上保持 2--5 倍的稳定优势，主要来自“针对文件系统元数据专门设计的 KV 布局 + 单机直连 RocksDB”相对“通用分布式 KV 叠 FUSE”在元数据关键路径上省下的开销；相对 NFS 在 $N=2$ 处就有 3 倍左右领先，随 $N$ 增大继续拉开到 38 倍，反映 LSM-tree 加边中心键编码相对 B+ 树加目录锁在元数据写入上有结构性优势。$N \geq 64$ 区间两套对照系统因各自外部原因（TiKV 单节点部署上限、ext4 目录锁）失去可比性，相关数据保留在表里但不展开横向讨论；空文件负载、DataServer 最小实现与 \texttt{noac} 挂载对口径的影响已在第~\ref{sec:expr-env}~节单独说明过。
 
-DeltaOp 的消融实验是本章最有说明力的一组。在只切换编译特性开关的条件下，hard 模式从 $N=64$ 起 Delta 和 NoDelta 出现明显分叉：$N=96$ 时 \texttt{create} 比值 5.81，\texttt{remove} 比值 6.12，\texttt{stat} 比值 136；easy 模式下两者则完全重合。因为同硬件、同负载、只换一个机制开关，这组对比直接说明了增量更新机制在共享父目录下确实消掉了它本该消掉的那种写冲突，读路径也因此不再被写锁拖慢。这是本章里能在诚实的对比口径下、比较干净地归因到具体设计决策的一组结果。
+高并发下转做受控消融实验——DeltaOp 的 Delta/NoDelta 对照是本章最有说明力的一组。在只切换编译特性开关的条件下，hard 模式从 $N=64$ 起 Delta 和 NoDelta 出现明显分叉：$N=96$ 时 \texttt{create} 比值 5.81，\texttt{remove} 比值 6.12，\texttt{stat} 比值 136；easy 模式下两者则完全重合。因为同硬件、同负载、只换一个机制开关，这组对比直接说明了增量更新机制在共享父目录下确实消掉了它本该消掉的那种写冲突，读路径也因此不再被写锁拖慢——这是本章能在诚实的对比口径下、比较干净地归因到具体设计决策的一组结果。

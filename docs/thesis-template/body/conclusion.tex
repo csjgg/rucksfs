@@ -9,7 +9,7 @@
     \item 引入了增量更新与懒折叠机制（DeltaOp）。父目录属性的修改不再就地重写基值，而是追加一条 DeltaOp，读路径读到时再把基值和增量合成出来；后台线程在增量超过 32 条时做折叠。这一机制本身是借鉴了 Mantle 的 Delta Record 思路，但实现上更轻量，整个流程被约束在一个 RocksDB 实例内。
     \item 基于 RocksDB 悲观事务（PCC）处理并发。所有跨键的目录操作通过事务完成加锁和冲突检测，跨 inode 操作按编号排序加锁以预防死锁；临时冲突时服务端自动重试至多 3 次，失败后才向上层返回 EAGAIN。
     \item 客户端基于 fuse3 + tokio 异步实现，挂载时启用 default\_permissions 与 AllowOther，常规权限检查交给内核 VFS。
-    \item 在 1 台 64 核服务器加最多 96 台 2 核客户端的腾讯云集群上完成了系统评估。POSIX 合规性方面，pjdfstest 398 个用例按实现范围拆分后，本文明确不实现的 mknod/mkfifo 相关用例（167 条）、DataServer 单文件大小用例（1 条）和框架自身跳过项（48 条）合计占 216 条；剩下 182 条“实现范围内”用例在分布式部署下全部通过，通过率 100\%。性能方面，$N=96$ 时 RucksFS-Delta 的 create 达到 68\,588\,ops/s、remove 达到 70\,859\,ops/s，相对 NFS 与 JuiceFS+TiKV 保持了稳定的扩展优势。需要说明，对 NFS 的差距主要来自 ext4 目录锁这一本地文件系统的固有瓶颈；对 JuiceFS+TiKV 的差距则反映单机直连 RocksDB 相对通用分布式 KV 叠 FUSE 在 2PC+Raft 开销上的取舍，而非 RucksFS 作为完整分布式系统已经实现了质的超越。DeltaOp 的消融实验在控制变量更严格的条件下说明机制本身的作用：$N=96$ 时 Delta 与 NoDelta 的 create 比值 5.81、remove 比值 6.12、stat 比值 136，而 easy 模式下二者完全重合。
+    \item 在 1 台 64 核服务器加最多 96 台 2 核客户端的腾讯云集群上完成了系统评估。POSIX 合规性方面，pjdfstest 398 个用例按实现范围拆分后，本文明确不实现的 mknod/mkfifo 相关用例（167 条）、DataServer 单文件大小用例（1 条）和框架自身跳过项（48 条）合计占 216 条；剩下 182 条“实现范围内”用例在分布式部署下全部通过，通过率 100\%。性能方面分两段看：可比区间 $N \in \{2, 8, 32\}$ 做三方横向对比，RucksFS 在 create、stat、remove 上相对 JuiceFS+TiKV 保持 2--5 倍的稳定优势、相对 NFS 从 $N=2$ 的 3 倍拉开到 $N=32$ 的 38 倍；$N \geq 64$ 区间两套对照系统各自因外部原因（TiKV 单节点部署上限、ext4 目录锁）失去可比性，此时改做 Delta/NoDelta 受控消融验证机制本身——$N=96$ 时 Delta 与 NoDelta 的 create 比值 5.81、remove 比值 6.12、stat 比值 136，而 easy 模式下二者完全重合。
 \end{enumerate}
 
 \subsection{不足与展望}
