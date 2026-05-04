@@ -1,0 +1,9 @@
+Warning: Permanently added '43.132.150.85' (ECDSA) to the list of known hosts.
+-- started at 04/25/2026 23:57:18 --
+
+mdtest-4.1.0+dev was launched with 64 total task(s) on 64 node(s)
+Command line used: mdtest '-d' '/mnt/sut/bench' '-n' '800' '-F' '-C' '-T' '-r' '-i' '1'
+Nodemap: 1000000000000000000000000000000000000000000000000000000000000000
+Path                : /mnt/sut/bench
+FS                  : 1024.0 TiB   Used FS: 0.0%   Inodes: 10.0 Mi   Used Inodes: 0.0%
+64 tasks, 51200 files

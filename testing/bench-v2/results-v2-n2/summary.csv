@@ -1,0 +1,9 @@
+sut,mode,np,file_creation,file_stat,file_removal
+juicefs-tikv,easy,2,648.359,3787.255,552.804
+juicefs-tikv,hard,2,662.739,3748.875,552.036
+nfs,easy,2,649.233,2150.596,616.417
+nfs,hard,2,604.692,2099.774,610.503
+rucksfs-delta,easy,2,1842.225,7015.784,1652.109
+rucksfs-delta,hard,2,1853.464,7467.157,1673.603
+rucksfs-nodelta,easy,2,1860.083,7418.534,1680.492
+rucksfs-nodelta,hard,2,1869.339,7453.231,1665.667

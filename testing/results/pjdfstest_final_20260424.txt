@@ -1,0 +1,1017 @@
+
+	 symlink create a symbolic link to a symbolic link		symlink::create_symlink_to_symlink                                            ok
+
+	 symlink should update parent's ctime and mtime on success		symlink::changed_parent_time_success                                          ok
+
+	symlink returns EEXIST if the named file exists		symlink::eexist_file_exists::symlink                                          ok
+
+	symlink returns EEXIST if the named file exists		symlink::eexist_file_exists::regular                                          ok
+
+	symlink returns ENOTDIR if a component of the path prefix is not a directory		symlink::enotdir_component::socket                                        FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 symlink creates symbolic links		symlink::create_symlink::fifo                                             FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	symlink returns EEXIST if the named file exists		symlink::eexist_file_exists::char                                         FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	symlink returns ENAMETOOLONG if an entire pathname exceeded {PATH_MAX} characters		symlink::enametoolong_path                                                    ok
+
+	symlink returns EEXIST if the named file exists		symlink::eexist_file_exists::socket                                       FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	symlink returns ENOTDIR if a component of the path prefix is not a directory		symlink::enotdir_component::fifo                                          FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 symlink creates symbolic links		symlink::create_symlink::dir                                                  ok
+
+	symlink returns ENOTDIR if a component of the path prefix is not a directory		symlink::enotdir_component::char                                          FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	symlink returns EEXIST if the named file exists		symlink::eexist_file_exists::fifo                                         FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	symlink returns EFAULT if one of the pathnames specified is outside the process's allocated address space		symlink::efault_either                                                        ok
+
+	 symlink creates symbolic links		symlink::create_symlink::char                                             FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	symlink returns ENOENT if a component of the path prefix does not exist		symlink::enoent_comp                                                          ok
+
+	 symlink creates symbolic links		symlink::create_symlink::regular                                              ok
+
+	symlink returns EEXIST if the named file exists		symlink::eexist_file_exists::block                                        FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	symlink returns ENOTDIR if a component of the path prefix is not a directory		symlink::enotdir_component::block                                         FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	symlink returns EEXIST if the named file exists		symlink::eexist_file_exists::dir                                              ok
+
+	symlink returns ENAMETOOLONG if a component of a pathname exceeded {NAME_MAX} characters		symlink::enametoolong_component                                               ok
+
+	symlink returns EROFS if the path for the file to be created resides on a read-only file system		symlink::erofs_new_file                                                  skipped
+	Remounts (allow_remount) are not allowed in the configuration file
+
+	symlink returns ENOTDIR if a component of the path prefix is not a directory		symlink::enotdir_component::regular                                           ok
+
+	 symlink creates symbolic links		symlink::create_symlink::block                                            FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	unlink returns EROFS if the named file resides on a read-only file system		unlink::erofs_named                                                      skipped
+	Remounts (allow_remount) are not allowed in the configuration file
+
+	unlink returns ENOTDIR if a component of the path prefix is not a directory		unlink::enotdir_component::char                                           FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 An open file will not be immediately freed by unlink		unlink::open_file_not_freed                                                   ok
+
+	unlink returns ENAMETOOLONG if an entire pathname exceeded {PATH_MAX} characters		unlink::enametoolong_path                                                     ok
+
+	 unsuccessful unlink(2) does not update ctime.		unlink::unchanged_ctime_failed::regular                                       ok
+
+	 unlink removes regular, block and char files, symbolic links, fifos and sockets		unlink::remove_type::regular                                                  ok
+
+	unlink returns EFAULT if the path argument points outside the process's allocated address space		unlink::efault_path                                                           ok
+
+	 successful unlink(2) updates ctime.		unlink::update_ctime_success::char                                        FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 unsuccessful unlink(2) does not update ctime.		unlink::unchanged_ctime_failed::char                                      FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 successful unlink(2) updates ctime.		unlink::update_ctime_success::fifo                                        FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 successful unlink(2) on a directory entry updates ctime and mtime for the parent folder.		unlink::update_mtime_ctime_success_folder::char                           FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 unsuccessful unlink(2) does not update ctime.		unlink::unchanged_ctime_failed::socket                                    FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	unlink returns ELOOP if too many symbolic links were encountered in translating a component of the pathname which is not the last one		unlink::eloop_comp                                                            ok
+
+	unlink returns ENOTDIR if a component of the path prefix is not a directory		unlink::enotdir_component::block                                          FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 successful unlink(2) updates ctime.		unlink::update_ctime_success::regular                                         ok
+
+	unlink returns ENOTDIR if a component of the path prefix is not a directory		unlink::enotdir_component::socket                                         FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 unlink removes regular, block and char files, symbolic links, fifos and sockets		unlink::remove_type::fifo                                                 FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 successful unlink(2) on a directory entry updates ctime and mtime for the parent folder.		unlink::update_mtime_ctime_success_folder::symlink                            ok
+
+	 successful unlink(2) updates ctime.		unlink::update_ctime_success::block                                       FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	unlink returns ENOTDIR if a component of the path prefix is not a directory		unlink::enotdir_component::regular                                            ok
+
+	 unlink removes regular, block and char files, symbolic links, fifos and sockets		unlink::remove_type::symlink                                                  ok
+
+	 successful unlink(2) updates ctime.		unlink::update_ctime_success::socket                                      FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	unlink returns ENOTDIR if a component of the path prefix is not a directory		unlink::enotdir_component::fifo                                           FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 unlink removes regular, block and char files, symbolic links, fifos and sockets		unlink::remove_type::block                                                FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	unlink returns ENOENT if the named file does not exist		unlink::enoent_named_file                                                     ok
+
+	 unsuccessful unlink(2) does not update ctime.		unlink::unchanged_ctime_failed::block                                     FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 unlink removes regular, block and char files, symbolic links, fifos and sockets		unlink::remove_type::socket                                               FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 successful unlink(2) on a directory entry updates ctime and mtime for the parent folder.		unlink::update_mtime_ctime_success_folder::regular                            ok
+
+	 successful unlink(2) on a directory entry updates ctime and mtime for the parent folder.		unlink::update_mtime_ctime_success_folder::socket                         FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 successful unlink(2) on a directory entry updates ctime and mtime for the parent folder.		unlink::update_mtime_ctime_success_folder::block                          FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 successful unlink(2) on a directory entry updates ctime and mtime for the parent folder.		unlink::update_mtime_ctime_success_folder::fifo                           FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	unlink returns ENAMETOOLONG if a component of a pathname exceeded {NAME_MAX} characters		unlink::enametoolong_component                                                ok
+
+	 unlink removes regular, block and char files, symbolic links, fifos and sockets		unlink::remove_type::char                                                 FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 unsuccessful unlink(2) does not update ctime.		unlink::unchanged_ctime_failed::fifo                                      FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rename preserve directory metadata		rename::preserve_metadata_dir                                                 ok
+
+	rename returns EROFS if the named file resides on a read-only file system		rename::erofs_named                                                      skipped
+	Remounts (allow_remount) are not allowed in the configuration file
+
+	 rename returns EEXIST or ENOTEMPTY if the 'to' argument is a directory and is not empty		rename::eexist_enotempty_to_non_empty::dir                                    ok
+
+	 rename should not update ctime if it fails		rename::unchanged_ctime_failed::fifo                                      FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rename should update ctime if it succeeds		rename::changed_ctime_success::socket                                    skipped
+	requires features: rename_ctime
+
+	rename returns ENOENT if the named file does not exist		rename::enoent_named_file                                                     ok
+
+	rename returns ENOTDIR if a component of either path prefix is not a directory		rename::enotdir_component_either::block                                   FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rename should update ctime if it succeeds		rename::changed_ctime_success::symlink                                   skipped
+	requires features: rename_ctime
+
+	rename returns ENOTDIR if a component of either path prefix is not a directory		rename::enotdir_component_either::char                                    FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	rename returns ENOTDIR if a component of either path prefix is not a directory		rename::enotdir_component_either::regular                                     ok
+
+	 rename should update ctime if it succeeds		rename::changed_ctime_success::block                                     skipped
+	requires features: rename_ctime
+
+	rename returns EXDEV when the target is on a different file-system		rename::exdev_target                                                     skipped
+	No secondary file-system has been configured.
+
+	 rename returns EISDIR when the 'to' argument is a directory, but 'from' is not a directory		rename::eisdir_to_dir_from_not_dir::char                                  FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rename preserve file metadata		rename::preserve_metadata::fifo                                           FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	rename returns ENOTDIR if a component of either path prefix is not a directory		rename::enotdir_component_either::socket                                  FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rename should not update ctime if it fails		rename::unchanged_ctime_failed::regular                                       ok
+
+	 rename returns EISDIR when the 'to' argument is a directory, but 'from' is not a directory		rename::eisdir_to_dir_from_not_dir::block                                 FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rename returns ENOTDIR when the 'from' argument is a directory, but 'to' is not a directory		rename::enotdir_from_dir_to_not_dir::fifo                                 FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rename returns EEXIST or ENOTEMPTY if the 'to' argument is a directory and is not empty		rename::eexist_enotempty_to_non_empty::char                               FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rename of a directory updates its .. link		rename::updates_link_parent                                                   ok
+
+	 rename succeeds when to is multiply linked		rename::to_multiply_linked::fifo                                          FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rename preserve file metadata		rename::preserve_metadata::socket                                         FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	rename returns EFAULT if one of the pathnames specified is outside the process's allocated address space		rename::efault_either                                                         ok
+
+	 rename succeeds when to is multiply linked		rename::to_multiply_linked::regular                                           ok
+
+	rename returns ENAMETOOLONG if a component of either pathname exceeded {NAME_MAX} characters		rename::enametoolong_component                                                ok
+
+	 rename returns EEXIST or ENOTEMPTY if the 'to' argument is a directory and is not empty		rename::eexist_enotempty_to_non_empty::fifo                               FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	rename returns ENOTDIR if a component of either path prefix is not a directory		rename::enotdir_component_either::fifo                                    FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rename returns EEXIST or ENOTEMPTY if the 'to' argument is a directory and is not empty		rename::eexist_enotempty_to_non_empty::socket                             FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rename returns EISDIR when the 'to' argument is a directory, but 'from' is not a directory		rename::eisdir_to_dir_from_not_dir::fifo                                  FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rename returns ENOTDIR when the 'from' argument is a directory, but 'to' is not a directory		rename::enotdir_from_dir_to_not_dir::char                                 FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rename preserve file metadata		rename::preserve_metadata::char                                           FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rename returns EISDIR when the 'to' argument is a directory, but 'from' is not a directory		rename::eisdir_to_dir_from_not_dir::socket                                FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rename succeeds when to is multiply linked		rename::to_multiply_linked::socket                                        FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rename should update ctime if it succeeds		rename::changed_ctime_success::char                                      skipped
+	requires features: rename_ctime
+
+	 rename returns ENOTDIR when the 'from' argument is a directory, but 'to' is not a directory		rename::enotdir_from_dir_to_not_dir::socket                               FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rename succeeds when to is multiply linked		rename::to_multiply_linked::block                                         FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rename should update ctime if it succeeds		rename::changed_ctime_success::regular                                   skipped
+	requires features: rename_ctime
+
+	 rename returns ENOTDIR when the 'from' argument is a directory, but 'to' is not a directory		rename::enotdir_from_dir_to_not_dir::block                                FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rename preserve file metadata		rename::preserve_metadata::block                                          FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rename should not update ctime if it fails		rename::unchanged_ctime_failed::char                                      FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rename should not update ctime if it fails		rename::unchanged_ctime_failed::dir                                           ok
+
+	 rename preserve file metadata		rename::preserve_metadata::regular                                            ok
+
+	 rename returns ENOTDIR when the 'from' argument is a directory, but 'to' is not a directory		rename::enotdir_from_dir_to_not_dir::regular                                  ok
+
+	 rename preserve symlink metadata		rename::preserve_metadata_symlink                                             ok
+
+	 rename returns EISDIR when the 'to' argument is a directory, but 'from' is not a directory		rename::eisdir_to_dir_from_not_dir::regular                                   ok
+
+	 rename returns EINVAL/EBUSY when an attempt is made to rename '.' or '..'		rename::einval_ebusy_dot_dotdot                                               ok
+
+	 rename should not update ctime if it fails		rename::unchanged_ctime_failed::block                                     FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rename should update ctime if it succeeds		rename::changed_ctime_success::dir                                       skipped
+	requires features: rename_ctime
+
+	 rename returns EEXIST or ENOTEMPTY if the 'to' argument is a directory and is not empty		rename::eexist_enotempty_to_non_empty::block                              FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rename should update ctime if it succeeds		rename::changed_ctime_success::fifo                                      skipped
+	requires features: rename_ctime
+
+	 rename succeeds when to is multiply linked		rename::to_multiply_linked::char                                          FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	rename returns ENAMETOOLONG if an entire pathname exceeded {PATH_MAX} characters		rename::enametoolong_path                                                     ok
+
+	 rename should not update ctime if it fails		rename::unchanged_ctime_failed::socket                                    FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 write access to subdirectory is required to move it to another directory		rename::write_access_required_subdir                                          ok
+
+	rename returns ELOOP if too many symbolic links were encountered in translating a component of either pathname which is not the last one		rename::eloop_comp                                                            ok
+
+	 rename returns EINVAL when the 'from' argument is a parent directory of 'to'		rename::einval_parent_from_subdir_to                                          ok
+
+	 rename returns EEXIST or ENOTEMPTY if the 'to' argument is a directory and is not empty		rename::eexist_enotempty_to_non_empty::symlink                                ok
+
+	 rename returns EEXIST or ENOTEMPTY if the 'to' argument is a directory and is not empty		rename::eexist_enotempty_to_non_empty::regular                                ok
+
+	 rename returns EISDIR when the 'to' argument is a directory, but 'from' is not a directory		rename::eisdir_to_dir_from_not_dir::symlink                                   ok
+
+	 rename should not update ctime if it fails		rename::unchanged_ctime_failed::symlink                                       ok
+
+	mknod returns EEXIST if the named file exists		mknod::privileged::eexist_file_exists::dir                                    ok
+
+	mknod returns ENAMETOOLONG if an entire pathname exceeded {PATH_MAX} characters		mknod::privileged::enametoolong_path                                          ok
+
+	mknod returns EEXIST if the named file exists		mknod::privileged::eexist_file_exists::symlink                                ok
+
+	mknod returns ENAMETOOLONG if a component of a pathname exceeded {NAME_MAX} characters		mknod::privileged::enametoolong_component                                     ok
+
+	mknod returns EEXIST if the named file exists		mknod::privileged::eexist_file_exists::block                              FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mknod returns EEXIST if the named file exists		mknod::privileged::eexist_file_exists::char                               FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mknod returns EEXIST if the named file exists		mknod::privileged::eexist_file_exists::socket                             FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mknod returns EEXIST if the named file exists		mknod::privileged::eexist_file_exists::regular                                ok
+
+	mknod returns EEXIST if the named file exists		mknod::privileged::eexist_file_exists::fifo                               FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	lchown returns ENOENT if the named file does not exist		chown::lchown::enoent_named_file                                              ok
+
+	lchown returns ENOTDIR if a component of the path prefix is not a directory		chown::lchown::enotdir_component::char                                    FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	lchown returns ENOTDIR if a component of the path prefix is not a directory		chown::lchown::enotdir_component::regular                                     ok
+
+	lchown returns ENOTDIR if a component of the path prefix is not a directory		chown::lchown::enotdir_component::fifo                                    FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	lchown returns ENAMETOOLONG if a component of a pathname exceeded {NAME_MAX} characters		chown::lchown::enametoolong_component                                         ok
+
+	lchown returns EFAULT if the path argument points outside the process's allocated address space		chown::lchown::efault_path                                                    ok
+
+	lchown returns ELOOP if too many symbolic links were encountered in translating a component of the pathname which is not the last one		chown::lchown::eloop_comp                                                     ok
+
+	lchown returns ENAMETOOLONG if an entire pathname exceeded {PATH_MAX} characters		chown::lchown::enametoolong_path                                              ok
+
+	lchown returns ENOENT if a component of the path prefix does not exist		chown::lchown::enoent_comp                                                    ok
+
+	lchown returns EROFS if the named file resides on a read-only file system		chown::lchown::erofs_named                                               skipped
+	Remounts (allow_remount) are not allowed in the configuration file
+
+	lchown returns ENOTDIR if a component of the path prefix is not a directory		chown::lchown::enotdir_component::socket                                  FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	lchown returns ENOTDIR if a component of the path prefix is not a directory		chown::lchown::enotdir_component::block                                   FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mkfifo returns ENAMETOOLONG if an entire pathname exceeded {PATH_MAX} characters		mkfifo::enametoolong_path                                                     ok
+
+	 POSIX: The FIFO's user ID shall be set to the process' effective user ID. The FIFO's group ID shall be set to the group ID of the parent directory or to the effective group ID of the process.		mkfifo::uid_gid_eq_euid_egid                                              FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 POSIX: The file permission bits of the new FIFO shall be initialized from mode. The file permission bits of the mode argument shall be modified by the process' file creation mask.		mkfifo::permission_bits_from_mode                                         FAILED
+	assertion failed: f(&path, Mode::from_bits_truncate(mode)).is_ok()
+
+	mkfifo returns EEXIST if the named file exists		mkfifo::eexist_file_exists::dir                                               ok
+
+	mkfifo returns ENOENT if a component of the path prefix does not exist		mkfifo::enoent_comp                                                           ok
+
+	mkfifo returns EFAULT if the path argument points outside the process's allocated address space		mkfifo::efault_path                                                           ok
+
+	mkfifo returns EEXIST if the named file exists		mkfifo::eexist_file_exists::regular                                           ok
+
+	mkfifo returns EEXIST if the named file exists		mkfifo::eexist_file_exists::socket                                        FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mkfifo returns EEXIST if the named file exists		mkfifo::eexist_file_exists::char                                          FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mkfifo returns ELOOP if too many symbolic links were encountered in translating a component of the pathname which is not the last one		mkfifo::eloop_comp                                                            ok
+
+	mkfifo returns ENOTDIR if a component of the path prefix is not a directory		mkfifo::enotdir_component::regular                                            ok
+
+	mkfifo returns EROFS if the path for the file to be created resides on a read-only file system		mkfifo::erofs_new_file                                                   skipped
+	Remounts (allow_remount) are not allowed in the configuration file
+
+	mkfifo returns ENOTDIR if a component of the path prefix is not a directory		mkfifo::enotdir_component::fifo                                           FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mkfifo returns EEXIST if the named file exists		mkfifo::eexist_file_exists::symlink                                           ok
+
+	mkfifo returns ENOTDIR if a component of the path prefix is not a directory		mkfifo::enotdir_component::block                                          FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mkfifo returns ENOTDIR if a component of the path prefix is not a directory		mkfifo::enotdir_component::char                                           FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mkfifo returns EEXIST if the named file exists		mkfifo::eexist_file_exists::block                                         FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mkfifo returns ENAMETOOLONG if a component of a pathname exceeded {NAME_MAX} characters		mkfifo::enametoolong_component                                                ok
+
+	 POSIX: Upon successful completion, mkfifo() shall mark for update the st_atime, st_ctime, and st_mtime fields of the file. Also, the st_ctime and st_mtime fields of the directory that contains the new entry shall be marked for update.		mkfifo::changed_time_fields_success                                       FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mkfifo returns ENOTDIR if a component of the path prefix is not a directory		mkfifo::enotdir_component::socket                                         FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mkfifo returns EEXIST if the named file exists		mkfifo::eexist_file_exists::fifo                                          FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mkdir returns ENAMETOOLONG if an entire pathname exceeded {PATH_MAX} characters		mkdir::enametoolong_path                                                      ok
+
+	mkdir returns EFAULT if the path argument points outside the process's allocated address space		mkdir::efault_path                                                            ok
+
+	mkdir returns ELOOP if too many symbolic links were encountered in translating a component of the pathname which is not the last one		mkdir::eloop_comp                                                             ok
+
+	mkdir returns EEXIST if the named file exists		mkdir::eexist_file_exists::symlink                                            ok
+
+	mkdir returns ENOTDIR if a component of the path prefix is not a directory		mkdir::enotdir_component::char                                            FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mkdir returns EEXIST if the named file exists		mkdir::eexist_file_exists::dir                                                ok
+
+	mkdir returns ENOENT if a component of the path prefix does not exist		mkdir::enoent_comp                                                            ok
+
+	mkdir returns ENAMETOOLONG if a component of a pathname exceeded {NAME_MAX} characters		mkdir::enametoolong_component                                                 ok
+
+	mkdir returns ENOTDIR if a component of the path prefix is not a directory		mkdir::enotdir_component::fifo                                            FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mkdir returns EEXIST if the named file exists		mkdir::eexist_file_exists::block                                          FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mkdir returns EROFS if the path for the file to be created resides on a read-only file system		mkdir::erofs_new_file                                                    skipped
+	Remounts (allow_remount) are not allowed in the configuration file
+
+	mkdir returns EEXIST if the named file exists		mkdir::eexist_file_exists::char                                           FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mkdir returns EEXIST if the named file exists		mkdir::eexist_file_exists::regular                                            ok
+
+	mkdir returns ENOTDIR if a component of the path prefix is not a directory		mkdir::enotdir_component::regular                                             ok
+
+	mkdir returns ENOTDIR if a component of the path prefix is not a directory		mkdir::enotdir_component::socket                                          FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mkdir returns ENOTDIR if a component of the path prefix is not a directory		mkdir::enotdir_component::block                                           FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 POSIX: The file permission bits of the new directory shall be initialized from mode. These file permission bits of the mode argument shall be modified by the process' file creation mask.		mkdir::permission_bits_from_mode                                              ok
+
+	mkdir returns EEXIST if the named file exists		mkdir::eexist_file_exists::socket                                         FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 POSIX: Upon successful completion, mkdir() shall mark for update the st_atime, st_ctime, and st_mtime fields of the directory. Also, the st_ctime and st_mtime fields of the directory that contains the new entry shall be marked for update.		mkdir::changed_time_fields_success                                            ok
+
+	 POSIX: The directory's user ID shall be set to the process' effective user ID. The directory's group ID shall be set to the group ID of the parent directory or to the effective group ID of the process.		mkdir::uid_gid_eq_euid_egid                                                   ok
+
+	mkdir returns EEXIST if the named file exists		mkdir::eexist_file_exists::fifo                                           FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 utimensat can set timestamps with subsecond precision		utimensat::subsecond                                                     skipped
+	requires features: utimensat
+
+	 utimensat can set mtime < atime or vice versa		utimensat::order                                                         skipped
+	requires features: utimensat
+
+	 The owner can update the timstamps, even if the file is read-only		utimensat::owner                                                         skipped
+	requires features: utimensat
+
+	 utimensat changes timestamps on any type of file		utimensat::changes_timestamps::socket                                    skipped
+	requires features: utimensat
+
+	 utimensat changes timestamps on any type of file		utimensat::changes_timestamps::fifo                                      skipped
+	requires features: utimensat
+
+	 utimensat can follow symlinks		utimensat::follow_symlink                                                skipped
+	requires features: utimensat
+
+	 utimensat is y2038 compliant		utimensat::y2038                                                         skipped
+	requires features: utimensat
+
+	 utimensat changes timestamps on any type of file		utimensat::changes_timestamps::block                                     skipped
+	requires features: utimensat
+
+	 A user without write permission cannot use UTIME_NOW		utimensat::utime_now_nobody                                              skipped
+	requires features: utimensat, utime_now
+
+	 A user with write permission can use UTIME_NOW		utimensat::utime_now_write_perm                                          skipped
+	requires features: utime_now, utimensat
+
+	 A user with write permission cannot set the timestamps arbitrarily		utimensat::write_perm                                                    skipped
+	requires features: utimensat
+
+	 utimensat with UTIME_NOW will set the timestamps to now		utimensat::utime_now                                                     skipped
+	requires features: utime_now, utimensat
+
+	 utimensat changes timestamps on any type of file		utimensat::changes_timestamps::char                                      skipped
+	requires features: utimensat
+
+	 A user without write permission cannot set the timestamps arbitrarily		utimensat::nobody                                                        skipped
+	requires features: utimensat
+
+	 Root can always update the timestamps, even if the file is read-only		utimensat::root                                                          skipped
+	requires features: utimensat
+
+	 The superuser can always use UTIME_NOW		utimensat::utime_now_root                                                skipped
+	requires features: utime_now, utimensat
+
+	 utimensat with UTIME_OMIT will leave the timestamps unchanged		utimensat::utime_omit                                                    skipped
+	requires features: utimensat
+
+	 utimensat changes timestamps on any type of file		utimensat::changes_timestamps::regular                                   skipped
+	requires features: utimensat
+
+	 The file's owner can use UTIME_NOW, even if the file is read-only		utimensat::utime_now_owner                                               skipped
+	requires features: utimensat, utime_now
+
+	 utimensat changes timestamps on any type of file		utimensat::changes_timestamps::dir                                       skipped
+	requires features: utimensat
+
+	 open may return EINVAL when an attempt was made to open a descriptor with an illegal combination of O_RDONLY, O_WRONLY, and O_RDWR		open::einval_invalid_combination                                              ok
+
+	 open returns EISDIR if the named file is a directory		open::eisdir                                                                  ok
+
+	open returns EFAULT if the path argument points outside the process's allocated address space		open::efault_path                                                             ok
+
+	open returns EEXIST if the named file exists		open::eexist_file_exists::dir                                                 ok
+
+	open returns ENOENT if the named file does not exist		open::enoent_named_file                                                       ok
+
+	open returns EEXIST if the named file exists		open::eexist_file_exists::regular                                             ok
+
+	 POSIX: Upon successful completion, open(O_CREAT) shall mark for update the st_atime, st_ctime, and st_mtime fields of the directory. Also, the st_ctime and st_mtime fields of the directory that contains the new entry shall be marked for update.		open::changed_time_fields_success                                             ok
+
+	open returns ENAMETOOLONG if a component of a pathname exceeded {NAME_MAX} characters		open::enametoolong_component                                                  ok
+
+	open returns ENAMETOOLONG if an entire pathname exceeded {PATH_MAX} characters		open::enametoolong_path                                                       ok
+
+	 POSIX: (If O_CREAT is specified and the file doesn't exist) [...] the access permission bits of the file mode shall be set to the value of the third argument taken as type mode_t modified as follows: a bitwise AND is performed on the file-mode bits and the corresponding bits in the complement of the process' file mode creation mask. Thus, all bits in the file mode whose corresponding bit in the file mode creation mask is set are cleared.		open::permission_bits_from_mode                                               ok
+
+	open returns ENOENT if a component of the path prefix does not exist		open::enoent_comp                                                             ok
+
+	 open with O_TRUNC should truncate an exisiting file.		open::open_trunc                                                              ok
+
+	open returns ELOOP if too many symbolic links were encountered in translating a component of the pathname which is not the last one		open::eloop_comp                                                              ok
+
+	open returns EROFS if the path for the file to be created resides on a read-only file system		open::erofs_new_file                                                     skipped
+	Remounts (allow_remount) are not allowed in the configuration file
+
+	 open returns ELOOP when O_NOFOLLOW was specified and the target is a symbolic link		open::open_nofollow                                                           ok
+
+	 POSIX: (If O_CREAT is specified and the file doesn't exist) [...] the user ID of the file shall be set to the effective user ID of the process; the group ID of the file shall be set to the group ID of the file's parent directory or to the effective group ID of the process [...]		open::uid_gid_eq_euid_egid                                                    ok
+
+	open returns EEXIST if the named file exists		open::eexist_file_exists::fifo                                            FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	open returns EEXIST if the named file exists		open::eexist_file_exists::socket                                          FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 open returns ENXIO when O_NONBLOCK is set, the named file is a fifo, O_WRONLY is set, and no process has the file open for reading		open::fifo_nonblock_wronly                                                FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	open returns EEXIST if the named file exists		open::eexist_file_exists::char                                            FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	open returns EROFS if the named file resides on a read-only file system		open::erofs_named                                                        skipped
+	Remounts (allow_remount) are not allowed in the configuration file
+
+	open returns ETXTBSY when the file is a pure procedure (shared text) file that is being executed.		open::etxtbsy                                                                 ok
+
+	 open do not update parent directory ctime and mtime fields if the file previously existed.		open::exists_no_update                                                        ok
+
+	 interact with > 2 GB files		open::interact_2gb                                                        FAILED
+	called `Result::unwrap()` on an `Err` value: EINVAL
+
+	open returns EEXIST if the named file exists		open::eexist_file_exists::block                                           FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 open returns ENXIO when trying to open UNIX domain socket		open::socket_error                                                        FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	open returns EEXIST if the named file exists		open::eexist_file_exists::symlink                                             ok
+
+	 posix_fallocate should not update ctime when it fails		posix_fallocate::no_update_ctime_fail                                    skipped
+	requires features: posix_fallocate
+
+	 posix_fallocate should allocate even if the file is not empty		posix_fallocate::increase_not_empty                                      skipped
+	requires features: posix_fallocate
+
+	 posix_fallocate should allocate even if the file is empty		posix_fallocate::increase_empty                                          skipped
+	requires features: posix_fallocate
+
+	 The file mode of a newly created file should not affect whether posix_fallocate will work, only the create args https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=154873		posix_fallocate::affected_only_create_flags                              skipped
+	requires features: posix_fallocate
+
+	 posix_fallocate should update ctime when it succeeds		posix_fallocate::update_ctime_success                                    skipped
+	requires features: posix_fallocate
+
+	 truncate should not update ctime if it fails		truncate::unchanged_ctime_failed                                              ok
+
+	truncate returns ELOOP if too many symbolic links were encountered in translating a component of the pathname which is not the last one		truncate::eloop_comp                                                          ok
+
+	 truncate should shrink the file if the specified size is less than the actual one		truncate::shrink_not_empty                                                    ok
+
+	truncate returns ENOTDIR if a component of the path prefix is not a directory		truncate::enotdir_component::socket                                       FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	truncate returns ENOTDIR if a component of the path prefix is not a directory		truncate::enotdir_component::block                                        FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	truncate returns ENOENT if the named file does not exist		truncate::enoent_named_file                                                   ok
+
+	 truncate should extend a file, and shrink a sparse file		truncate::extend_file_shrink_sparse                                           ok
+
+	 truncate returns EINVAL if the length argument was less than 0		truncate::einval_negative_length                                              ok
+
+	truncate returns EROFS if the named file resides on a read-only file system		truncate::erofs_named                                                    skipped
+	Remounts (allow_remount) are not allowed in the configuration file
+
+	 truncate should update ctime if it succeeds		truncate::update_ctime_success                                                ok
+
+	truncate returns ENAMETOOLONG if an entire pathname exceeded {PATH_MAX} characters		truncate::enametoolong_path                                                   ok
+
+	truncate returns ENOTDIR if a component of the path prefix is not a directory		truncate::enotdir_component::fifo                                         FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	truncate returns EFAULT if the path argument points outside the process's allocated address space		truncate::efault_path                                                         ok
+
+	truncate returns ENAMETOOLONG if a component of a pathname exceeded {NAME_MAX} characters		truncate::enametoolong_component                                              ok
+
+	truncate returns ENOENT if a component of the path prefix does not exist		truncate::enoent_comp                                                         ok
+
+	truncate returns ETXTBSY when the file is a pure procedure (shared text) file that is being executed.		truncate::etxtbsy                                                             ok
+
+	truncate returns ENOTDIR if a component of the path prefix is not a directory		truncate::enotdir_component::char                                         FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 truncate returns EISDIR if the named file is a directory		truncate::eisdir                                                              ok
+
+	truncate returns ENOTDIR if a component of the path prefix is not a directory		truncate::enotdir_component::regular                                          ok
+
+	chown returns ENOTDIR if a component of the path prefix is not a directory		chown::enotdir_component::regular                                             ok
+
+	chown returns ELOOP if too many symbolic links were encountered in translating a component of the pathname which is not the last one		chown::eloop_comp                                                             ok
+
+	chown returns EROFS if the named file resides on a read-only file system		chown::erofs_named                                                       skipped
+	Remounts (allow_remount) are not allowed in the configuration file
+
+	chown returns ENOTDIR if a component of the path prefix is not a directory		chown::enotdir_component::block                                           FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	chown returns ENOENT if the symlink target named file does not exist		chown::enoent_symlink                                                         ok
+
+	chown returns ENOENT if the named file does not exist		chown::enoent_named_file                                                      ok
+
+	chown returns ENOTDIR if a component of the path prefix is not a directory		chown::enotdir_component::socket                                          FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	chown returns ELOOP if too many symbolic links were encountered in translating the last component of the pathname		chown::eloop_final_comp                                                       ok
+
+	chown returns ENAMETOOLONG if an entire pathname exceeded {PATH_MAX} characters		chown::enametoolong_path                                                      ok
+
+	chown returns ENOTDIR if a component of the path prefix is not a directory		chown::enotdir_component::char                                            FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	chown returns ENOENT if a component of the path prefix does not exist		chown::enoent_comp                                                            ok
+
+	chown returns ENOTDIR if a component of the path prefix is not a directory		chown::enotdir_component::fifo                                            FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	chown returns ENAMETOOLONG if a component of a pathname exceeded {NAME_MAX} characters		chown::enametoolong_component                                                 ok
+
+	chown returns EFAULT if the path argument points outside the process's allocated address space		chown::efault_path                                                            ok
+
+	 ftruncate returns EINVAL if the length argument was less than 0		ftruncate::einval_negative_length                                             ok
+
+	 ftruncate should update ctime if it succeeds		ftruncate::update_ctime_success                                               ok
+
+	 ftruncate should not update ctime if it fails		ftruncate::unchanged_ctime_failed                                             ok
+
+	 ftruncate should shrink the file if the specified size is less than the actual one		ftruncate::shrink_not_empty                                                   ok
+
+	 ftruncate should extend a file, and shrink a sparse file		ftruncate::extend_file_shrink_sparse                                          ok
+
+	 The file mode of a newly created file should not affect whether ftruncate will work, only the create args https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=154873		ftruncate::affected_create_flags_only                                         ok
+
+	rmdir returns ENOTDIR if a component of the path prefix is not a directory		rmdir::enotdir_component::socket                                          FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rmdir returns EEXIST or ENOTEMPTY if the named directory contains files other than '.' and '..' in it		rmdir::eexist_enotempty_non_empty_dir::symlink                                ok
+
+	 rmdir returns EEXIST or ENOTEMPTY if the named directory contains files other than '.' and '..' in it		rmdir::eexist_enotempty_non_empty_dir::char                               FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rmdir returns EEXIST or ENOTEMPTY if the named directory contains files other than '.' and '..' in it		rmdir::eexist_enotempty_non_empty_dir::fifo                               FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rmdir returns EEXIST or ENOTEMPTY if the last component of the path is '..'		rmdir::eexist_enotempty_dotdot                                                ok
+
+	rmdir returns ENOENT if the named file does not exist		rmdir::enoent_named_file                                                      ok
+
+	rmdir returns ENAMETOOLONG if a component of a pathname exceeded {NAME_MAX} characters		rmdir::enametoolong_component                                                 ok
+
+	 rmdir return EBUSY if the directory to be removed is the mount point for a mounted file system		rmdir::ebusy                                                                  ok
+
+	 rmdir remove directory		rmdir::remove_dir                                                             ok
+
+	 rmdir returns EEXIST or ENOTEMPTY if the named directory contains files other than '.' and '..' in it		rmdir::eexist_enotempty_non_empty_dir::regular                                ok
+
+	rmdir returns ENOTDIR if a component of the path prefix is not a directory		rmdir::enotdir_component::block                                           FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	rmdir returns EFAULT if the path argument points outside the process's allocated address space		rmdir::efault_path                                                            ok
+
+	rmdir returns ELOOP if too many symbolic links were encountered in translating a component of the pathname which is not the last one		rmdir::eloop_comp                                                             ok
+
+	 rmdir returns EINVAL if the last component of the path is '.'		rmdir::einval_dot                                                             ok
+
+	 rmdir returns EEXIST or ENOTEMPTY if the named directory contains files other than '.' and '..' in it		rmdir::eexist_enotempty_non_empty_dir::dir                                    ok
+
+	 rmdir updates parent ctime and mtime on success		rmdir::changed_time_parent_success                                            ok
+
+	rmdir returns ENOTDIR if a component of the path prefix is not a directory		rmdir::enotdir_component::fifo                                            FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 rmdir returns EEXIST or ENOTEMPTY if the named directory contains files other than '.' and '..' in it		rmdir::eexist_enotempty_non_empty_dir::block                              FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	rmdir returns EROFS if the named file resides on a read-only file system		rmdir::erofs_named                                                       skipped
+	Remounts (allow_remount) are not allowed in the configuration file
+
+	 rmdir returns EEXIST or ENOTEMPTY if the named directory contains files other than '.' and '..' in it		rmdir::eexist_enotempty_non_empty_dir::socket                             FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	rmdir returns ENOTDIR if a component of the path prefix is not a directory		rmdir::enotdir_component::regular                                             ok
+
+	rmdir returns ENOTDIR if a component of the path prefix is not a directory		rmdir::enotdir_component::char                                            FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	rmdir returns ENAMETOOLONG if an entire pathname exceeded {PATH_MAX} characters		rmdir::enametoolong_path                                                      ok
+
+	mknod returns EEXIST if the named file exists		mknod::eexist_file_exists::dir                                                ok
+
+	mknod returns EFAULT if the path argument points outside the process's allocated address space		mknod::efault_path                                                            ok
+
+	mknod returns ENOTDIR if a component of the path prefix is not a directory		mknod::enotdir_component::block                                           FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 mknod returns ENOTDIR if a component of the path prefix is not a directory when trying to create char/block files		mknod::enotdir_comp_char_block::block                                     FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mknod returns EEXIST if the named file exists		mknod::eexist_file_exists::block                                          FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mknod returns ENAMETOOLONG if a component of a pathname exceeded {NAME_MAX} characters		mknod::enametoolong_component                                                 ok
+
+	 mknod returns ENOTDIR if a component of the path prefix is not a directory when trying to create char/block files		mknod::enotdir_comp_char_block::fifo                                      FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 mknod returns ENOTDIR if a component of the path prefix is not a directory when trying to create char/block files		mknod::enotdir_comp_char_block::char                                      FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 mknod returns ENOTDIR if a component of the path prefix is not a directory when trying to create char/block files		mknod::enotdir_comp_char_block::socket                                    FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 POSIX: The FIFO's user ID shall be set to the process' effective user ID. The FIFO's group ID shall be set to the group ID of the parent directory or to the effective group ID of the process.		mknod::uid_gid_eq_euid_egid                                               FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mknod returns ENAMETOOLONG if an entire pathname exceeded {PATH_MAX} characters		mknod::enametoolong_path                                                      ok
+
+	mknod returns ELOOP if too many symbolic links were encountered in translating a component of the pathname which is not the last one		mknod::eloop_comp                                                             ok
+
+	mknod returns ENOTDIR if a component of the path prefix is not a directory		mknod::enotdir_component::regular                                             ok
+
+	 POSIX: Upon successful completion, mkfifo() shall mark for update the st_atime, st_ctime, and st_mtime fields of the file. Also, the st_ctime and st_mtime fields of the directory that contains the new entry shall be marked for update.		mknod::changed_time_fields_success                                        FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mknod returns ENOENT if a component of the path prefix does not exist		mknod::enoent_comp                                                            ok
+
+	mknod returns EEXIST if the named file exists		mknod::eexist_file_exists::regular                                            ok
+
+	mknod returns ENOTDIR if a component of the path prefix is not a directory		mknod::enotdir_component::socket                                          FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 mknod create device files		mknod::device_files::block                                                FAILED
+	assertion failed: mknod(&file, argument, Mode::from_bits_truncate(mode),
+        makedev(major_num, minor_num)).is_ok()
+
+	 mknod changes st_ctime and st_mtime of the parent directory and marks for update the st_atime, st_ctime and st_mtime fields of the new file		mknod::changed_times_success::block                                       FAILED
+	assertion failed: mknod(&file, argument, Mode::from_bits_truncate(0o755), makedev(1, 2)).is_ok()
+
+	 mknod returns ENOTDIR if a component of the path prefix is not a directory when trying to create char/block files		mknod::enotdir_comp_char_block::regular                                       ok
+
+	mknod returns ENOTDIR if a component of the path prefix is not a directory		mknod::enotdir_component::fifo                                            FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mknod returns ENOTDIR if a component of the path prefix is not a directory		mknod::enotdir_component::char                                            FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mknod returns EEXIST if the named file exists		mknod::eexist_file_exists::fifo                                           FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mknod returns EEXIST if the named file exists		mknod::eexist_file_exists::symlink                                            ok
+
+	 POSIX: The file permission bits of the new FIFO shall be initialized from mode. The file permission bits of the mode argument shall be modified by the process' file creation mask.		mknod::permission_bits_from_mode                                          FAILED
+	assertion failed: f(&path, Mode::from_bits_truncate(mode)).is_ok()
+
+	 mknod create device files		mknod::device_files::char                                                 FAILED
+	assertion failed: mknod(&file, argument, Mode::from_bits_truncate(mode),
+        makedev(major_num, minor_num)).is_ok()
+
+	 mknod changes st_ctime and st_mtime of the parent directory and marks for update the st_atime, st_ctime and st_mtime fields of the new file		mknod::changed_times_success::char                                        FAILED
+	assertion failed: mknod(&file, argument, Mode::from_bits_truncate(0o755), makedev(1, 2)).is_ok()
+
+	mknod returns EEXIST if the named file exists		mknod::eexist_file_exists::socket                                         FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	mknod returns EEXIST if the named file exists		mknod::eexist_file_exists::char                                           FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	chmod returns ENOTDIR if a component of the path prefix is not a directory		chmod::enotdir_component::socket                                          FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 chmod successfully change permissions		chmod::change_perm::regular                                                   ok
+
+	 chmod updates ctime when it succeeds		chmod::update_ctime::regular                                                  ok
+
+	chmod returns ENAMETOOLONG if an entire pathname exceeded {PATH_MAX} characters		chmod::enametoolong_path                                                      ok
+
+	 chmod successfully change permissions		chmod::change_perm::fifo                                                  FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	chmod returns EFAULT if the path argument points outside the process's allocated address space		chmod::efault_path                                                            ok
+
+	chmod returns ENOTDIR if a component of the path prefix is not a directory		chmod::enotdir_component::regular                                             ok
+
+	chmod returns ENOTDIR if a component of the path prefix is not a directory		chmod::enotdir_component::fifo                                            FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 chmod updates ctime when it succeeds		chmod::update_ctime::block                                                FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 chmod does not update ctime when it fails		chmod::failed_chmod_unchanged_ctime::char                                 FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	chmod returns ENAMETOOLONG if a component of a pathname exceeded {NAME_MAX} characters		chmod::enametoolong_component                                                 ok
+
+	chmod returns ENOTDIR if a component of the path prefix is not a directory		chmod::enotdir_component::block                                           FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 chmod successfully change permissions		chmod::change_perm::char                                                  FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 S_ISGID bit shall be cleared upon successful return from chmod of a regular file if the calling process does not have appropriate privileges, and if the group ID of the file does not match the effective group ID or one of the supplementary group IDs		chmod::clear_isgid_bit                                                        ok
+
+	 chmod updates ctime when it succeeds		chmod::update_ctime::char                                                 FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 chmod successfully change permissions		chmod::change_perm::dir                                                       ok
+
+	 chmod updates ctime when it succeeds		chmod::update_ctime::dir                                                      ok
+
+	chmod returns ENOENT if a component of the path prefix does not exist		chmod::enoent_comp                                                            ok
+
+	 chmod updates ctime when it succeeds		chmod::update_ctime::fifo                                                 FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 chmod does not update ctime when it fails		chmod::failed_chmod_unchanged_ctime::regular                                  ok
+
+	 chmod successfully change permissions		chmod::change_perm::block                                                 FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	chmod returns ENOENT if the symlink target named file does not exist		chmod::enoent_symlink                                                         ok
+
+	 chmod successfully change permissions		chmod::change_perm::socket                                                FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 chmod does not update ctime when it fails		chmod::failed_chmod_unchanged_ctime::socket                               FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	chmod returns ENOTDIR if a component of the path prefix is not a directory		chmod::enotdir_component::char                                            FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 chmod does not update ctime when it fails		chmod::failed_chmod_unchanged_ctime::dir                                      ok
+
+	chmod returns ENOENT if the named file does not exist		chmod::enoent_named_file                                                      ok
+
+	chmod returns ELOOP if too many symbolic links were encountered in translating a component of the pathname which is not the last one		chmod::eloop_comp                                                             ok
+
+	chmod returns EROFS if the named file resides on a read-only file system		chmod::erofs_named                                                       skipped
+	Remounts (allow_remount) are not allowed in the configuration file
+
+	 chmod does not update ctime when it fails		chmod::failed_chmod_unchanged_ctime::block                                FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 chmod does not update ctime when it fails		chmod::failed_chmod_unchanged_ctime::fifo                                 FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	chmod returns ELOOP if too many symbolic links were encountered in translating the last component of the pathname		chmod::eloop_final_comp                                                       ok
+
+	 chmod updates ctime when it succeeds		chmod::update_ctime::socket                                               FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	link returns ENOTDIR if a component of either path prefix is not a directory		link::enotdir_component_either::socket                                    FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	link returns ENAMETOOLONG if a component of either pathname exceeded {NAME_MAX} characters		link::enametoolong_component                                                  ok
+
+	link returns ENAMETOOLONG if an entire pathname exceeded {PATH_MAX} characters		link::enametoolong_path                                                       ok
+
+	link returns ENOTDIR if a component of either path prefix is not a directory		link::enotdir_component_either::fifo                                      FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 link returns EEXIST if the destination file exists		link::eexist_dest_exists::fifo                                            FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 link creates hardlinks which share the same metadata		link::share_metadata::fifo                                                FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 link changes ctime of file along with ctime and mtime of parent when sucessful		link::changed_ctime_success::regular                                          ok
+
+	 link returns EEXIST if the destination file exists		link::eexist_dest_exists::char                                            FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 link changes neither ctime of file nor ctime or mtime of parent when it fails		link::unchanged_ctime_fails::char                                         FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 link returns ENOENT if the source file does not exist		link::enoent_source_not_exists                                                ok
+
+	 link returns EEXIST if the destination file exists		link::eexist_dest_exists::regular                                             ok
+
+	 link creates hardlinks which share the same metadata		link::share_metadata::char                                                FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	link returns EFAULT if one of the pathnames specified is outside the process's allocated address space		link::efault_either                                                           ok
+
+	 link creates hardlinks which share the same metadata		link::share_metadata::regular                                                 ok
+
+	 Removing a link should only change the number of links		link::remove_link::socket                                                 FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	link returns ENOTDIR if a component of either path prefix is not a directory		link::enotdir_component_either::char                                      FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 Removing a link should only change the number of links		link::remove_link::regular                                                    ok
+
+	 link changes neither ctime of file nor ctime or mtime of parent when it fails		link::unchanged_ctime_fails::fifo                                         FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 link changes ctime of file along with ctime and mtime of parent when sucessful		link::changed_ctime_success::fifo                                         FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	link returns ELOOP if too many symbolic links were encountered in translating a component of either pathname which is not the last one		link::eloop_comp                                                              ok
+
+	 link returns EEXIST if the destination file exists		link::eexist_dest_exists::socket                                          FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 link changes neither ctime of file nor ctime or mtime of parent when it fails		link::unchanged_ctime_fails::regular                                          ok
+
+	link returns ENOTDIR if a component of either path prefix is not a directory		link::enotdir_component_either::block                                     FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 link changes neither ctime of file nor ctime or mtime of parent when it fails		link::unchanged_ctime_fails::socket                                       FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 link creates hardlinks which share the same metadata		link::share_metadata::socket                                              FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 link changes ctime of file along with ctime and mtime of parent when sucessful		link::changed_ctime_success::block                                        FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 link changes neither ctime of file nor ctime or mtime of parent when it fails		link::unchanged_ctime_fails::block                                        FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 link returns EMLINK if the link count of the file named by name1 would exceed {LINK_MAX}		link::link_count_max                                                     skipped
+	Cannot get value for LINK_MAX: filesystem limit is unknown
+
+	 link returns EEXIST if the destination file exists		link::eexist_dest_exists::block                                           FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 Removing a link should only change the number of links		link::remove_link::char                                                   FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	link returns ENOTDIR if a component of either path prefix is not a directory		link::enotdir_component_either::regular                                       ok
+
+	 link changes ctime of file along with ctime and mtime of parent when sucessful		link::changed_ctime_success::char                                         FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	link returns ENOENT if the named file does not exist		link::enoent_named_file                                                       ok
+
+	 Removing a link should only change the number of links		link::remove_link::block                                                  FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	link returns EXDEV when the target is on a different file-system		link::exdev_target                                                       skipped
+	No secondary file-system has been configured.
+
+	link returns EROFS if the named file resides on a read-only file system		link::erofs_named                                                        skipped
+	Remounts (allow_remount) are not allowed in the configuration file
+
+	 link returns EEXIST if the destination file exists		link::eexist_dest_exists::symlink                                             ok
+
+	 Removing a link should only change the number of links		link::remove_link::fifo                                                   FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 link creates hardlinks which share the same metadata		link::share_metadata::block                                               FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 link changes ctime of file along with ctime and mtime of parent when sucessful		link::changed_ctime_success::socket                                       FAILED
+	called `Result::unwrap()` on an `Err` value: EOPNOTSUPP
+
+	 link returns EEXIST if the destination file exists		link::eexist_dest_exists::dir                                                 ok
+
+Tests: 168 failed, 48 skipped, 182 passed, 398 total
+Error: Some tests have failed

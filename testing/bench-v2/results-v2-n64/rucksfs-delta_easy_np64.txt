@@ -1,0 +1,21 @@
+Warning: Permanently added '43.134.196.213' (ECDSA) to the list of known hosts.
+-- started at 04/27/2026 11:08:55 --
+
+mdtest-4.1.0+dev was launched with 64 total task(s) on 64 node(s)
+Command line used: mdtest '-d' '/mnt/sut/bench' '-n' '800' '-F' '-C' '-T' '-r' '-u' '-i' '1'
+Nodemap: 1000000000000000000000000000000000000000000000000000000000000000
+Path                : /mnt/sut/bench
+FS                  : 3.8 GiB   Used FS: 50.0%   Inodes: 1.0 Mi   Used Inodes: 0.1%
+64 tasks, 51200 files
+
+SUMMARY rate (in ops/sec): (of 1 iterations)
+   Operation                     Max            Min           Mean        Std Dev
+   ---------                     ---            ---           ----        -------
+   File creation               51652.574      51652.574      51652.574          0.000
+   File stat                15725568.600   15725568.600   15725568.600          0.000
+   File read                       0.000          0.000          0.000          0.000
+   File removal                53822.617      53822.617      53822.617          0.000
+   Tree creation                 234.909        234.909        234.909          0.000
+   Tree removal                    5.949          5.949          5.949          0.000
+-- finished at 04/27/2026 11:08:58 --
+

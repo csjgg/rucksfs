@@ -1,0 +1,20 @@
+-- started at 04/25/2026 04:06:12 --
+
+mdtest-4.1.0+dev was launched with 128 total task(s) on 6 node(s)
+Command line used: mdtest '-d' '/mnt/sut/test_hard_128' '-n' '1000' '-F' '-C' '-T' '-r' '-i' '1'
+Nodemap: 11111111111111111111110000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+Path                : /mnt/sut/test_hard_128
+FS                  : 3.8 GiB   Used FS: 50.0%   Inodes: 1.0 Mi   Used Inodes: 0.1%
+128 tasks, 128000 files
+
+SUMMARY rate (in ops/sec): (of 1 iterations)
+   Operation                     Max            Min           Mean        Std Dev
+   ---------                     ---            ---           ----        -------
+   File creation                5658.810       5658.810       5658.810          0.000
+   File stat                   82077.753      82077.753      82077.753          0.000
+   File read                       0.000          0.000          0.000          0.000
+   File removal                 4775.434       4775.434       4775.434          0.000
+   Tree creation                   6.737          6.737          6.737          0.000
+   Tree removal                    0.642          0.642          0.642          0.000
+-- finished at 04/25/2026 04:07:06 --
+
