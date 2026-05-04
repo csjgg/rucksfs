@@ -2,23 +2,23 @@
 
 \subsection{工作总结}
 
-本文围绕"基于 KV 存储管理文件系统元数据"这个具体问题，设计并实现了 RucksFS——一个用 RocksDB 做元数据引擎、通过 FUSE 对外提供 POSIX 接口的分布式文件系统原型，并在此基础上做了相对完整的实验评估。具体完成的工作如下：
+本文围绕“基于 KV 存储管理文件系统元数据”这个具体问题，设计并实现了 RucksFS——一个用 RocksDB 做元数据引擎、通过 FUSE 对外提供 POSIX 接口的分布式文件系统原型，并在此基础上做了相对完整的实验评估。具体完成的工作如下：
 
 \begin{enumerate}
-    \item 实现了基于 RocksDB 多列族的 FUSE 文件系统 RucksFS，支持 create、mkdir、unlink、rmdir、rename、readdir 等常用 POSIX 操作。元数据按访问模式拆到 inodes、dir\_entries、delta\_entries、system 四个列族里；目录项键用"父 inode + 子文件名"的大端序拼接编码，让文件操作大致对应为对树上一条边的增删。
+    \item 实现了基于 RocksDB 多列族的 FUSE 文件系统 RucksFS，支持 create、mkdir、unlink、rmdir、rename、readdir 等常用 POSIX 操作。元数据按访问模式拆到 inodes、dir\_entries、delta\_entries、system 四个列族里；目录项键用“父 inode + 子文件名”的大端序拼接编码，让文件操作大致对应为对树上一条边的增删。
     \item 引入了增量更新与懒折叠机制（DeltaOp）。父目录属性的修改不再就地重写基值，而是追加一条 DeltaOp，读路径读到时再把基值和增量合成出来；后台线程在增量超过 32 条时做折叠。这一机制本身是借鉴了 Mantle 的 Delta Record 思路，但实现上更轻量，整个流程被约束在一个 RocksDB 实例内。
     \item 基于 RocksDB 悲观事务（PCC）处理并发。所有跨键的目录操作通过事务完成加锁和冲突检测，跨 inode 操作按编号排序加锁以预防死锁；临时冲突时服务端自动重试至多 3 次，失败后才向上层返回 EAGAIN。
     \item 客户端基于 fuse3 + tokio 异步实现，挂载时启用 default\_permissions 与 AllowOther，常规权限检查交给内核 VFS。
-    \item 在 1 台 64 核服务器加最多 96 台 2 核客户端的腾讯云集群上完成了系统评估。POSIX 合规性方面，pjdfstest 398 个用例按实现范围拆分后，本文明确不实现的 mknod/mkfifo 相关用例（167 条）、DataServer 单文件大小用例（1 条）和框架自身跳过项（48 条）合计占 216 条；剩下 182 条"实现范围内"用例在分布式部署下全部通过，通过率 100\%。性能方面，$N=96$ 时 RucksFS-Delta 的 create 达到 68\,588\,ops/s、remove 达到 70\,859\,ops/s，相对 NFS 与 JuiceFS+TiKV 保持了稳定的扩展优势。需要说明，对 NFS 的差距主要来自 ext4 目录锁这一本地文件系统的固有瓶颈；对 JuiceFS+TiKV 的差距则反映单机直连 RocksDB 相对通用分布式 KV 叠 FUSE 在 2PC+Raft 开销上的取舍，而非 RucksFS 作为完整分布式系统已经实现了质的超越。DeltaOp 的消融实验在控制变量更严格的条件下说明机制本身的作用：$N=96$ 时 Delta 与 NoDelta 的 create 比值 5.81、remove 比值 6.12、stat 比值 136，而 easy 模式下二者完全重合。
+    \item 在 1 台 64 核服务器加最多 96 台 2 核客户端的腾讯云集群上完成了系统评估。POSIX 合规性方面，pjdfstest 398 个用例按实现范围拆分后，本文明确不实现的 mknod/mkfifo 相关用例（167 条）、DataServer 单文件大小用例（1 条）和框架自身跳过项（48 条）合计占 216 条；剩下 182 条“实现范围内”用例在分布式部署下全部通过，通过率 100\%。性能方面，$N=96$ 时 RucksFS-Delta 的 create 达到 68\,588\,ops/s、remove 达到 70\,859\,ops/s，相对 NFS 与 JuiceFS+TiKV 保持了稳定的扩展优势。需要说明，对 NFS 的差距主要来自 ext4 目录锁这一本地文件系统的固有瓶颈；对 JuiceFS+TiKV 的差距则反映单机直连 RocksDB 相对通用分布式 KV 叠 FUSE 在 2PC+Raft 开销上的取舍，而非 RucksFS 作为完整分布式系统已经实现了质的超越。DeltaOp 的消融实验在控制变量更严格的条件下说明机制本身的作用：$N=96$ 时 Delta 与 NoDelta 的 create 比值 5.81、remove 比值 6.12、stat 比值 136，而 easy 模式下二者完全重合。
 \end{enumerate}
 
 \subsection{不足与展望}
 
-前面的数据说明 RucksFS 在"元数据关键路径"这一窄口径下达到了预期效果，但作为一个毕业设计阶段的原型，系统还有不少明显的不足。以下几项按优先级从高到低列出。
+前面的数据说明 RucksFS 在“元数据关键路径”这一窄口径下达到了预期效果，但作为一个毕业设计阶段的原型，系统还有不少明显的不足。以下几项按优先级从高到低列出。
 
 \begin{enumerate}
     \item \textbf{gRPC 网络往返开销}。这是目前最直接的性能短板。分布式模式下，一次 create 需要多次跨节点 RPC，网络延迟占了相当大的比例。后续可以合并相邻 RPC 调用、引入客户端元数据缓存来缓解。
     \item \textbf{DataServer 还是最小实现}。目前 \texttt{RawDiskDataStore} 用固定偏移公式直接映射 inode，\texttt{delete\_data} 是空操作，没有空间回收，单文件有 128\,MiB 的逻辑上限。实验里用 mdtest 的空文件负载跑过去了，但要作为真实可用的文件系统，还需要把块分配、空间回收和大文件支持补上。
     \item \textbf{多节点扩展还没做}。当前实现虽然已经把 Client、MetadataServer、DataServer 分开部署了，但主实现仍是单 MetadataServer 加单默认 DataServer，多节点元数据分片、数据副本以及故障切换都还没有动工。对应的架构预留（比如 \texttt{DataLocation} 中的路由字段）已经有了，但需要有人继续填上。
-    \item \textbf{元数据预取与智能调度}。目前对所有元数据请求一视同仁，没有区分冷热路径。实际负载里"readdir 完立刻批量 stat"很常见，完全可以提前预取。可以探索基于 eBPF 的内核态访问模式采集配合预取策略。这一方向工程复杂度较高，建议排在前两项之后。
+    \item \textbf{元数据预取与智能调度}。目前对所有元数据请求一视同仁，没有区分冷热路径。实际负载里“readdir 完立刻批量 stat”很常见，完全可以提前预取。可以探索基于 eBPF 的内核态访问模式采集配合预取策略。这一方向工程复杂度较高，建议排在前两项之后。
 \end{enumerate}
