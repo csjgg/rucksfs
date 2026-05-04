@@ -90,7 +90,88 @@ LSM-tree（Log-Structured Merge-tree）最早由 O'Neil 等人提出\cite{oneil1
 
 对文件系统元数据而言，这一结构有两个直接含义。第一，单条目录项或 inode 属性更新可以先以内存追加的形式进入 MemTable，而不必像 B 树那样立即修改磁盘页。第二，后台合并阶段会引入额外写放大，因此键设计与值大小必须保持克制。RucksFS 正是围绕这两点展开后续设计：目录项和值都保持较小粒度，文件数据则完全绕开 RocksDB，避免大 value 拖垮 Compaction 路径。
 
-RocksDB 的读取路径与此相反：先查活跃 MemTable，再查不可变 MemTable，随后自 Level~0 起逐层搜索 SST 文件。为了降低点查成本，SST 文件内部维护索引块和 Bloom 过滤器；为了降低磁盘访问次数，常用数据块还会进入块缓存。这也解释了为什么文件系统元数据需要强调键的前缀局部性与点查友好性，否则读取路径会在多层 SST 中不断放大。
+RocksDB 的读取路径与此相反：先查活跃 MemTable，再查不可变 MemTable，随后自 Level~0 起逐层搜索 SST 文件。为了降低点查成本，SST 文件内部维护索引块和 Bloom 过滤器；为了降低磁盘访问次数，常用数据块还会进入块缓存。这也解释了为什么文件系统元数据需要强调键的前缀局部性与点查友好性，否则读取路径会在多层 SST 中不断放大。图~\ref{fig:lsm_tree}把写入、读取与后台 Compaction 三条路径放在同一视图中，以便后续讨论列族划分与键编码时有统一的参照。
+
+\begin{figure}[htbp]
+    \centering
+    \begin{tikzpicture}[
+        font=\small,
+        mem/.style={draw, rounded corners=2pt, fill=black!5, align=center,
+                    minimum width=2.3cm, minimum height=0.7cm},
+        wal/.style={draw, rounded corners=2pt, fill=black!8, align=center,
+                    minimum width=2.3cm, minimum height=0.7cm, dashed},
+        sst/.style={draw, rounded corners=1pt, fill=black!3, align=center,
+                    minimum width=0.9cm, minimum height=0.55cm, font=\scriptsize},
+        trigger/.style={draw, rounded corners=2pt, fill=black!5, align=center,
+                    minimum width=1.3cm, minimum height=0.6cm, font=\scriptsize},
+        arr/.style={->, >=stealth, thick},
+        arrw/.style={->, >=stealth, thick, line width=0.5mm},
+        arrr/.style={->, >=stealth, thick, dashed},
+        arrc/.style={->, >=stealth, thick, dotted, line width=0.4mm},
+        lbl/.style={font=\scriptsize},
+        lv/.style={font=\scriptsize, anchor=east}
+    ]
+    % 触发源
+    \node[trigger] (put) at (-3.2, 2.5) {\texttt{Put}};
+    \node[trigger] (get) at (-3.2, 0.6) {\texttt{Get}};
+
+    % 内存区
+    \node[mem] (active) at (0, 2.5) {Active MemTable\\\scriptsize 跳表，$\approx$\,64\,MiB};
+    \node[mem] (imm)    at (0, 1.3) {Immutable MemTable\\\scriptsize 冻结后只读};
+    \node[wal] (wal)    at (0, 3.7) {WAL\\\scriptsize 追加日志};
+
+    % 磁盘层次：L0, L1, L2
+    \node[lv] at (2.4, 0.3)  {L0};
+    \node[sst] (l0a) at (2.8, 0.3) {SST};
+    \node[sst] (l0b) at (3.8, 0.3) {SST};
+    \node[sst] (l0c) at (4.8, 0.3) {SST};
+    \node[lbl, anchor=west] at (5.5, 0.3) {\scriptsize 范围可重叠};
+
+    \node[lv] at (2.4, -0.8) {L1};
+    \node[sst] at (2.8, -0.8) {SST};
+    \node[sst] at (3.8, -0.8) {SST};
+    \node[sst] at (4.8, -0.8) {SST};
+    \node[sst] at (5.8, -0.8) {SST};
+
+    \node[lv] at (2.4, -1.9) {L2};
+    \node[sst] at (2.8, -1.9) {SST};
+    \node[sst] at (3.8, -1.9) {SST};
+    \node[sst] at (4.8, -1.9) {SST};
+    \node[sst] at (5.8, -1.9) {SST};
+    \node[sst] at (6.8, -1.9) {SST};
+
+    \node[lbl, anchor=west] at (5.5, -1.1) {\scriptsize 按键范围分区};
+    \node[lbl, anchor=west] at (7.3, -1.9) {\scriptsize $\cdots$};
+
+    % 写路径（粗实线）
+    \draw[arrw] (put.east) -- node[above, lbl] {1. 先写} (wal.west);
+    \draw[arrw] (put.east) -- node[below, lbl] {2. 再插入} (active.west);
+    \draw[arrw] (active.south) -- node[right, lbl] {满则冻结} (imm.north);
+    \draw[arrw] (imm.east) -- ++(1.4, 0) |- node[above, lbl, pos=0.25] {3. Flush} (l0a.north);
+
+    % 读路径（虚线）
+    \draw[arrr] (get.east) -- (active.west |- get.east);
+    \draw[arrr] ([yshift=-1pt]active.east) -| ++(0.4, -0.5) -- ++(0, -0.2) -- (imm.east |- l0a);
+    \draw[arrr] ([yshift=0pt]imm.east) -- (l0a.west);
+    \draw[arrr] (l0a.south) -- ++(0, -0.3) -- (2.8, -0.55);
+    \draw[arrr] (2.8, -1.1) -- (2.8, -1.65);
+
+    % Compaction（点线）
+    \draw[arrc] (l0c.south east) -- ++(0.5, -0.4) |- (5.8, -0.55);
+    \draw[arrc] (5.8, -1.1) -- ++(0.6, -0.4) |- (6.8, -1.65);
+
+    % 图例
+    \node[lbl, anchor=west] at (-3.5, -2.9) {\scriptsize \textbf{图例:}};
+    \draw[arrw] (-2.6, -2.9) -- (-2.0, -2.9);
+    \node[lbl, anchor=west] at (-2.0, -2.9) {写路径};
+    \draw[arrr] (-0.6, -2.9) -- (0.0, -2.9);
+    \node[lbl, anchor=west] at (0.0, -2.9) {读路径};
+    \draw[arrc] (1.2, -2.9) -- (1.8, -2.9);
+    \node[lbl, anchor=west] at (1.8, -2.9) {Compaction};
+    \end{tikzpicture}
+    \caption{LSM-tree 的写入、读取与 Compaction 路径。写入先追加 WAL 再插入 MemTable，满后冻结并刷成 L0；读取按 MemTable、Immutable、L0$\to$L$n$ 顺序逐层查找；Compaction 在后台把上层文件合并到下层，控制读放大和空间占用。}
+    \label{fig:lsm_tree}
+\end{figure}
 
 \subsubsection{Column Family 机制}
 

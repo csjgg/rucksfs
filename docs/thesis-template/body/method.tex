@@ -105,7 +105,7 @@ RucksFS 从一棵目录树出发理解命名空间。用户看到的是按目录
 
 \texttt{system} 列族只保存 inode 分配器等低频系统元信息。将这部分内容单独隔离，可以避免分配器状态与热点目录项共享同一压缩和缓存行为。虽然它在访问频率上远低于其他列族，但仍需要与普通元数据一起参与原子提交，因此保留在同一 RocksDB 实例中，而不是另起一套外部存储。
 
-整体来看，这种列族划分遵循的是“按访问模式组织布局”的原则，而不是“按语义模块机械拆分”的原则。对本文而言，列族设计本身就是元数据关键路径优化的一部分，因此需要先在结构上讲清“为什么这样分”，再讨论“每类记录如何编码”。
+整体来看，这种列族划分遵循的是“按访问模式组织布局”的原则，而不是“按语义模块机械拆分”的原则。就本文的视角而言，列族设计本身就是元数据关键路径优化的一部分，因此需要先在结构上讲清“为什么这样分”，再讨论“每类记录如何编码”。
 
 \subsubsection{键编码与目录映射}
 
@@ -196,7 +196,56 @@ RucksFS 中的大多数元数据操作都不是单键更新。以 \texttt{create
 
 RucksFS 的处理方式是把这类更新从基值重写改为增量追加。写路径不直接修改父目录在 \texttt{inodes} 中的基础值，而是把变化编码为 \texttt{DeltaOp}，追加到 \texttt{delta\_entries} 中。当前增量类型包括 \texttt{IncrementNlink}、\texttt{SetMtime}、\texttt{SetCtime} 和 \texttt{SetAtime}。其中，普通文件的创建与删除只影响父目录时间戳；\texttt{mkdir}、\texttt{rmdir} 以及跨目录移动目录时，才会额外引入 \texttt{nlink} 增量。这样一来，热点目录上的高频更新就从覆盖同一条 inode 基值，转变为向独立增量记录追加。
 
-读取路径则负责把“基础值 + 增量”重新合成为最新视图。MetadataServer 在加载 inode 时，优先从 \texttt{InodeFoldedCache} 读取已经折叠好的结果；若缓存未命中，则先读取 \texttt{inodes} 中的基础值，再扫描属于该 inode 的全部 \texttt{DeltaOp}，按顺序完成折叠。为了避免读路径的折叠成本无限增长，后台的 \texttt{DeltaCompactionWorker} 会周期性检查 dirty inode，并在增量条目超过阈值时，将折叠后的新基值写回 \texttt{inodes}，同时删除已消费的增量。当前实现的默认阈值为 32 条，检查周期为 5 秒。其核心思想可以概括为：用受控的读路径折叠成本，换取写路径上的冲突削减。与 Mantle 的 Delta Record 相比，RucksFS 的 DeltaOp 机制沿用了“以增量换写放大”的基本思路，但将追加、折叠和提交都约束在同一 RocksDB 实例内完成，因而实现更轻量。
+读取路径则负责把“基础值 + 增量”重新合成为最新视图。MetadataServer 在加载 inode 时，优先从 \texttt{InodeFoldedCache} 读取已经折叠好的结果；若缓存未命中，则先读取 \texttt{inodes} 中的基础值，再扫描属于该 inode 的全部 \texttt{DeltaOp}，按顺序完成折叠。为了避免读路径的折叠成本无限增长，后台的 \texttt{DeltaCompactionWorker} 会周期性检查 dirty inode，并在增量条目超过阈值时，将折叠后的新基值写回 \texttt{inodes}，同时删除已消费的增量。当前实现的默认阈值为 32 条，检查周期为 5 秒。其核心思想可以概括为：用受控的读路径折叠成本，换取写路径上的冲突削减。与 Mantle 的 Delta Record 相比，RucksFS 的 DeltaOp 机制沿用了“以增量换写放大”的基本思路，但将追加、折叠和提交都约束在同一 RocksDB 实例内完成，因而实现更轻量。图~\ref{fig:delta_lazy_fold}把写入、读取和后台折叠三条路径放在同一视图里，以便对照各自对列族和缓存的访问方式。
+
+\begin{figure}[htbp]
+    \centering
+    \begin{tikzpicture}[
+        font=\small,
+        box/.style={draw, rounded corners=2pt, fill=black!5, align=center,
+                    minimum width=2.5cm, minimum height=0.9cm},
+        cf/.style={draw, rounded corners=2pt, fill=black!3, align=center,
+                    minimum width=2.9cm, minimum height=0.9cm},
+        cache/.style={draw, dashed, rounded corners=2pt, fill=black!8,
+                    align=center, minimum width=2.9cm, minimum height=0.9cm},
+        arr/.style={->, >=stealth, thick},
+        lbl/.style={font=\scriptsize}
+    ]
+    % 触发源（写）
+    \node[box] (wop) at (0, 2.4) {\texttt{create}/\texttt{unlink}\\\texttt{mkdir}/\texttt{rmdir}};
+    % 触发源（读）
+    \node[box] (rop) at (0, 0) {\texttt{getattr}\\\texttt{lookup}};
+    % 后台线程
+    \node[box] (worker) at (0, -2.4) {\texttt{DeltaCompaction}\\\texttt{Worker}\\\scriptsize 每 5\,s 扫描};
+
+    % 列族
+    \node[cf] (inodes) at (8.6, 2.4) {\texttt{inodes} 列族\\\scriptsize 基础 \texttt{InodeValue}};
+    \node[cf] (delta)  at (8.6, 0)   {\texttt{delta\_entries} 列族\\\scriptsize 增量 \texttt{DeltaOp} 序列};
+
+    % 中间缓存
+    \node[cache] (cache) at (4.3, 0) {\texttt{InodeFoldedCache}\\\scriptsize 折叠结果 LRU};
+
+    % 写路径：只追加 delta
+    \draw[arr] (wop.east) -- node[above, lbl] {1. 追加 DeltaOp} (delta.west |- wop.east);
+
+    % 读路径：先查 cache，再合成
+    \draw[arr] (rop.east) -- node[above, lbl] {2a. 命中即返回} (cache.west);
+    \draw[arr] (cache.east) -- node[above, lbl] {2b. 未命中读基值} (inodes.west |- cache.east);
+    \draw[arr] (cache.east) -- node[below, lbl] {\ \ 2c. 叠加未折叠增量} (delta.west);
+
+    % 后台折叠：delta 超阈值则写回基值并清增量
+    \draw[arr] (worker.east) .. controls (4.3, -2.4) and (6.5, -1.2) ..
+               node[below, lbl, pos=0.75] {3a. 读增量} (delta.south);
+    \draw[arr] (worker.east) .. controls (4.3, -2.4) and (6.5, 1.5) ..
+               node[above, lbl, pos=0.75] {3b. 折叠后写回基值} (inodes.south);
+
+    % 注释：阈值
+    \node[lbl, text width=3cm, align=center] at (4.3, -2.6)
+        {\scriptsize 累积 $>$ 32 条时触发折叠};
+    \end{tikzpicture}
+    \caption{DeltaOp 增量追加与懒折叠机制。写路径只向 \texttt{delta\_entries} 追加，读路径通过缓存叠加增量返回最新视图，后台线程按阈值触发折叠。}
+    \label{fig:delta_lazy_fold}
+\end{figure}
 
 这一机制带来的收益不容易在低并发下显形：父目录上的写争抢必须达到一定密度，覆盖式更新与增量追加的差距才会拉开。第~\ref{sec:delta-vs-nodelta}~节将用 Delta 与 NoDelta 两种编译变体的对照实验直接量化这一点——在共享父目录的元数据负载下，关闭 DeltaOp 的构建在客户端数从 32 增长到 64 时出现 40\% 的吞吐下滑，而启用 DeltaOp 的构建保持线性增长。
 
@@ -281,7 +330,70 @@ RucksFS 的大多数元数据操作遵循同一条主线：先定位少量相关
 
 从实现角度看，\texttt{rename} 的主体可以理解为”删除旧边、插入新边，并按需处理被覆盖对象”。这是边中心建模的直接收益：即使发生跨目录移动，系统也只需要改动少量与源路径和目标路径直接相关的记录，而不需要像全路径键方案那样对子树做级联改写。\texttt{rename} 的复杂性主要来自语义约束，而不是来自底层数据搬移。
 
-排序加锁是 \texttt{rename} 能够避免死锁的关键，但它的意义不止于避免“互相等待”。更重要的是，统一的加锁顺序让源目录、目标目录以及被覆盖对象可以被纳入同一个稳定事务中，从而使“检查目标是否存在”“检查目标目录是否为空”“删除旧目录项”“写入新目录项”“处理覆盖删除”等动作保持同一一致性视图。对外部观察者而言，\texttt{rename} 因而只表现为一次原子切换，而不会暴露“旧名字已删、新名字未建”这样的中间态。
+排序加锁是 \texttt{rename} 能够避免死锁的关键，但它的意义不止于避免“互相等待”。更重要的是，统一的加锁顺序让源目录、目标目录以及被覆盖对象可以被纳入同一个稳定事务中，从而使“检查目标是否存在”“检查目标目录是否为空”“删除旧目录项”“写入新目录项”“处理覆盖删除”等动作保持同一一致性视图。对外部观察者而言，\texttt{rename} 因而只表现为一次原子切换，而不会暴露“旧名字已删、新名字未建”这样的中间态。图~\ref{fig:rename_lock_order}以两个线程并发 \texttt{rename} 为例，展示按 inode 编号升序加锁如何把本会相互等待的操作串成安全的先后顺序。
+
+\begin{figure}[htbp]
+    \centering
+    \begin{tikzpicture}[
+        font=\small,
+        node distance=0mm,
+        tline/.style={draw, thick},
+        tlbl/.style={font=\small\bfseries},
+        ino/.style={draw, rounded corners=1pt, fill=black!5,
+                    minimum width=0.9cm, minimum height=0.55cm, font=\scriptsize},
+        act/.style={draw, rounded corners=2pt, fill=black!5, align=center,
+                    minimum width=2.5cm, minimum height=0.6cm, font=\scriptsize},
+        wait/.style={draw, rounded corners=2pt, fill=black!10, align=center,
+                    minimum width=2.5cm, minimum height=0.6cm, font=\scriptsize, dashed},
+        ok/.style={draw, rounded corners=2pt, fill=black!3, align=center,
+                    minimum width=2.5cm, minimum height=0.6cm, font=\scriptsize},
+        arr/.style={->, >=stealth, thin},
+        lbl/.style={font=\scriptsize}
+    ]
+    % 上方：待排序的 inode 集合示意
+    \node[lbl, anchor=west] at (-0.2, 4.8) {涉及的 inode（按编号升序排序后加锁）：};
+    \node[ino] (i5)  at (3.0, 4.8) {\#5};
+    \node[ino] (i17) at (4.0, 4.8) {\#17};
+    \node[ino] (i42) at (5.0, 4.8) {\#42};
+    \node[ino] (i99) at (6.0, 4.8) {\#99};
+    \node[lbl, anchor=west] at (6.6, 4.8) {（源/目标父目录 + 移动对象）};
+
+    % 两条时间线的标签
+    \node[tlbl] at (-0.6, 3.6) {T$_1$};
+    \node[tlbl] at (-0.6, 1.2) {T$_2$};
+
+    % T1 操作块
+    \node[act]  (t1a) at (1.7, 3.6) {\texttt{lock(\#5)} 成功};
+    \node[act]  (t1b) at (4.7, 3.6) {\texttt{lock(\#17)} 成功};
+    \node[act]  (t1c) at (7.7, 3.6) {\texttt{lock(\#42)} 成功};
+    \node[ok]   (t1d) at (10.7, 3.6) {commit \& release};
+
+    % T2 操作块
+    \node[wait] (t2a) at (1.7, 1.2) {\texttt{lock(\#5)} 等待};
+    \node[wait] (t2a2) at (4.7, 1.2) {（继续等待）};
+    \node[act]  (t2b) at (10.7, 1.2) {获得 \#5 后继续};
+
+    % 时间线
+    \draw[tline, ->] (0.2, 3.6) -- (12.4, 3.6) node[right, lbl] {time};
+    \draw[tline, ->] (0.2, 1.2) -- (12.4, 1.2) node[right, lbl] {time};
+
+    % T1 中间虚线：依次锁到下一个 inode
+    \draw[arr, dashed] (t1a.east) -- (t1b.west);
+    \draw[arr, dashed] (t1b.east) -- (t1c.west);
+    \draw[arr, dashed] (t1c.east) -- (t1d.west);
+
+    % T2 被 T1 阻塞：竖直虚线示意 T1 持有 #5
+    \draw[arr, densely dotted] (t1a.south) -- node[right, lbl] {\#5 被 T$_1$ 持有} (t2a.north);
+    \draw[arr, densely dotted] (t1d.south west) -- node[right, lbl, pos=0.4] {释放后唤醒 T$_2$} (t2b.north);
+
+    % 底部说明：为什么不会死锁
+    \node[lbl, text width=11cm, align=center, anchor=north] at (6.0, -0.1)
+        {统一按 inode 编号升序加锁 $\Rightarrow$ 两个事务看到相同的锁序 $\Rightarrow$
+         不会出现“T$_1$ 等 \#17、T$_2$ 等 \#5”的循环等待。};
+    \end{tikzpicture}
+    \caption{\texttt{rename} 的统一加锁顺序。所有涉及的 inode 先在事务开始前收集并按编号升序排序，再依次 \texttt{get\_for\_update}。后到的事务只会按同样的方向排队，不会与先到事务形成循环依赖。}
+    \label{fig:rename_lock_order}
+\end{figure}
 
 另一个容易被忽视的细节是，目录跨父目录移动时才需要调整父目录 \texttt{nlink}。移动普通文件不会影响任何目录的 \texttt{nlink}；同一父目录内对目录重命名，也不会影响父目录 \texttt{nlink}。这些差异直接决定了增量日志中应追加哪些 \texttt{DeltaOp}，也说明 \texttt{rename} 的正确性并不仅仅取决于“目录项有没有改对”，还取决于相关目录属性是否被同步维护。
 
@@ -303,7 +415,7 @@ RucksFS 的大多数元数据操作遵循同一条主线：先定位少量相关
 
 从路由角度看，请求大致可以分为三类。第一类是纯元数据操作，如 \texttt{lookup}、\texttt{create}、\texttt{mkdir}、\texttt{unlink}、\texttt{rmdir}、\texttt{rename}、\texttt{readdir}、\texttt{getattr} 和 \texttt{setattr}，它们直接交由 MetadataServer 处理。第二类是纯数据操作，如 \texttt{read}、\texttt{write}、\texttt{truncate} 和 \texttt{fsync}，它们在文件已打开的前提下可以依据句柄中缓存的 \texttt{server\_id} 直接路由到对应的 DataServer。第三类则是跨服务复合操作，例如 \texttt{open} 需要先从 MetadataServer 取回 \texttt{DataLocation}，而 \texttt{release}、覆盖式 \texttt{rename} 或可能触发截断的 \texttt{setattr} 则需要在元数据结果返回后，再由客户端补发数据侧清理或截断请求。
 
-这种编排方式有一个明确的设计意图：把”只涉及名字空间和 inode 状态的语义”约束在 MetadataServer 内，把”真正写字节、截断数据、清理数据”的工作留在 DataServer 内，而把跨两侧的复合语义交由客户端显式协调。这种职责分配使边界清晰：MetadataServer 专注于元数据事务，DataServer 专注于字节读写，\texttt{VfsCore} 则负责把二者缝合成用户所见的 POSIX 行为。当然，客户端会因此比传统本地文件系统中的薄代理更复杂，但这是分离式架构下不可回避的一层。
+这种编排方式有一个明确的设计意图：把”只涉及名字空间和 inode 状态的语义”约束在 MetadataServer 内，把”真正写字节、截断数据、清理数据”的工作留在 DataServer 内，而把跨两侧的复合语义交由客户端显式协调。这种职责分配使边界清晰：MetadataServer 专注于元数据事务，DataServer 专注于字节读写，\texttt{VfsCore} 则负责把二者缝合成用户所见的 POSIX 行为。当然，客户端会因此比传统本地文件系统中的薄代理更复杂，这是分离式架构必须承担的复杂度。
 
 \subsubsection{DataServer 与原始磁盘后端}
 
