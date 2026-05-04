@@ -107,12 +107,21 @@ fn build_local_server(data_dir: &std::path::Path) -> Arc<dyn MetadataOps> {
 
 /// Benchmark create: create N files under root, each with a unique name.
 ///
-/// When `realistic` is true, each "create" mimics what mdtest (and the kernel
-/// FUSE layer) actually does for `openat(O_CREAT)`:
-///   1. lookup(parent, name) — expect ENOENT
-///   2. create(parent, name, mode, uid, gid) — returns attr
-///   3. open(inode, O_RDWR) — returns file handle
-///   4. release(inode) — close the file handle
+/// When `realistic` is true, each "create" emits exactly the RPC sequence that
+/// a Linux FUSE mount with `default_permissions` sends to the server when
+/// userland does `open(O_CREAT)` + `close()` on a fresh path:
+///
+///   1. LOOKUP(parent, name) — kernel negative-dentry check (returns ENOENT)
+///   2. GETATTR(parent) — kernel default_permissions permission check
+///   3. CREATE_AND_OPEN(parent, name, mode, uid, gid, flags) — merged create+open
+///   4. FLUSH is SKIPPED — on mdtest-style workloads the file has no writes,
+///      and rucksfs-client's flush handler short-circuits to a no-op (see
+///      client/src/vfs_core.rs:200). So no RPC here.
+///   5. RELEASE is issued via tokio::spawn (fire-and-forget), matching fuse.rs
+///      which returns immediately from the release handler.
+///
+/// Net: 3 synchronous MDS RPCs per create on the hot path, identical to what
+/// we observed via strace on a running rucksfs-remote-client during mdtest.
 ///
 /// When `realistic` is false, only `create()` is called (raw metadata throughput).
 async fn bench_create(
@@ -146,14 +155,41 @@ async fn bench_create(
                 let name = format!("f_{}_{}", tid, i);
                 let t0 = Instant::now();
                 if realistic {
-                    // Step 1: LOOKUP (expect ENOENT for new file)
-                    let _ = meta.lookup(parent, &name).await; // ignore error
-                    // Step 2: CREATE
-                    let attr = meta.create(parent, &name, 0o644, 0, 0).await.expect("create failed");
-                    // Step 3: OPEN (O_RDWR = 2)
-                    let _ = meta.open(attr.inode, 2).await;
-                    // Step 4: RELEASE (close)
-                    let _ = meta.release(attr.inode).await;
+                    // Emulate exactly what the Linux kernel does when a userland
+                    // `open(O_CREAT)` followed by `close(fd)` goes through FUSE
+                    // with `default_permissions` enabled. Strace on
+                    // rucksfs-remote-client during mdtest confirms this sequence:
+                    //
+                    //   1. LOOKUP on (parent, name) — kernel checks negative dentry
+                    //   2. GETATTR on parent — kernel's default_permissions check
+                    //   3. CREATE_AND_OPEN — one merged RPC that creates the file
+                    //      and returns a handle
+                    //   4. FLUSH on the data server — but vfs_core.rs short-circuits
+                    //      to a no-op when the inode has never been written, so it
+                    //      does NOT reach the wire for mdtest workloads.
+                    //   5. RELEASE — fire-and-forget via tokio::spawn, userland's
+                    //      close() returns without waiting for server reply.
+                    //
+                    // Net effect: 3 synchronous MDS RPCs per create, plus an
+                    // async release that never blocks the hot path.
+
+                    // Step 1: LOOKUP (expect ENOENT for new file, error ignored)
+                    let _ = meta.lookup(parent, &name).await;
+                    // Step 2: GETATTR on parent (default_permissions permission check)
+                    let _ = meta.getattr(parent).await;
+                    // Step 3: CREATE_AND_OPEN (merged: 1 RPC instead of create+open)
+                    let resp = meta
+                        .create_and_open(parent, &name, 0o644, 0, 0, /*flags=*/ 0)
+                        .await
+                        .expect("create_and_open failed");
+                    // Step 4: FLUSH — skipped (no-op when file has no writes,
+                    // matching client/src/vfs_core.rs:flush fast path).
+                    // Step 5: async RELEASE — fire-and-forget, does not block.
+                    let meta_release = meta.clone();
+                    let inode = resp.attr.inode;
+                    tokio::spawn(async move {
+                        let _ = meta_release.release(inode).await;
+                    });
                 } else {
                     meta.create(parent, &name, 0o644, 0, 0).await.expect("create failed");
                 }

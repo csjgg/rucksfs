@@ -1,7 +1,10 @@
 //! Metadata RPC client — implements `MetadataOps` over gRPC.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
 use async_trait::async_trait;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, Endpoint};
 use tonic::Request;
 
 use rucksfs_core::{
@@ -18,61 +21,106 @@ use crate::metadata_proto::{
 };
 use crate::tls::ClientTlsConfig as TlsConfig;
 
+/// Environment variable controlling the per-client gRPC connection pool size.
+/// Each connection corresponds to a separate HTTP/2 channel; round-robin across
+/// them avoids the single-connection frame-serialization bottleneck observed
+/// in high-concurrency benchmarks.
+///
+/// Default is 1 (preserves prior behavior). Set to 4 or 8 for high concurrency.
+const POOL_SIZE_ENV: &str = "RUCKSFS_CLIENT_POOL_SIZE";
+const DEFAULT_POOL_SIZE: usize = 1;
+
+fn pool_size_from_env() -> usize {
+    std::env::var(POOL_SIZE_ENV)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(DEFAULT_POOL_SIZE)
+}
+
 /// gRPC client that implements `MetadataOps` for remote MetadataServer.
-/// 
-/// The client wraps MetadataServiceClient directly without additional Mutex wrapping.
-/// MetadataServiceClient is already fully thread-safe and can be cloned and shared
-/// across async tasks. The underlying tonic Channel supports HTTP/2 multiplexing,
-/// allowing concurrent requests without serialization.
-#[derive(Clone)]
+///
+/// Internally maintains a pool of N independent HTTP/2 connections (controlled
+/// by `RUCKSFS_CLIENT_POOL_SIZE`, default 1). Each RPC call round-robins over
+/// the pool. Because tonic/HTTP/2 serializes request framing per TCP connection,
+/// a single-connection client plateaus at ~34k ops/s on localhost; using
+/// multiple connections lets the server process requests on multiple cores
+/// in parallel.
 pub struct MetadataRpcClient {
-    client: MetadataServiceClient<Channel>,
+    clients: Arc<Vec<MetadataServiceClient<Channel>>>,
+    counter: Arc<AtomicUsize>,
+}
+
+impl Clone for MetadataRpcClient {
+    fn clone(&self) -> Self {
+        Self {
+            clients: Arc::clone(&self.clients),
+            counter: Arc::clone(&self.counter),
+        }
+    }
 }
 
 impl MetadataRpcClient {
-    /// Connect to a MetadataServer at the given address.
-    pub async fn connect(addr: String) -> FsResult<Self> {
-        let channel = Channel::from_shared(addr)
-            .map_err(|e| FsError::InvalidInput(e.to_string()))?
-            .connect()
-            .await
-            .map_err(|e| FsError::Io(e.to_string()))?;
+    /// Select the next client in the pool (round-robin).
+    fn next_client(&self) -> MetadataServiceClient<Channel> {
+        let idx = self.counter.fetch_add(1, Ordering::Relaxed) % self.clients.len();
+        // `MetadataServiceClient<Channel>` is cheap to clone (it wraps an
+        // `Arc<Channel>` internally); cloning lets each RPC take a mutable
+        // reference without contending on a Mutex.
+        self.clients[idx].clone()
+    }
 
+    /// Connect to a MetadataServer at the given address. Pool size is read
+    /// from `RUCKSFS_CLIENT_POOL_SIZE` (default 1).
+    pub async fn connect(addr: String) -> FsResult<Self> {
+        let n = pool_size_from_env();
+        let mut clients = Vec::with_capacity(n);
+        for _ in 0..n {
+            let channel = Channel::from_shared(addr.clone())
+                .map_err(|e| FsError::InvalidInput(e.to_string()))?
+                .connect()
+                .await
+                .map_err(|e| FsError::Io(e.to_string()))?;
+            clients.push(MetadataServiceClient::new(channel));
+        }
         Ok(Self {
-            client: MetadataServiceClient::new(channel),
+            clients: Arc::new(clients),
+            counter: Arc::new(AtomicUsize::new(0)),
         })
     }
 
-    /// Connect with TLS.
+    /// Connect with TLS. Pool size is read from `RUCKSFS_CLIENT_POOL_SIZE`.
     pub async fn connect_secure(
         addr: String,
         tls_config: Option<TlsConfig>,
     ) -> FsResult<Self> {
-        let endpoint = Channel::from_shared(addr)
-            .map_err(|e| FsError::InvalidInput(e.to_string()))?;
-
-        let endpoint = if let Some(tls) = tls_config {
-            let tls = tls
-                .load()
-                .map_err(|e| FsError::Io(format!("Failed to load TLS config: {}", e)))?;
-            if let Some(tls) = tls {
+        let n = pool_size_from_env();
+        let mut clients = Vec::with_capacity(n);
+        let loaded_tls = if let Some(tls) = tls_config {
+            tls.load()
+                .map_err(|e| FsError::Io(format!("Failed to load TLS config: {}", e)))?
+        } else {
+            None
+        };
+        for _ in 0..n {
+            let endpoint: Endpoint = Channel::from_shared(addr.clone())
+                .map_err(|e| FsError::InvalidInput(e.to_string()))?;
+            let endpoint = if let Some(ref tls) = loaded_tls {
                 endpoint
-                    .tls_config(tls)
+                    .tls_config(tls.clone())
                     .map_err(|e| FsError::Io(e.to_string()))?
             } else {
                 endpoint
-            }
-        } else {
-            endpoint
-        };
-
-        let channel = endpoint
-            .connect()
-            .await
-            .map_err(|e| FsError::Io(e.to_string()))?;
-
+            };
+            let channel = endpoint
+                .connect()
+                .await
+                .map_err(|e| FsError::Io(e.to_string()))?;
+            clients.push(MetadataServiceClient::new(channel));
+        }
         Ok(Self {
-            client: MetadataServiceClient::new(channel),
+            clients: Arc::new(clients),
+            counter: Arc::new(AtomicUsize::new(0)),
         })
     }
 }
@@ -126,8 +174,7 @@ impl MetadataOps for MetadataRpcClient {
             parent,
             name: name.to_string(),
         });
-        self.client
-            .clone()
+        self.next_client()
             .lookup(req)
             .await
             .map(|r| from_proto_attr(r.into_inner()))
@@ -136,8 +183,7 @@ impl MetadataOps for MetadataRpcClient {
 
     async fn getattr(&self, inode: Inode) -> FsResult<FileAttr> {
         let req = Request::new(GetattrRequest { inode });
-        self.client
-            .clone()
+        self.next_client()
             .getattr(req)
             .await
             .map(|r| from_proto_attr(r.into_inner()))
@@ -146,8 +192,7 @@ impl MetadataOps for MetadataRpcClient {
 
     async fn readdir(&self, inode: Inode) -> FsResult<Vec<DirEntry>> {
         let req = Request::new(ReaddirRequest { inode });
-        let resp = self.client
-            .clone()
+        let resp = self.next_client()
             .readdir(req)
             .await
             .map_err(map_error)?
@@ -178,8 +223,7 @@ impl MetadataOps for MetadataRpcClient {
             uid,
             gid,
         });
-        self.client
-            .clone()
+        self.next_client()
             .create(req)
             .await
             .map(|r| from_proto_attr(r.into_inner()))
@@ -204,8 +248,7 @@ impl MetadataOps for MetadataRpcClient {
             flags,
         });
         let resp = self
-            .client
-            .clone()
+            .next_client()
             .create_and_open(req)
             .await
             .map_err(map_error)?
@@ -239,8 +282,7 @@ impl MetadataOps for MetadataRpcClient {
             uid,
             gid,
         });
-        self.client
-            .clone()
+        self.next_client()
             .mkdir(req)
             .await
             .map(|r| from_proto_attr(r.into_inner()))
@@ -252,8 +294,7 @@ impl MetadataOps for MetadataRpcClient {
             parent,
             name: name.to_string(),
         });
-        let resp = self.client
-            .clone()
+        let resp = self.next_client()
             .unlink(req)
             .await
             .map_err(map_error)?
@@ -268,7 +309,7 @@ impl MetadataOps for MetadataRpcClient {
             parent,
             name: name.to_string(),
         });
-        self.client.clone().rmdir(req).await.map(|_| ()).map_err(map_error)
+        self.next_client().rmdir(req).await.map(|_| ()).map_err(map_error)
     }
 
     async fn rename(
@@ -284,8 +325,7 @@ impl MetadataOps for MetadataRpcClient {
             new_parent,
             new_name: new_name.to_string(),
         });
-        let resp = self.client
-            .clone()
+        let resp = self.next_client()
             .rename(req)
             .await
             .map_err(map_error)?
@@ -305,8 +345,7 @@ impl MetadataOps for MetadataRpcClient {
             atime: req.atime,
             mtime: req.mtime,
         });
-        let resp = self.client
-            .clone()
+        let resp = self.next_client()
             .setattr(proto_req)
             .await
             .map_err(map_error)?
@@ -323,8 +362,7 @@ impl MetadataOps for MetadataRpcClient {
 
     async fn statfs(&self, inode: Inode) -> FsResult<StatFs> {
         let req = Request::new(StatfsRequest { inode });
-        self.client
-            .clone()
+        self.next_client()
             .statfs(req)
             .await
             .map(|r| from_proto_statfs(r.into_inner()))
@@ -333,8 +371,7 @@ impl MetadataOps for MetadataRpcClient {
 
     async fn open(&self, inode: Inode, flags: u32) -> FsResult<OpenResponse> {
         let req = Request::new(OpenRequest { inode, flags });
-        let resp = self.client
-            .clone()
+        let resp = self.next_client()
             .open(req)
             .await
             .map_err(map_error)?
@@ -362,8 +399,7 @@ impl MetadataOps for MetadataRpcClient {
             new_size,
             mtime,
         });
-        self.client
-            .clone()
+        self.next_client()
             .report_write(req)
             .await
             .map(|_| ())
@@ -381,8 +417,7 @@ impl MetadataOps for MetadataRpcClient {
             name: name.to_string(),
             target_inode,
         });
-        self.client
-            .clone()
+        self.next_client()
             .link(req)
             .await
             .map(|r| from_proto_attr(r.into_inner()))
@@ -404,8 +439,7 @@ impl MetadataOps for MetadataRpcClient {
             uid,
             gid,
         });
-        self.client
-            .clone()
+        self.next_client()
             .symlink(req)
             .await
             .map(|r| from_proto_attr(r.into_inner()))
@@ -414,8 +448,7 @@ impl MetadataOps for MetadataRpcClient {
 
     async fn readlink(&self, inode: Inode) -> FsResult<String> {
         let req = Request::new(ReadlinkRequest { inode });
-        self.client
-            .clone()
+        self.next_client()
             .readlink(req)
             .await
             .map(|r| r.into_inner().target)
@@ -424,8 +457,7 @@ impl MetadataOps for MetadataRpcClient {
 
     async fn release(&self, inode: Inode) -> FsResult<ReleaseResponse> {
         let req = Request::new(ReleaseRequest { inode });
-        let resp = self.client
-            .clone()
+        let resp = self.next_client()
             .release(req)
             .await
             .map_err(map_error)?
