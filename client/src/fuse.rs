@@ -17,7 +17,10 @@ use fuse3::{Errno, MountOptions, Result as Fuse3Result};
 use rucksfs_core::{FsError, FsResult, SetAttrRequest, VfsOps};
 
 #[cfg(target_os = "linux")]
-const TTL: Duration = Duration::from_secs(1);
+// bench-v3: TTL=0 禁用内核 VFS 对属性/目录项的缓存，使每次 stat/lookup 都到达 MDS。
+// 这一配置用于测量 MDS 纯路径性能，不是生产默认值——生产部署可酌情放开至 1 秒以降低
+// 重复访问场景下的 RPC 次数。详见 docs/thesis-template/BENCHMARK_RATIONALE.md §1.
+const TTL: Duration = Duration::from_secs(0);
 
 /// Async FUSE filesystem implementation backed by fuse3.
 ///
