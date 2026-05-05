@@ -1,4 +1,5 @@
 /target/
+/target-*/
 /.idea/
 .vscode/
 *.swp
@@ -35,6 +36,7 @@ docs/thesis-template/*.fdb_latexmk
 docs/thesis-template/*.fls
 docs/thesis-template/*.out
 docs/thesis-template/*.pdf
+!docs/thesis-template/main.pdf
 docs/thesis-template/*.run.xml
 docs/thesis-template/*.toc
 docs/thesis-template/*.xdv
@@ -58,3 +60,13 @@ infra/tencent-grpc-direct/*.tfstate.*
 infra/tencent-grpc-direct/.terraform/
 infra/tencent-grpc-direct/.terraform.lock.hcl
 infra/tencent-grpc-direct/terraform.tfvars
+
+# bench-v3 cluster (same pattern as tencent-bench)
+infra/tencent-bench-v3/*.pem
+infra/tencent-bench-v3/*.tfstate
+infra/tencent-bench-v3/*.tfstate.*
+infra/tencent-bench-v3/.terraform/
+infra/tencent-bench-v3/.terraform.lock.hcl
+infra/tencent-bench-v3/terraform.tfvars
+infra/tencent-bench-v3/*.tfplan
+infra/tencent-bench-v3/*.out
