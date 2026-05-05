@@ -6,11 +6,11 @@
 \subsection{客户端路由与语义编排}
 \label{sec:vfscore}
 
-客户端内部的协调层是 \texttt{VfsCore}。它一方面对 FUSE 暴露统一的 \texttt{VfsOps} 接口，另一方面同时持有 \texttt{MetadataOps} 和 \texttt{DataOps}，负责决定一次请求应该落到哪个服务、是否需要跨服务串联，以及结果返回之后是否还需要补充后续动作。\texttt{VfsCore} 不是一个简单的 RPC 转发器，而是整条路径的编排者。
+客户端内部的协调层是 \texttt{VfsCore}。它对 FUSE 暴露统一的 \texttt{VfsOps} 接口，同时持有 \texttt{MetadataOps} 和 \texttt{DataOps} 两侧的句柄，负责决定一次请求应该落到哪个服务、是否需要跨服务串联，以及结果返回之后是否还需要补充后续动作。相对于单纯的 RPC 转发器，它更接近整条路径上的编排层。
 
 请求大致分为三类。第一类是纯元数据操作——\texttt{lookup}、\texttt{create}、\texttt{mkdir}、\texttt{unlink}、\texttt{rmdir}、\texttt{rename}、\texttt{readdir}、\texttt{getattr}、\texttt{setattr}——直接交给 MetadataServer。第二类是纯数据操作——\texttt{read}、\texttt{write}、\texttt{truncate}、\texttt{fsync}——在文件已经打开的情况下可以按句柄中缓存的 \texttt{server\_id} 直接路由到对应的 DataServer。第三类是跨服务的复合操作，例如 \texttt{open} 需要先从 MetadataServer 获取 \texttt{DataLocation}；\texttt{release}、覆盖式 \texttt{rename} 以及可能触发截断的 \texttt{setattr} 则需要在元数据结果返回后由客户端补充一个数据侧的清理或截断请求。
 
-这样安排的意图较为明确：仅涉及命名空间和 inode 状态的语义都约束在 MetadataServer 内；真正写入字节、截断数据、清理数据的工作都留在 DataServer 内；跨两侧的复合语义由客户端显式协调。其结果是三者的边界较为清晰：MetadataServer 负责元数据事务，DataServer 负责字节读写，\texttt{VfsCore} 把两侧的结果组合成用户看到的 POSIX 行为。代价是客户端比本地文件系统中通常只做请求转发的客户端更复杂一些，这是分离式架构必须承担的一层成本。
+这样安排的意图较为明确：命名空间和 inode 状态的语义约束在 MetadataServer 内，字节读写、截断、清理的工作留在 DataServer 内，跨两侧的复合语义由客户端显式协调。三者的边界因此较为清晰，客户端充当 MetadataServer 元数据事务和 DataServer 字节读写结果的汇合点，把两侧的结果组合成用户看到的 POSIX 行为。代价是客户端比本地文件系统中通常只做请求转发的客户端更复杂一些，这是分离式架构必须承担的一层成本。
 
 \subsection{DataServer 与原始磁盘后端}
 \label{sec:dataserver}
@@ -23,29 +23,27 @@
 
 这种固定地址映射的好处较为直接：数据路径不需要空闲空间位图、extent 树或块分配器，寻址是常数时间，服务端状态也较为简单。对本文聚焦的“元数据关键路径优化”而言还有一项附加好处——数据侧逻辑越简单，第~\ref{sec:experiments}~章中的性能差异就越容易归因到元数据组织、客户端协调和网络通信上，不会被复杂的块管理逻辑所干扰。
 
-但这里也需要指出当前实现仍有一处短板。每个 inode 都预留 \texttt{max\_file\_size} 大小的逻辑地址空间，当前默认 128\,MiB，在大量小文件场景下空间利用率较低；\texttt{delete\_data} 目前仍为空操作，对象删除后物理空间不会立即回收。之所以保留这套方案，并非因为空间管理不重要，而是本文在工程上有意将这些复杂度推迟到后续扩展中，以换取当前原型在数据路径上的可解释性和实现简洁性。
+但这里也需要指出当前实现仍有一处短板。每个 inode 都预留 \texttt{max\_file\_size} 大小的逻辑地址空间，当前默认 128\,MiB，在大量小文件场景下空间利用率较低；\texttt{delete\_data} 目前仍为空操作，对象删除后物理空间不会立即回收。空间管理本身并非不重要，只是本文在工程上有意把这些复杂度推迟到后续扩展中，用来换取当前原型在数据路径上的可解释性和实现简洁性。
 
 并发方面，写入偏移由调用方指定，不同客户端向同一 inode 的不同偏移写入，不会因 DataServer 内部地址分配而产生额外竞争；\texttt{pread}/\texttt{pwrite} 也保证每次 I/O 以调用为边界完成。若不同写入请求本身覆盖了重叠区域，该情形属于上层应用的并发语义问题，不是 DataServer 需要额外裁决的状态冲突。
 
 \subsection{FUSE 可见语义与缓存策略}
 \label{sec:fuse_semantics}
 
-在用户态文件系统中，许多“性能表现”首先体现为“内核缓存如何看待这个文件系统”。因此在进入实验之前，需要先把 FUSE 层的几项可见语义讲清楚，否则第~\ref{sec:experiments}~章中的数据容易被误读。本文主要控制三项：目录项缓存、属性缓存，以及目录遍历接口的选择。
+在用户态文件系统中，一项操作的可见性能很大程度上取决于内核如何缓存它的元数据。因此在进入实验之前，需要先把 FUSE 层的几项可见语义讲清楚，否则第~\ref{sec:experiments}~章中的数据容易被误读。本文主要控制三项：目录项缓存、属性缓存，以及目录遍历接口的选择。
 
-目录项缓存（entry cache）决定内核认为“名字到 inode”的映射在多长时间内有效。本文在 \texttt{lookup} 响应中设置 1 秒的 entry TTL，以避免目录变更被内核缓存长时间遮蔽。属性缓存（attr cache）决定 \texttt{stat}、\texttt{getattr} 等请求的读放大程度，这里默认同样采用 1 秒 TTL，在一致性和 RPC 次数之间取得折中。目录遍历接口显式启用 \texttt{readdirplus}，让目录遍历在返回目录项的同时附带基本属性，从而省去“先 \texttt{readdir} 再对每个条目逐个 \texttt{getattr}”的往返。
+目录项缓存（entry cache）决定内核认为“名字到 inode”的映射在多长时间内有效。属性缓存（attr cache）决定 \texttt{stat}、\texttt{getattr} 等请求是否需要到达服务端。本文当前默认将两者的 TTL 均设为 0，即每次 \texttt{lookup} 和 \texttt{getattr} 都穿透 FUSE 送到 MetadataServer；这一选择直接服务于第~\ref{sec:experiments}~章的测量目标——将元数据路径的吞吐归因到 MetadataServer 本身，而不是被客户端缓存遮蔽。在真实生产部署下，这两项 TTL 可以按需放宽到秒级，以降低重复查询的 RPC 开销。目录遍历接口显式启用 \texttt{readdirplus}，让目录遍历在返回目录项的同时附带基本属性，从而省去“先 \texttt{readdir} 再对每个条目逐个 \texttt{getattr}”的往返。
 
-除了缓存以外，FUSE 语义中还有两点与分离式架构较为相关。其一，\texttt{open} 在本文实现中不仅产生句柄，还负责把数据路由信息交给客户端。其二，\texttt{fsync} 目前只保证数据侧 \texttt{flush}，元数据依赖 RocksDB 的事务提交和 WAL 持久化，尚未实现严格的双阶段刷写。换言之，本文对 FUSE 的实现并非将内核接口原封不动地映射到远端服务，而是依据元数据面和数据面分离后的职责边界，为每个接口给出一个可落地的语义解释。
+除了缓存以外，FUSE 语义中还有两点与分离式架构较为相关。其一，\texttt{open} 在本文实现中不仅产生句柄，还负责把数据路由信息交给客户端。其二，\texttt{fsync} 目前只保证数据侧 \texttt{flush}，元数据依赖 RocksDB 的事务提交和 WAL 持久化，尚未实现严格的双阶段刷写。换言之，本文在 FUSE 这一层没有把内核接口原封不动地映射到远端服务，而是按元数据面和数据面分离后的职责边界，为每个接口给出了一个可落地的语义解释。
 
 \subsection{gRPC 接口与模块边界}
 \label{sec:grpc}
 
-在这条路径上，gRPC 不只是通信细节，它也决定了“哪些状态由哪个服务直接返回”以及“哪些后续动作由客户端继续协调”，因此接口设计本身也是系统结构的一部分。本文在接口层面遵循两条原则：元数据操作和数据操作严格分离；一次 RPC 尽量返回下一阶段所需的全部信息，避免将简单操作拆成多轮往返。
+gRPC 在这条路径上不仅承担通信，也决定了哪些状态由哪个服务直接返回、哪些后续动作需要客户端继续协调，接口设计因此也是系统结构的一部分。本文在接口层面遵循两条原则：元数据操作和数据操作严格分离；一次 RPC 尽量返回下一阶段所需的全部信息，避免将简单操作拆成多轮往返。
 
-据此，MetadataServer 的接口大体分为四组：命名空间操作（\texttt{Lookup}、\texttt{Create}、\texttt{Rename}、\texttt{Readdir} 等）、属性操作（\texttt{GetAttr}、\texttt{SetAttr}）、句柄相关操作（\texttt{Open}、\texttt{Release}）以及写入后的元数据协调（\texttt{ReportWrite}）。DataServer 的接口则刻意收敛，仅暴露 \texttt{Read}、\texttt{Write}、\texttt{Truncate}、\texttt{DeleteData} 这类直接操作字节内容的调用。这样“谁负责对象语义、谁负责数据内容”在接口层面就被固定下来。
+据此，MetadataServer 的接口按职责分为四类：命名空间操作（\texttt{Lookup}/\texttt{Create}/\texttt{Rename}/\texttt{Readdir} 等）、属性操作（\texttt{GetAttr}/\texttt{SetAttr}）、句柄操作（\texttt{Open}/\texttt{Release}）以及写入后的元数据协调（\texttt{ReportWrite}）。DataServer 的接口则刻意收敛，只暴露 \texttt{Read}/\texttt{Write}/\texttt{Truncate}/\texttt{DeleteData} 等直接操作字节内容的调用。这样在接口层面即可判断“谁负责对象语义、谁负责数据内容”。
 
-消息格式也服务于同一目标。元数据响应通常直接携带完整的 \texttt{FileAttr}、\texttt{DataLocation}、\texttt{purged\_inodes} 或 \texttt{needs\_truncate}，使客户端不必为完成一个上层操作而再发一轮探测 RPC。连接层面，当前原型采用“每客户端单 gRPC 通道、共享 HTTP/2 连接”的形式，主要是为了控制实现复杂度。这显然不是最终形态，但对本文关注的元数据语义验证和原型级性能评估已经足够。
-
-\texttt{VfsCore}、\texttt{RawDiskDataStore}、FUSE 缓存设置以及 gRPC 接口这几部分共同构成了 RucksFS 的跨服务执行路径。第~\ref{sec:design}~章回答的是“单个操作在元数据层如何正确完成”，本章前四节补上的则是“这些操作在完整系统中如何被协调，并最终暴露给内核与应用”。
+消息格式也服务于同一目标。元数据响应通常直接携带完整的 \texttt{FileAttr}、\texttt{DataLocation}、\texttt{purged\_inodes} 或 \texttt{needs\_truncate}，使客户端不必为完成一个上层操作而再发一轮探测 RPC。连接层面，当前原型采用“每客户端单 gRPC 通道、共享 HTTP/2 连接”的形式，主要是为了控制实现复杂度；这并非最终形态，但对本文所关心的元数据语义验证和原型级性能评估已经够用。
 
 \subsection{错误处理与恢复机制}
 \label{sec:error_handling}
@@ -56,7 +54,7 @@
 
 最常见的一类失败是 MetadataServer 内部的事务冲突。对这种情况，本文没有选择把 RocksDB 的底层错误直接抛给用户，而是先在服务端进行有限重试：最多 3 次，采用指数退避；只有重试仍然失败，才以 \texttt{TransactionConflict} 向上返回，再在 FUSE 层映射为 \texttt{EAGAIN}。这样偶发冲突不会直接转化为用户可见错误，错误语义也更为清晰：\texttt{EAGAIN} 表示的是“事务冲突尚未消解”，而不是任意 I/O 异常。
 
-另一类失败来自普通的 RPC 或 I/O 调用。当前原型对此选择了较为保守的做法：客户端按 gRPC 返回的错误状态向上报相应的文件系统错误，不会在数据路径上维护待确认写队列，也没有实现基于 \texttt{inode + offset} 的幂等重发。也就是说，当前实现只做了“事务冲突自动重试”，并未实现“任意跨服务失败都自动恢复”。这一边界必须讲清楚，以免读者误以为系统已经具备更强的故障屏蔽能力。
+另一类失败来自普通的 RPC 或 I/O 调用。当前原型对此选择了较为保守的做法：客户端按 gRPC 返回的错误状态向上报相应的文件系统错误，不会在数据路径上维护待确认写队列，也没有实现基于 \texttt{inode + offset} 的幂等重发。也就是说，当前实现只做了“事务冲突自动重试”这一项，跨服务失败并不会被自动屏蔽，而是直接向应用暴露。
 
 \subsubsection{服务崩溃后的恢复语义}
 
@@ -68,7 +66,7 @@ DataServer 的崩溃语义更为简单，但也受当前实现边界的约束。
 
 讲完正常路径与故障路径之后，需要明确本文的讨论边界。当前 RucksFS 有意保持“单 MetadataServer + 单默认 DataServer”这条主路径。虽然 \texttt{DataLocation} 和 \texttt{VfsCore::with\_data\_servers()} 已经为多 DataServer 路由预留了接口，但元数据分片、多副本一致性、物理空间回收以及严格的双阶段 \texttt{fsync} 等都尚未实现。
 
-这并非简单意义上的“没做完”，而是本文研究目标的一部分。本文更关心元数据面和数据面分离之后，如何通过键编码、事务控制、客户端协调和增量更新来优化元数据关键路径，而不是构建一个完整的大规模分布式控制面。因此第~\ref{sec:experiments}~章的实验结果也主要在当前边界内验证这套设计的正确性和性能特征，并不声称系统已经覆盖多副本容错、跨节点故障转移或空间回收等更大范围的工程能力。
+本文的研究重点是元数据面和数据面分离之后，如何通过键编码、事务控制、客户端协调和增量更新来优化元数据关键路径，而不是构建一套完整的大规模分布式控制面。相应地，第~\ref{sec:experiments}~章的实验也主要在当前边界内验证这套设计的正确性和性能特征，不声称系统已经覆盖多副本容错、跨节点故障转移或空间回收等更大范围的工程能力。
 
 \subsection{本章小结}
 
