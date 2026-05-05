@@ -1,0 +1,614 @@
+[23:44:01] ========================================
+[23:44:01] Benchmark Orchestrator v3 (MDS-path, client caches disabled)
+[23:44:01] Server:  43.154.177.229 (10.0.1.120)
+[23:44:01] Clients: 64 (ranks_per_client=4, total_np=256)
+[23:44:01] SUTs:    rucksfs-delta rucksfs-nodelta
+[23:44:01] Modes:   hard
+[23:44:01] Results: ./results-v3-n64-r4
+[23:44:01] NFS opts: vers=4.2,noac
+[23:44:01] ========================================
+[23:44:01] ===== SUT: rucksfs-delta =====
+[23:44:01] teardown_all: cleaning server + 64 clients
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.188.82' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.214.200' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.79.151' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.14.209' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.28.34' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.11.25' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.118.230' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.39.16' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.244.13' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.124.225' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.33.120.178' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.113.140' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.194.59' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.63.164' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.240.173' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.139.151' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.25.74' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.76.109' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.185.71' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.233.119' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.185.150' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.61.116' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.237.154' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.155.200' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.134.215.197' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.120.207' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.51.146' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.210.60' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.75.231' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.88.131' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.124.48' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.107.68' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.136.21' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.27.113' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.93.202' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.219.164' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.81.4' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.168.198' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.208.117' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.212.83' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.15.81' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.180.140' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.130.71' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.37.157' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.59.210' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.5.213' (ECDSA) to the list of known hosts.
+Warning: Permanently added '124.156.164.137' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.62.248' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.39.193' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.228.60' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.56.166' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.67.65' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.105.155' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.228.24' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.87.126' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.34.35' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.86.131' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.28.115' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.188.33' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.157.227' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.190.240' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.133.154' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.83.30' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.147.152' (ECDSA) to the list of known hosts.
+[23:44:07] teardown_all: done
+[23:44:07]   starting rucksfs-delta on server
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+[23:44:08]   waiting for server ports: 8001 8002
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+[23:44:08]   mounting rucksfs-delta on 64 clients
+Warning: Permanently added '101.32.180.140' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.27.113' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.185.71' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.185.150' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.244.13' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.228.60' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.133.154' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.28.34' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.25.74' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.130.71' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.105.155' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.124.225' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.219.164' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.75.231' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.62.248' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.214.200' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.39.16' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.136.21' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.134.215.197' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.113.140' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.157.227' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.87.126' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.188.82' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.237.154' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.93.202' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.212.83' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.188.33' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.155.200' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.190.240' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.210.60' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.37.157' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.14.209' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.139.151' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.56.166' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.61.116' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.67.65' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.63.164' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.5.213' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.59.210' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.33.120.178' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.51.146' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.76.109' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.240.173' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.208.117' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.168.198' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.88.131' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.233.119' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.120.207' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.124.48' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.194.59' (ECDSA) to the list of known hosts.
+Warning: Permanently added '124.156.164.137' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.28.115' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.118.230' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.39.193' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.15.81' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.11.25' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.34.35' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.147.152' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.79.151' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.228.24' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.107.68' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.86.131' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.81.4' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.83.30' (ECDSA) to the list of known hosts.
+[23:44:10]   verifying mount on all clients
+[23:44:25]   all 64 clients mounted OK
+[23:44:25] --- rucksfs-delta / hard ---
+[23:44:25]   dropping caches on server + all clients
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.61.116' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.37.157' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.228.60' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.237.154' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.233.119' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.188.82' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.136.21' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.214.200' (ECDSA) to the list of known hosts.
+Warning: Permanently added '124.156.164.137' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.210.60' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.157.227' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.124.48' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.5.213' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.76.109' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.34.35' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.28.34' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.120.207' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.56.166' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.79.151' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.39.193' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.134.215.197' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.133.154' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.228.24' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.62.248' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.11.25' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.28.115' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.107.68' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.130.71' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.14.209' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.219.164' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.75.231' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.51.146' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.105.155' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.27.113' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.93.202' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.212.83' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.208.117' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.81.4' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.180.140' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.240.173' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.67.65' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.83.30' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.185.71' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.124.225' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.147.152' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.87.126' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.244.13' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.139.151' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.63.164' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.86.131' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.155.200' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.15.81' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.25.74' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.59.210' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.39.16' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.113.140' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.88.131' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.185.150' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.118.230' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.190.240' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.33.120.178' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.168.198' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.188.33' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.194.59' (ECDSA) to the list of known hosts.
+[23:44:25]   mdtest: sut=rucksfs-delta mode=hard np=256 (clients=64 × ranks_per_client=4) files_per_rank=2000
+Warning: Permanently added '43.132.228.60' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+[23:44:26]   output -> ./results-v3-n64-r4/rucksfs-delta_hard_np256.txt
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+-- started at 05/05/2026 23:44:30 --
+
+mdtest-4.1.0+dev was launched with 256 total task(s) on 64 node(s)
+Command line used: mdtest '-d' '/mnt/sut/bench' '-n' '2000' '-F' '-C' '-T' '-r' '-i' '3'
+Nodemap: 1111000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+Path                : /mnt/sut/bench
+FS                  : 3.8 GiB   Used FS: 50.0%   Inodes: 1.0 Mi   Used Inodes: 0.1%
+256 tasks, 512000 files
+
+SUMMARY rate (in ops/sec): (of 3 iterations)
+   Operation                     Max            Min           Mean        Std Dev
+   ---------                     ---            ---           ----        -------
+   File creation               30232.802      29468.123      29733.634        432.585
+   File stat                   40106.046      39482.590      39718.652        338.158
+   File read                       0.000          0.000          0.000          0.000
+   File removal                28124.925      27669.739      27847.454        243.438
+   Tree creation                  19.891         17.612         18.814          1.144
+   Tree removal                    0.126          0.110          0.119          0.008
+-- finished at 05/05/2026 23:47:24 --
+
+[23:47:24] teardown_all: cleaning server + 64 clients
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+ 107790 107918Warning: Permanently added '43.132.244.13' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.61.116' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.188.82' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.233.119' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.11.25' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.105.155' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.37.157' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.219.164' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.237.154' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.134.215.197' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.88.131' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.33.120.178' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.194.59' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.113.140' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.87.126' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.185.150' (ECDSA) to the list of known hosts.
+Warning: Permanently added '124.156.164.137' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.28.34' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.5.213' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.124.48' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.136.21' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.133.154' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.212.83' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.157.227' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.62.248' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.63.164' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.39.16' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.67.65' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.27.113' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.208.117' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.120.207' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.124.225' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.25.74' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.168.198' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.93.202' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.59.210' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.81.4' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.180.140' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.83.30' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.210.60' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.188.33' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.14.209' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.214.200' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.185.71' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.39.193' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.75.231' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.56.166' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.190.240' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.51.146' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.107.68' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.139.151' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.15.81' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.228.24' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.130.71' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.147.152' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.76.109' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.118.230' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.155.200' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.28.115' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.86.131' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.240.173' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.79.151' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.34.35' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.228.60' (ECDSA) to the list of known hosts.
+[23:47:30] teardown_all: done
+[23:47:30] ===== SUT: rucksfs-nodelta =====
+[23:47:30] teardown_all: cleaning server + 64 clients
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.157.227' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.185.150' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.62.248' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.28.34' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.237.154' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.185.71' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.75.231' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.180.140' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.59.210' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.87.126' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.208.117' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.244.13' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.33.120.178' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.139.151' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.130.71' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.219.164' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.233.119' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.105.155' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.81.4' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.124.225' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.93.202' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.118.230' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.51.146' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.39.16' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.25.74' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.188.33' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.61.116' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.190.240' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.133.154' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.37.157' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.63.164' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.27.113' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.83.30' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.228.60' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.188.82' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.79.151' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.39.193' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.214.200' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.212.83' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.113.140' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.194.59' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.136.21' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.124.48' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.147.152' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.107.68' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.134.215.197' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.120.207' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.240.173' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.76.109' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.210.60' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.86.131' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.14.209' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.228.24' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.28.115' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.168.198' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.5.213' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.88.131' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.155.200' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.67.65' (ECDSA) to the list of known hosts.
+Warning: Permanently added '124.156.164.137' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.11.25' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.34.35' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.15.81' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.56.166' (ECDSA) to the list of known hosts.
+[23:47:37] teardown_all: done
+[23:47:37]   starting rucksfs-nodelta on server
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+[23:47:37]   waiting for server ports: 8001 8002
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+[23:47:37]   mounting rucksfs-nodelta on 64 clients
+Warning: Permanently added '43.154.237.154' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.33.120.178' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.233.119' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.185.71' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.105.155' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.168.198' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.133.154' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.194.59' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.63.164' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.61.116' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.75.231' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.244.13' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.134.215.197' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.86.131' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.87.126' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.11.25' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.39.193' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.219.164' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.59.210' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.93.202' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.113.140' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.27.113' (ECDSA) to the list of known hosts.
+Warning: Permanently added '124.156.164.137' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.214.200' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.15.81' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.5.213' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.124.225' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.228.60' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.62.248' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.212.83' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.185.150' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.190.240' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.81.4' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.37.157' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.51.146' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.139.151' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.130.71' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.76.109' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.39.16' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.120.207' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.210.60' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.28.34' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.188.82' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.180.140' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.83.30' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.157.227' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.136.21' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.14.209' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.124.48' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.34.35' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.25.74' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.208.117' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.79.151' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.88.131' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.67.65' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.28.115' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.240.173' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.56.166' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.188.33' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.147.152' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.107.68' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.155.200' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.118.230' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.228.24' (ECDSA) to the list of known hosts.
+[23:47:40]   verifying mount on all clients
+[23:47:57]   all 64 clients mounted OK
+[23:47:57] --- rucksfs-nodelta / hard ---
+[23:47:57]   dropping caches on server + all clients
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.37.157' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.244.13' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.134.215.197' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.113.140' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.39.16' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.124.225' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.194.59' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.62.248' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.51.146' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.124.48' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.219.164' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.136.21' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.118.230' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.214.200' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.155.200' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.61.116' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.28.115' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.185.150' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.180.140' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.157.227' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.28.34' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.139.151' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.79.151' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.188.82' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.86.131' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.210.60' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.212.83' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.237.154' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.27.113' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.185.71' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.33.120.178' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.25.74' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.168.198' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.76.109' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.88.131' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.15.81' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.188.33' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.120.207' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.105.155' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.228.60' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.233.119' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.87.126' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.133.154' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.130.71' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.75.231' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.190.240' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.93.202' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.59.210' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.11.25' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.147.152' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.81.4' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.107.68' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.56.166' (ECDSA) to the list of known hosts.
+Warning: Permanently added '124.156.164.137' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.67.65' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.63.164' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.208.117' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.5.213' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.240.173' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.39.193' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.14.209' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.34.35' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.83.30' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.228.24' (ECDSA) to the list of known hosts.
+[23:47:57]   mdtest: sut=rucksfs-nodelta mode=hard np=256 (clients=64 × ranks_per_client=4) files_per_rank=2000
+Warning: Permanently added '43.132.228.60' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+[23:47:58]   output -> ./results-v3-n64-r4/rucksfs-nodelta_hard_np256.txt
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+-- started at 05/05/2026 23:48:02 --
+
+mdtest-4.1.0+dev was launched with 256 total task(s) on 64 node(s)
+Command line used: mdtest '-d' '/mnt/sut/bench' '-n' '2000' '-F' '-C' '-T' '-r' '-i' '3'
+Nodemap: 1111000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+Path                : /mnt/sut/bench
+FS                  : 3.8 GiB   Used FS: 50.0%   Inodes: 1.0 Mi   Used Inodes: 0.1%
+256 tasks, 512000 files
+
+SUMMARY rate (in ops/sec): (of 3 iterations)
+   Operation                     Max            Min           Mean        Std Dev
+   ---------                     ---            ---           ----        -------
+   File creation               12384.852      11545.135      11985.203        421.315
+   File stat                   39690.052      39442.192      39550.541        126.834
+   File read                       0.000          0.000          0.000          0.000
+   File removal                12956.126      11943.626      12520.999        521.023
+   Tree creation                  21.790         18.835         20.371          1.481
+   Tree removal                    5.401          5.142          5.296          0.136
+-- finished at 05/05/2026 23:52:55 --
+
+[23:52:55] teardown_all: cleaning server + 64 clients
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+ 109286 109414Warning: Permanently added '43.132.228.60' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.113.140' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.214.200' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.87.126' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.93.202' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.63.164' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.188.82' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.27.113' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.62.248' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.157.227' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.28.34' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.88.131' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.185.150' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.15.81' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.33.120.178' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.124.225' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.155.200' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.107.68' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.185.71' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.194.59' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.134.215.197' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.190.240' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.86.131' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.208.117' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.136.21' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.56.166' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.120.207' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.233.119' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.105.155' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.39.16' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.124.48' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.37.157' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.139.151' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.75.231' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.168.198' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.219.164' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.76.109' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.210.60' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.51.146' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.180.140' (ECDSA) to the list of known hosts.
+Warning: Permanently added '150.109.39.193' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.188.33' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.11.25' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.25.74' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.61.116' (ECDSA) to the list of known hosts.
+Warning: Permanently added '124.156.164.137' (ECDSA) to the list of known hosts.
+Warning: Permanently added '129.226.59.210' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.79.151' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.237.154' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.133.154' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.228.24' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.147.152' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.83.30' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.28.115' (ECDSA) to the list of known hosts.
+Warning: Permanently added '119.28.14.209' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.34.35' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.81.4' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.128.5.213' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.240.173' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.155.118.230' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.130.71' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.129.212.83' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.135.67.65' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.244.13' (ECDSA) to the list of known hosts.
+[23:53:01] teardown_all: done
+[23:53:01] summary written to ./results-v3-n64-r4/summary.csv
+sut,mode,np,file_creation,file_creation_std,file_stat,file_stat_std,file_removal,file_removal_std
+rucksfs-delta,hard,256,29733.634,432.585,39718.652,338.158,27847.454,243.438
+rucksfs-nodelta,hard,256,11985.203,421.315,39550.541,126.834,12520.999,521.023
+[23:53:01] ALL DONE

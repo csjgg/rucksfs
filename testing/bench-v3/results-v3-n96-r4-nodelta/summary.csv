@@ -1,0 +1,2 @@
+sut,mode,np,file_creation,file_creation_std,file_stat,file_stat_std,file_removal,file_removal_std
+rucksfs-nodelta,hard,384,12854.966,56.864,49745.527,3445.772,12500.369,108.841

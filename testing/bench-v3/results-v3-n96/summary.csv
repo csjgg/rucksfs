@@ -1,0 +1,5 @@
+sut,mode,np,file_creation,file_creation_std,file_stat,file_stat_std,file_removal,file_removal_std
+rucksfs-delta,easy,96,20526.803,66.791,25759.745,369.121,21591.757,13.053
+rucksfs-delta,hard,96,20574.089,55.868,25742.508,242.566,21673.024,51.814
+rucksfs-nodelta,easy,96,20531.738,69.793,25933.740,55.149,21550.410,37.842
+rucksfs-nodelta,hard,96,20479.262,92.218,25868.537,35.010,21310.677,50.281

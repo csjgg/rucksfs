@@ -1,0 +1,22 @@
+Warning: Permanently added '43.132.228.60' (ECDSA) to the list of known hosts.
+[VM-1-110-ubuntu:35893] plm:rsh: Warning: setpgid(35905,35905) failed in parent with errno=Permission denied(13)
+-- started at 05/05/2026 19:45:00 --
+
+mdtest-4.1.0+dev was launched with 32 total task(s) on 32 node(s)
+Command line used: mdtest '-d' '/mnt/sut/bench' '-n' '2000' '-F' '-C' '-T' '-r' '-u' '-i' '3'
+Nodemap: 10000000000000000000000000000000
+Path                : /mnt/sut/bench
+FS                  : 196.7 GiB   Used FS: 4.0%   Inodes: 12.5 Mi   Used Inodes: 0.8%
+32 tasks, 64000 files
+
+SUMMARY rate (in ops/sec): (of 3 iterations)
+   Operation                     Max            Min           Mean        Std Dev
+   ---------                     ---            ---           ----        -------
+   File creation                6476.459       6412.157       6445.229         32.191
+   File stat                   26756.613      26269.245      26485.099        248.406
+   File read                       0.000          0.000          0.000          0.000
+   File removal                 5866.987       5805.655       5830.485         32.289
+   Tree creation                  50.002         43.135         47.489          3.786
+   Tree removal                  119.817        103.853        113.173          8.312
+-- finished at 05/05/2026 19:46:11 --
+

@@ -1,0 +1,3 @@
+sut,mode,np,file_creation,file_creation_std,file_stat,file_stat_std,file_removal,file_removal_std
+nfs,easy,2,1883.612,9.903,533089.851,38986.486,1896.276,31.326
+nfs,hard,2,1164.988,970.200,514516.324,63542.274,1871.742,79.065

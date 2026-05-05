@@ -1,0 +1,92 @@
+[23:23:47] ========================================
+[23:23:47] Benchmark Orchestrator v3 (MDS-path, client caches disabled)
+[23:23:47] Server:  43.154.177.229 (10.0.1.120)
+[23:23:47] Clients: 2 (ranks_per_client=1, total_np=2)
+[23:23:47] SUTs:    nfs
+[23:23:47] Modes:   hard easy
+[23:23:47] Results: ./results-v3-n2-nfs-ac
+[23:23:47] NFS opts: vers=4.2
+[23:23:47] ========================================
+[23:23:47] ===== SUT: nfs =====
+[23:23:47] teardown_all: cleaning server + 2 clients
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.228.60' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.185.71' (ECDSA) to the list of known hosts.
+[23:23:53] teardown_all: done
+[23:23:53]   starting nfs on server
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+[23:23:53]   mounting nfs on 2 clients
+Warning: Permanently added '43.132.228.60' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.185.71' (ECDSA) to the list of known hosts.
+[23:23:56]   verifying mount on all clients
+[23:23:57]   all 2 clients mounted OK
+[23:23:57] --- nfs / hard ---
+[23:23:57]   dropping caches on server + all clients
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.185.71' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.228.60' (ECDSA) to the list of known hosts.
+[23:23:57]   mdtest: sut=nfs mode=hard np=2 (clients=2 × ranks_per_client=1) files_per_rank=2000
+Warning: Permanently added '43.132.228.60' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+[23:23:58]   output -> ./results-v3-n2-nfs-ac/nfs_hard_np2.txt
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+-- started at 05/05/2026 23:24:00 --
+
+mdtest-4.1.0+dev was launched with 2 total task(s) on 2 node(s)
+Command line used: mdtest '-d' '/mnt/sut/bench' '-n' '2000' '-F' '-C' '-T' '-r' '-i' '3'
+Nodemap: 10
+Path                : /mnt/sut/bench
+FS                  : 196.7 GiB   Used FS: 4.4%   Inodes: 12.5 Mi   Used Inodes: 0.8%
+2 tasks, 4000 files
+
+SUMMARY rate (in ops/sec): (of 3 iterations)
+   Operation                     Max            Min           Mean        Std Dev
+   ---------                     ---            ---           ----        -------
+   File creation                1742.610         44.881       1164.988        970.200
+   File stat                  552409.074     441157.402     514516.324      63542.274
+   File read                       0.000          0.000          0.000          0.000
+   File removal                 1939.054       1784.671       1871.742         79.065
+   Tree creation                1168.004       1033.080       1106.522         68.253
+   Tree removal                 1472.719       1212.227       1380.771        146.166
+-- finished at 05/05/2026 23:25:41 --
+
+[23:25:41] --- nfs / easy ---
+[23:25:41]   dropping caches on server + all clients
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.228.60' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.185.71' (ECDSA) to the list of known hosts.
+[23:25:42]   mdtest: sut=nfs mode=easy np=2 (clients=2 × ranks_per_client=1) files_per_rank=2000
+Warning: Permanently added '43.132.228.60' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+[23:25:43]   output -> ./results-v3-n2-nfs-ac/nfs_easy_np2.txt
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+-- started at 05/05/2026 23:25:44 --
+
+mdtest-4.1.0+dev was launched with 2 total task(s) on 2 node(s)
+Command line used: mdtest '-d' '/mnt/sut/bench' '-n' '2000' '-F' '-C' '-T' '-r' '-u' '-i' '3'
+Nodemap: 10
+Path                : /mnt/sut/bench
+FS                  : 196.7 GiB   Used FS: 4.4%   Inodes: 12.5 Mi   Used Inodes: 0.8%
+2 tasks, 4000 files
+
+SUMMARY rate (in ops/sec): (of 3 iterations)
+   Operation                     Max            Min           Mean        Std Dev
+   ---------                     ---            ---           ----        -------
+   File creation                1895.042       1877.631       1883.612          9.903
+   File stat                  559669.613     488334.381     533089.851      38986.486
+   File read                       0.000          0.000          0.000          0.000
+   File removal                 1927.476       1864.825       1896.276         31.326
+   Tree creation                 654.440        485.452        548.654         92.192
+   Tree removal                  814.428        657.517        712.887         88.057
+-- finished at 05/05/2026 23:25:58 --
+
+[23:25:58] teardown_all: cleaning server + 2 clients
+Warning: Permanently added '43.154.177.229' (ECDSA) to the list of known hosts.
+Warning: Permanently added '43.132.228.60' (ECDSA) to the list of known hosts.
+Warning: Permanently added '101.32.185.71' (ECDSA) to the list of known hosts.
+[23:27:34] teardown_all: done
+[23:27:34] summary written to ./results-v3-n2-nfs-ac/summary.csv
+sut,mode,np,file_creation,file_creation_std,file_stat,file_stat_std,file_removal,file_removal_std
+nfs,easy,2,1883.612,9.903,533089.851,38986.486,1896.276,31.326
+nfs,hard,2,1164.988,970.200,514516.324,63542.274,1871.742,79.065
+[23:27:34] ALL DONE
