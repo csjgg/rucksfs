@@ -1,16 +1,14 @@
 \section{绪\hspace{1em}论}
 
-文件系统的元数据管理（inode 属性的维护、目录项的组织以及文件操作的事务性保证）是高并发场景下吞吐量的主要瓶颈之一。传统 B+ 树引擎在面对每秒数万次的小文件创建时，就地修改带来的随机 I/O 和目录锁串行化会明显拖累整体吞吐。基于 LSM-tree 的键值存储用顺序写入代替随机写入，为该问题提供了一条可行的替代路线。
+大规模存储系统中，\texttt{stat}、\texttt{open}、\texttt{readdir} 等元数据操作占到文件系统 I/O 总数的 60\%--80\%\cite{ren2013tablefs}，元数据路径的组织方式在很大程度上决定了系统整体吞吐。传统文件系统用 B+ 树及其变体维护目录项和 inode 索引，操作粒度是磁盘页——即使只改动一条目录项也要读出整页、修改后再写回；在高并发小文件场景下，这种就地修改还会与目录级锁竞争叠加，写放大与并发受限两个问题同时出现。基于 LSM-tree 的键值（KV）存储把操作粒度从页降到单条记录，并以顺序写入代替随机写入，为该问题提供了另一条可行路径。
 
 \subsection{课题背景、目的与意义}
 
 \subsubsection{研究背景}
 
-大规模模型训练、容器化微服务和云端数据湖等场景有一个共同特征：它们产生并消费海量小文件。一次分布式训练作业可能在 checkpoint 阶段写出数十亿个参数分片；Kubernetes 集群中的 Pod 在启动过程中需要创建和读取大量配置文件与临时卷。百度沧海存储团队在 Mantle\cite{li2025mantle}中给出了一组直观的数据：其云对象存储管理的文件对象数已达万亿量级，元数据请求规模每年仍有数倍增长。当文件数量攀升至这一量级时，系统的性能瓶颈通常不在数据传输带宽，而在元数据路径上。Ren 和 Gibson\cite{ren2013tablefs}的测量表明，\texttt{stat}、\texttt{open}、\texttt{readdir} 等元数据操作占文件系统全部 I/O 操作的 60\%--80\%。单个热点目录下的文件数一旦达到百万级，元数据查询与更新的延迟将直接限制系统吞吐的上限。
+大规模模型训练、容器化微服务和云端数据湖等场景有一个共同特征：它们产生并消费海量小文件。一次分布式训练作业可能在 checkpoint 阶段写出数十亿个参数分片；Kubernetes 集群的 Pod 在启动过程中需要创建和读取大量配置文件与临时卷。百度沧海存储团队在 Mantle\cite{li2025mantle} 中给出了一组具体的数据：其云对象存储管理的文件对象数已达万亿量级，元数据请求规模每年仍有数倍增长。在此类海量小文件负载下，系统性能瓶颈通常不在数据传输带宽，而在元数据路径上。Ren 和 Gibson\cite{ren2013tablefs} 的测量表明，\texttt{stat}、\texttt{open}、\texttt{readdir} 等元数据操作占文件系统全部 I/O 操作的 60\%--80\%。单个热点目录下的文件数一旦达到百万级，元数据查询与更新的延迟会直接压低系统吞吐上限。
 
-现有的本地文件系统（ext4、XFS）采用 B+ 树或其变体（如 ext4 的 H-tree）组织目录项和 inode 索引。为了说明这些传统方案在高频元数据写入下为什么难以扩展，下面以最简单的 \texttt{create("/mnt/dir/newfile")} 为例，分析该操作在 ext4 上所产生的磁盘写入。
-
-这样一次文件创建操作在 ext4 内部共涉及 5 类磁盘区域、至少 6 次写入：
+现有的本地文件系统（ext4、XFS）采用 B+ 树或其变体（如 ext4 的 H-tree）组织目录项和 inode 索引。以最简单的 \texttt{create("/mnt/dir/newfile")} 为例，这一操作在 ext4 上涉及 5 类磁盘区域、至少 6 次写入：
 
 \begin{enumerate}
     \item \textbf{Journal 事务起始}。ext4 在 ordered 模式下首先向日志区域写入一条事务描述符块（descriptor block），标记本次操作的开始。日志区域位于分区上的固定偏移量，与用户数据不相邻。
@@ -20,8 +18,7 @@
     \item \textbf{父目录 inode}。更新父目录的 \texttt{mtime}（修改时间）和 \texttt{ctime}（状态变更时间），如果创建的是子目录还要递增 \texttt{nlink}（链接计数）。父目录 inode 与新文件 inode 可能不在同一个块组中。
 \end{enumerate}
 
-
-最后，ext4 将上述所有修改的元数据块写入 journal 区域，追加一条 commit 块，调用 \texttt{fsync} 确保日志落盘，然后才将实际数据写回原位（称为 checkpoint）。单次文件创建总共产生至少 6 次磁盘写入，分布在 inode bitmap、inode 表、目录数据块、父目录 inode 和 journal 等互不相邻的磁盘区域上——每一次都是随机 I/O。图~\ref{fig:ext4-create-path} 展示了这一过程。
+最后，ext4 把上述所有修改的元数据块写入 journal 区域，追加一条 commit 块，调用 \texttt{fsync} 确保日志落盘，然后再将实际数据写回原位（称为 checkpoint）。单次文件创建共产生至少 6 次磁盘写入，分布在 inode bitmap、inode 表、目录数据块、父目录 inode 和 journal 等互不相邻的磁盘区域上——每一次都是随机 I/O。图~\ref{fig:ext4-create-path} 展示了这一过程。
 
 \begin{figure}[htbp]
     \centering
@@ -87,11 +84,11 @@
     \label{fig:ext4-create-path}
 \end{figure}
 
-问题的根本在于粒度不匹配。一次文件创建真正需要写入的有效数据不超过 300 字节（256 字节的 inode 加几十字节的目录项），但 ext4 的操作粒度是 4\,KiB 的磁盘页——即使只修改 256 字节的 inode，也需要读出整个 4\,KiB 页、修改后再写回。Journal 模式下该页还会被写两次（一次进 journal，一次落原位）。如果目录的 H-tree 恰好触发节点分裂，写入量还会再翻倍。单次操作的开销尚可接受，但当每秒需要执行数万次 \texttt{create} 时，写放大的累积效应会明显拖累系统吞吐。
+这一路径上的主要开销来自粒度不匹配。一次文件创建真正需要写入的有效数据不超过 300 字节（256 字节的 inode 加几十字节的目录项），但 ext4 的操作粒度是 4\,KiB 的磁盘页——即使只修改 256 字节的 inode，也需要读出整个 4\,KiB 页、修改后再写回。Journal 模式下该页还会被写两次（一次进 journal，一次落原位）。如果目录的 H-tree 恰好触发节点分裂，写入量还会再翻倍。单次操作的开销尚可接受，但当每秒需要执行数万次 \texttt{create} 时，写放大的累积效应会明显拖累系统吞吐。
 
 并发场景下情况更为严峻：ext4 对目录数据块的修改受目录级互斥锁（\texttt{i\_rwsem}）保护，同一目录下的所有文件创建操作必须串行通过这把锁。即便底层存储是 NVMe SSD，能提供数十万 IOPS，单目录下的创建吞吐仍会被该锁压到远低于硬件能力的水平。
 
-基于 LSM-tree（Log-Structured Merge-tree）\cite{oneil1996lsmtree}的键值（KV）存储为该问题提供了一条不同的技术路线。KV 存储将操作粒度从 4\,KiB 的磁盘页细化到单条记录：一个目录项即一个键值对，写入时只做一次内存追加，不涉及 bitmap 翻转、journal 双写或 4\,KiB 对齐的页填充。MemTable 充满之后一次性顺序刷盘，把原本分散的随机写归并为连续的顺序 I/O。TableFS\cite{ren2013tablefs}在 2013 年将全部元数据存入 LevelDB\cite{google2011leveldb}并通过 FUSE 挂载，小文件创建吞吐达到同期 ext4 的 2--3 倍，率先验证了这条路线的可行性。此后 RocksDB\cite{dong2021rocksdb}在 LevelDB 基础上加入了列族、事务和前缀布隆过滤器等特性；Apache Ozone\cite{apache2021ozone}和 Facebook Tectonic\cite{pan2021tectonic}先后在 EB 级生产环境中使用 RocksDB 作为元数据引擎。该技术路线的整体可行性已基本清楚，尚未被完整回答的是：键编码、写放大控制和事务保障这几件事应当如何具体组织。
+基于 LSM-tree（Log-Structured Merge-tree）\cite{oneil1996lsmtree} 的键值（KV）存储为该问题提供了一条不同的技术路线。KV 存储把操作粒度从 4\,KiB 的磁盘页细化到单条记录：一个目录项即一个键值对，写入时只做一次内存追加，不涉及 bitmap 翻转、journal 双写或 4\,KiB 对齐的页填充。MemTable 写满之后一次性顺序刷盘，将原本分散的随机写归并为连续的顺序 I/O。TableFS\cite{ren2013tablefs} 在 2013 年把全部元数据存入 LevelDB\cite{google2011leveldb}，通过 FUSE 挂载，小文件创建吞吐达到同期 ext4 的 2--3 倍，首次验证了这条路线的可行性。此后 RocksDB\cite{dong2021rocksdb} 在 LevelDB 基础上加入了列族、事务和前缀布隆过滤器等特性；Apache Ozone\cite{apache2021ozone} 和 Facebook Tectonic\cite{pan2021tectonic} 先后在 EB 级生产环境中使用 RocksDB 作为元数据引擎，验证了 KV 元数据方案在工业规模下的整体可行性。不过两者都不对外提供完整的 POSIX 接口——Ozone 面向 S3 与 Hadoop API，Tectonic 面向 Facebook 内部的对象存储协议，键编码、父目录写放大、跨键事务等在 POSIX 语义下才集中出现的问题在这条路径上并未完整展开。
 
 \subsubsection{面临的问题和挑战}
 
@@ -139,78 +136,76 @@
 \textbf{问题一：树形目录到扁平键空间的映射。}
 KV 引擎看到的是字节串到字节串的扁平映射，而文件系统对外暴露的命名空间是一棵树。如何为树上每个对象设计键，使得创建、查询、遍历、重命名都能高效完成，是首先需要想清楚的问题。
 
-以 \texttt{create} 为例。ext4 中一次文件创建要写 6 个分散的磁盘区域（见前文 1.1.1 节）；在 KV 存储中，如果把每条目录项建模为一个键值对，\texttt{create} 就是插入一条记录，一次内存追加即可。但这一简化能否成立，取决于键的编码方式。
-
-键的编码需要同时满足三项要求：（1）\texttt{create} 和 \texttt{unlink} 应为 $O(1)$ 的单条增删；（2）\texttt{readdir} 希望同一父目录下的子项在键空间中相邻，使得一次前缀扫描即可完成；（3）\texttt{lookup} 在拿到父 inode 号和文件名后能通过一次点查定位。若直接以全路径（\texttt{/a/b/c}）作为键，\texttt{create} 尚可，但一次 \texttt{rename} 需要递归改写整棵子树的所有键，开销与子树规模成正比。TableFS\cite{ren2013tablefs}以“父 inode + 文件名”拼接作为键，\texttt{create}、\texttt{lookup}、\texttt{rename} 均为 $O(1)$；但其 inode 号采用原生字节序存储，同一目录的条目在 LSM-tree 中未必物理相邻，前缀布隆过滤器也就无法发挥作用。因此键编码还需保持字节序与数值序一致（byte-order preserving），否则范围查询将给出错误结果。
+以 \texttt{create} 为例：ext4 中一次文件创建要写 6 个分散的磁盘区域；在 KV 存储中，如果把每条目录项建模为目录树上的一条父子边、用一个键值对表示，\texttt{create} 就是插入一条记录，一次内存追加即可。但这一简化能否成立，取决于键的编码方式。键编码需要同时满足三项要求：其一，\texttt{create} 和 \texttt{unlink} 为 $O(1)$ 的单条增删；其二，\texttt{readdir} 要让同一父目录下的子项在键空间中相邻，使得一次前缀扫描即可完成；其三，\texttt{lookup} 在拿到父 inode 号和文件名后能通过一次点查定位。若直接以全路径（\texttt{/a/b/c}）作为键，\texttt{create} 尚可，但一次 \texttt{rename} 需要递归改写整棵子树的所有键，开销随子树规模线性增长。TableFS\cite{ren2013tablefs} 以「父 inode + 文件名」拼接作为键——这一形式本质上即把目录项视为目录树上的一条父子边——\texttt{create}、\texttt{lookup}、\texttt{rename} 均为 $O(1)$；但其 inode 号采用原生字节序存储，同一目录的条目在 LSM-tree 中未必物理相邻，前缀布隆过滤器也就无法发挥作用。因此键编码还需保持字节序与数值序一致（byte-order preserving），否则范围查询会给出错误结果。
 
 \textbf{问题二：父目录更新引发的写放大。}
-POSIX 语义\cite{ieee2017posix}要求目录项发生变化时同步更新父目录的 \texttt{mtime} 和 \texttt{ctime}；仅在 \texttt{mkdir} 和 \texttt{rmdir} 这类子目录增删时才会进一步更新父目录的 \texttt{nlink}。在 KV 存储中，这意味着高频的 \texttt{create}、\texttt{unlink}、\texttt{mkdir}、\texttt{rmdir} 会反复修改同一条父目录 inode 记录。对于热点目录（\texttt{/tmp}、CI 产物目录、模型训练的 checkpoint 目录），若 1 秒内发生 1{,}000 次文件创建，父目录 inode 将被读写 1{,}000 次，其中大多数读到的值在写回前就已过期。在 RocksDB 中，这种对同一 key 的密集 \texttt{Get+Put} 会让 MemTable 更快写满、L0 文件更快堆积，并引发更多 compaction，使写放大连锁加剧。
+POSIX 语义\cite{ieee2017posix} 要求目录项发生变化时同步更新父目录的 \texttt{mtime} 和 \texttt{ctime}；\texttt{mkdir} 和 \texttt{rmdir} 这类子目录增删还会进一步更新父目录的 \texttt{nlink}。若沿用传统的 inode 原地更新思路建模，每一次 \texttt{create}、\texttt{unlink}、\texttt{mkdir}、\texttt{rmdir} 都要先读出父目录 inode 值、修改其中几个字段，再写回同一条键。对热点目录（\texttt{/tmp}、CI 产物目录、模型训练的 checkpoint 目录）而言，这条键会承受大量连续的读--改--写，相邻两次操作之间还可能被别的 \texttt{create} 插入，在事务并发下导致冲突重试。在 RocksDB 中，对同一个 key 的密集 \texttt{Get+Put} 会在同一条 key 上积累大量历史版本，compaction 需要反复把这些版本归并为最新值，同时点查时读放大也随之上升。KV 层面的写路径本身仍是顺序追加，但这种"写-改-写同一条 key"的模式把原本可以均匀分散到整个键空间的顺序追加收窄到了一条键上，热点目录属性的更新也就失去了 KV 建模本应带来的那部分优势。
 
 \textbf{问题三：并发目录操作的正确性。}
-多个线程同时操作同一目录时，“检查条件”和“执行修改”之间存在一个时间窗口，即 TOCTOU（Time-of-Check-to-Time-of-Use）竞态。例如线程 A 执行 \texttt{rename} 时已确认目标路径不存在，但在其写入新目录项之前，线程 B 已在同一位置创建了同名文件，两者发生碰撞会导致目录项冲突或数据丢失。内核文件系统由 VFS 层的 inode 互斥锁将目录操作串行化；而在 KV 引擎之上没有这一层保护，只能依赖存储层自身的事务机制。锁粒度的选择——锁整个目录还是仅锁涉及的 key——又直接关系到并发度与实现复杂度之间的取舍。
+多个线程同时操作同一目录时，「检查条件」和「执行修改」之间存在一段时间窗口，即 TOCTOU（Time-of-Check-to-Time-of-Use）竞态。例如线程 A 执行 \texttt{rename} 时已确认目标路径不存在，但在其写入新目录项之前，线程 B 已在同一位置创建了同名文件——KV 层的写入本身是 last-write-wins 的，两条操作谁后到谁生效，但上层看到的语义已经不自洽：A 认为自己完成了一次无冲突的 \texttt{rename}，B 却又让同名文件重新出现在该位置。内核文件系统由 VFS 层的 inode 互斥锁将目录操作串行化；KV 引擎之上没有这一层保护，只能依赖存储层自身的事务机制。锁粒度的选择——锁整个目录还是仅锁涉及的 key——又直接关系到并发度与实现复杂度之间的取舍。
 
 \subsubsection{课题目的与意义}
 
 本课题的目标是：设计并实现一个基于 RocksDB 的用户态 FUSE 文件系统 RucksFS，针对上述三个问题给出可落地的方案，并通过实验验证方案是否达到预期。
 
 \textbf{技术选型。}
-元数据引擎选用 RocksDB，是因为它的几项特性恰好对应上述三个问题：Column Family 可以把 inode 属性、目录项、增量记录放在相互独立的键空间中各自配置参数；前缀迭代器和前缀 Bloom 过滤器能够支撑目录前缀扫描；悲观事务（TransactionDB）提供了行级锁和冲突检测，可用于避免 TOCTOU 竞态。对外接口选择 FUSE 出于工程层面的考虑——用户态开发迭代快、调试方便，与 JuiceFS\cite{juicefs2021}、CubeFS\cite{liu2019cubefs}的接入方式一致，而且 FUSE 的操作接口与内核 VFS 基本对应，未来若要迁移到内核态改动量不至于过大。实现语言采用 Rust\cite{klabnik2023rust}：一方面文件系统这类基础设施对内存安全要求较高，Rust 在编译期即可排除大部分相关缺陷；另一方面它的 async/await 生态（tokio）与 FUSE 的异步处理模式契合度较高。
+元数据引擎选用 RocksDB，理由是其特性与上述三个问题对应较好：Column Family 可以把 inode 属性、目录项、增量记录放在相互独立的键空间中各自配置参数；前缀迭代器和前缀 Bloom 过滤器能够支撑目录前缀扫描；悲观事务（TransactionDB）提供了行级锁与冲突检测，可用于避免 TOCTOU 竞态。对外接口选择 FUSE 出于工程层面的考虑：用户态开发迭代快、调试方便，与 JuiceFS\cite{juicefs2021}、CubeFS\cite{liu2019cubefs} 的接入方式一致，便于在相同工具链下进行性能对比。实现语言采用 Rust\cite{klabnik2023rust}：一方面文件系统这类基础设施对内存安全要求较高，Rust 在编译期即可排除大部分相关缺陷；另一方面其 async/await 生态（tokio）与 FUSE 的异步处理模式契合度较高。
 
 \textbf{解决思路。}
-对应上述三个问题，本课题分别给出三项设计。键编码采用“以边为中心”的思路，将父 inode 号与子文件名按大端序拼接作为目录项键，使文件操作对应于目录树中一条边的常数时间增删。父目录写放大的问题通过增量更新（DeltaOp）解决——写入时只追加一条变化量，不修改基础 inode 值，由后台线程定期将累积的增量折叠回基值。并发正确性由 RocksDB 悲观事务保证，将检查与修改封装在同一事务内；按 inode ID 排序加锁以预防死锁。三项设计的细节将在第~\ref{sec:design}~章展开。
+针对上述三个问题，本课题分别给出三项设计。键编码采用「以边为中心」的思路，将父 inode 号与子文件名按大端序拼接作为目录项键，使文件操作对应目录树中一条边的常数时间增删。父目录写放大的问题通过增量更新（DeltaOp）解决——写入时只追加一条变化量，不修改基础 inode 值，由后台线程定期将累积的增量折叠回基值。并发正确性由 RocksDB 悲观事务保证，将检查与修改封装在同一事务内；按 inode ID 排序加锁以预防死锁。三项设计的细节在第~\ref{sec:design}~章展开。
 
 \textbf{课题意义。}
-从技术角度看，TableFS 时代的 KV 元数据系统普遍缺少事务能力，IndexFS 则将重心放在跨节点扩展上；RocksDB 自 6.0 版起提供了成熟的悲观事务接口，但目前尚未看到系统性地将其应用于 POSIX 文件操作元数据层的公开工作。本课题尝试填补这一空白的一部分，给出一个可复现的原型和对照实验。从工程角度看，RucksFS 的 Rust 实现与三段式分布式部署形式可以作为后续工作的基础——例如后续加入元数据分片、副本容错或智能预取时，这套骨架无需重构。
+已有 KV 元数据研究中，TableFS 阶段的系统普遍缺少事务能力；IndexFS 把重心放在跨节点扩展上；Mantle 在 EB 级规模上给出了完整的工业方案，但依赖自研分布式事务数据库 TafDB 与一套较复杂的缓存一致性协议。RocksDB 自 6.0 版起提供了成熟的悲观事务接口，把它系统性地应用到 POSIX 文件操作元数据层、并配上增量更新与合适的键编码的公开工作目前尚少。本课题即沿这条路线给出一个可复现的原型：Rust 实现、三段式分布式部署形态、完整的 POSIX 操作集合和配套实验；后续加入元数据分片、副本容错或元数据预取等工作，可直接基于这套骨架展开。
 
 \textbf{预期交付物。}
-（1）按 FUSE 客户端、MetadataServer 和 DataServer 解耦的 RucksFS 原型，支持 gRPC 远程通信与分离部署；（2）pjdfstest POSIX 合规性测试结果；（3）在同一硬件条件下与 JuiceFS、NFS 等系统的元数据吞吐量对比数据。
+其一，按 FUSE 客户端、MetadataServer 和 DataServer 解耦的 RucksFS 原型，支持 gRPC 远程通信与分离部署；其二，pjdfstest POSIX 合规性测试结果；其三，在同一硬件条件下与 JuiceFS+TiKV、NFS v4.2 的元数据吞吐对比数据，以及 Delta 与 NoDelta 两种构建变体的内部对照数据。
 
 
 \subsection{国内外研究现状}
 
 用 KV 引擎管理文件系统元数据的研究始于 2013 年，至今已积累了从单机原型到 EB 级生产系统的丰富实践。
 
-\subsubsection{基于KV存储的元数据管理研究}
+\subsubsection{基于 KV 存储的元数据管理研究}
 
-TableFS\cite{ren2013tablefs}是这一方向最早的系统性工作。2013 年，Carnegie Mellon University 的 Ren 和 Gibson 将 ext4 的目录项和 inode 信息整体存入 LevelDB，并通过 FUSE 挂载为标准文件系统。TableFS 的设计思路直截了当：以（父 inode 号, 文件名）的拼接作为 LevelDB 的键，以序列化后的 \texttt{struct stat} 加上可选的内联数据作为值。在小文件（$<$ 4~KB）场景下，TableFS 的 \texttt{create} 吞吐量是同期 ext4 的 2--3 倍，这一结果首次验证了 KV 存储用于元数据管理的可行性。但 TableFS 也暴露了若干缺陷：（1）\texttt{readdir} 操作需要扫描 LevelDB 的全部键空间并过滤出指定父目录的条目——当文件系统中的文件总数增长到百万级别时，\texttt{readdir} 的延迟急剧上升；（2）LevelDB 本身不提供任何事务语义，多线程写入时的正确性完全依赖外部加锁；（3）键编码方案中父目录 inode 号使用原生字节序存储，导致同一目录下的条目在 LSM-tree 中不一定连续排列，无法利用前缀迭代器或前缀布隆过滤器加速查找。此外，TableFS 没有考虑父目录 inode 更新带来的写放大问题。
+TableFS\cite{ren2013tablefs} 是这一方向最早的系统性工作。2013 年，Carnegie Mellon University 的 Ren 和 Gibson 把 ext4 的目录项和 inode 信息整体存入 LevelDB，并通过 FUSE 挂载为标准文件系统。TableFS 的设计思路直接：以（父 inode 号, 文件名）的拼接作为 LevelDB 的键，以序列化后的 \texttt{struct stat} 加上可选的内联数据作为值。在小文件（$<$ 4~KB）场景下，TableFS 的 \texttt{create} 吞吐量是同期 ext4 的 2--3 倍，首次验证了 KV 存储用于元数据管理的可行性。但 TableFS 也暴露出若干缺陷：其一，\texttt{readdir} 操作需要扫描 LevelDB 的全部键空间并过滤出指定父目录的条目——当文件系统中的文件总数增长到百万级别时，\texttt{readdir} 的延迟急剧上升；其二，LevelDB 本身不提供事务语义，多线程写入的正确性完全依赖外部加锁；其三，键编码中父目录 inode 号使用原生字节序存储，导致同一目录下的条目在 LSM-tree 中不一定连续排列，无法利用前缀迭代器或前缀布隆过滤器加速查找。此外，TableFS 也没有处理父目录 inode 更新带来的写放大问题。
 
-同一研究团队在次年推出了 IndexFS\cite{ren2014indexfs}，将 TableFS 的思路扩展到分布式环境。IndexFS 在每个元数据节点上运行一个 LevelDB 实例，目录项通过 GIGA+ 动态哈希分区算法分布到不同节点。其关键贡献是引入了列式目录布局（columnar directory layout）：将 \texttt{readdir} 所需的信息（文件名列表）与 \texttt{getattr} 所需的信息（inode 属性）分开存储在不同的 SSTable 列中，使得目录遍历只需读取文件名列，跳过体积更大的 inode 属性数据。IndexFS 在 128 节点的集群上实现了每秒超过 100 万次 \texttt{create} 操作，获得了 SC'14 的最佳论文奖。不过 IndexFS 的部署要求相当苛刻：每个节点需要独立维护一个 LevelDB 实例和一套目录缓存状态机，还需要一个独立的 GIGA+ 组件来处理跨节点的目录分裂。对于中小规模的使用场景，这样的架构存在过度设计之嫌。
+同一研究团队在次年推出了 IndexFS\cite{ren2014indexfs}，把 TableFS 的思路扩展到分布式环境。IndexFS 在每个元数据节点上运行一个 LevelDB 实例，目录项通过 GIGA+ 动态哈希分区算法分布到不同节点。其关键贡献是引入了列式目录布局（columnar directory layout）：将 \texttt{readdir} 所需的信息（文件名列表）与 \texttt{getattr} 所需的信息（inode 属性）分开存储在不同的 SSTable 列中，使得目录遍历只需读取文件名列，跳过体积更大的 inode 属性数据。IndexFS 在 128 节点集群上实现了每秒超过 100 万次 \texttt{create} 操作，获得了 SC'14 最佳论文奖。不过 IndexFS 的部署要求较高：每个节点需要独立维护一个 LevelDB 实例和一套目录缓存状态机，还需要一个独立的 GIGA+ 组件处理跨节点目录分裂，对中小规模场景来说系统复杂度偏重。
 
-LocoFS\cite{li2017locofs}在 2017 年观察到文件访问的时间局部性和空间局部性，设计了一种松耦合的元数据分布策略，按哈希将热点目录的元数据分配到固定服务器。Xu 等人\cite{xu2014drop}在 2014 年提出了面向 EB 级规模的子树粒度元数据划分方案。这些工作侧重多节点元数据划分与扩展策略，与本课题关注的“分布式访问路径下，如何围绕 RocksDB 组织 POSIX 元数据操作”这一问题并不相同。
+LocoFS\cite{li2017locofs} 在 2017 年观察到文件访问的时间局部性和空间局部性，设计了一种松耦合的元数据分布策略，按哈希将热点目录的元数据分配到固定服务器。Xu 等人\cite{xu2014drop} 在 2014 年提出了面向 EB 级规模的子树粒度元数据划分方案。这些工作侧重多节点元数据划分与扩展策略，与本课题关注的问题——在分布式访问路径下如何围绕 RocksDB 组织 POSIX 元数据操作——不在同一层面。
 
-百度沧海·存储团队在 SOSP'25 上发表的 Mantle\cite{li2025mantle}是 KV 元数据管理这一技术路线的最新进展。Mantle 为云对象存储提供层级命名空间支持，底层持久化引擎 TafDB 采用三个列族组织元数据：AccessCF 以（父 inode 号 + 文件名）为键存储目录项，AttrCF 以 inode 号为键存储属性，DeltaCF 以（inode 号 + 时间戳）为键追加增量更新记录。其中 Delta Record 机制与本课题的设计动机直接相关：当多个客户端并发在同一目录下创建文件时，父目录的子项计数和 \texttt{mtime} 不再以读取-修改-写回的方式更新，而是各自追加一条增量记录，由后台线程异步将增量合并到 AttrCF 中的基准值。这种设计完全消除了热点目录属性的写竞争。
+百度沧海·存储团队在 SOSP'25 上发表的 Mantle\cite{li2025mantle} 是这一路线的最新进展。Mantle 为云对象存储提供层级命名空间支持，底层持久化引擎 TafDB 采用三个列族组织元数据：AccessCF 以（父 inode 号 + 文件名）为键存储目录项，AttrCF 以 inode 号为键存储属性，DeltaCF 以（inode 号 + 时间戳）为键追加增量更新记录。DeltaCF 的 Delta Record 机制与本课题的设计动机一致：当多个客户端并发在同一目录下创建文件时，父目录的子项计数和 \texttt{mtime} 不再以读--改--写方式更新，而是各自追加一条增量记录，由后台线程异步合并到 AttrCF 中的基准值，从而消除热点目录属性上的写竞争。
 
-Mantle 还在 TafDB 之上叠加了 IndexNode 内存缓存层，以加速长路径解析和权限检查，在百度内部的 EB 级数据湖上实现了相比旧方案 115 倍的吞吐量提升。不过 Mantle 依赖的 TafDB 是百度自研的类 Spanner 分布式事务数据库，IndexNode 与 TafDB 之间的缓存一致性协议也相当复杂——整套系统并不开源。本课题借鉴了 Mantle 的增量更新思路，但将其落到“Client + MetadataServer + DataServer”三段式分布式路径上：元数据仍由 MetadataServer 上的 RocksDB 统一维护，同时以 DeltaOp + 懒折叠降低热点目录的写竞争，用较低的系统复杂度复现其核心收益。
+Mantle 还在 TafDB 之上叠加了 IndexNode 内存缓存层，用于加速长路径解析和权限检查，在百度内部 EB 级数据湖上实现了相比旧方案 115 倍的吞吐量提升。不过 Mantle 依赖的 TafDB 是百度自研的类 Spanner 分布式事务数据库，IndexNode 与 TafDB 之间的缓存一致性协议也较复杂，整套系统并不开源。本课题借鉴 Mantle 的增量更新思路，但把它落到 MetadataServer 本地的 RocksDB 事务上实现——元数据仍由单个 MetadataServer 统一维护，DeltaOp 追加、懒折叠和折叠结果缓存全部在同一 RocksDB 实例内完成，不再依赖外部分布式事务数据库和跨服务的缓存一致性协议，以较低的系统复杂度复现其核心收益。
 
 \subsubsection{云原生文件系统中的元数据方案}
 
-在 KV 元数据研究逐步成熟的同时，工业界的分布式文件系统也在快速演进。本课题选择 JuiceFS 和 CubeFS 作为实验对比对象，这里简要介绍二者的元数据方案以及其他几个代表性系统的技术路线，为后续对比提供背景。
+在 KV 元数据研究逐步成熟的同时，工业界的分布式文件系统也在快速演进。本课题在性能实验中选择 JuiceFS 作为实验主对比对象，NFS v4.2 作为传统本地文件系统代表，这里简要介绍它们与其他几个代表性系统的元数据方案，为后续对比提供背景。
 
-早期的分布式文件系统以集中式元数据管理为主：GFS\cite{ghemawat2003gfs}和 HDFS\cite{shvachko2010hdfs}将全部元数据驻留在单节点内存中，Ceph\cite{weil2006ceph}用动态子树划分将目录树分配到多个元数据服务器上。这些系统在 PB 级规模上运转良好，但元数据的可扩展性始终受到内存容量或子树迁移开销的制约。分布式 KV 存储在可用性优先的设计思路（如 Amazon Dynamo\cite{decandia2007dynamo}）逐渐成为上层文件系统的新型后端选择之后，Apache Ozone\cite{apache2021ozone}和 Facebook Tectonic\cite{pan2021tectonic}在 2020 年前后将元数据引擎替换为 RocksDB，分别管理了 EB 级的数据，但两者都不提供完整的 POSIX 接口——Ozone 面向 S3 和 Hadoop API，Tectonic 面向 Facebook 内部的对象存储协议。
+早期的分布式文件系统以集中式元数据管理为主：GFS\cite{ghemawat2003gfs} 和 HDFS\cite{shvachko2010hdfs} 把全部元数据驻留在单节点内存中，Ceph\cite{weil2006ceph} 用动态子树划分将目录树分配到多个元数据服务器。这些系统在 PB 级规模上运转良好，但元数据的可扩展性始终受限于内存容量或子树迁移开销。分布式 KV 存储（以 Amazon Dynamo\cite{decandia2007dynamo} 的可用性优先设计为代表）逐步成为上层文件系统的新型后端选择之后，Apache Ozone\cite{apache2021ozone} 和 Facebook Tectonic\cite{pan2021tectonic} 在 2020 年前后将元数据引擎替换为 RocksDB，分别管理了 EB 级数据；不过两者都不提供完整 POSIX 接口——Ozone 面向 S3 和 Hadoop API，Tectonic 面向 Facebook 内部的对象存储协议。
 
-JuiceFS\cite{juicefs2021}是国内使用较广的开源 POSIX 文件系统。它的架构将元数据和数据完全分离：元数据存储在 Redis、TiKV 或 MySQL 等外部引擎中，数据块则写入 S3 兼容的对象存储。这种设计的优势在于部署灵活——用户可以根据自身条件选择最合适的后端组合。劣势则在于性能和可靠性完全取决于外部组件：Redis 的单线程模型在元数据操作超过每秒数万次时会成为瓶颈；TiKV 虽然吞吐量更高，却引入了 Raft 共识协议带来的额外延迟。JuiceFS 官方基准测试显示，Redis 后端在单客户端下的文件创建吞吐量约为 1,410 ops/s，而 MySQL 后端仅约 350 ops/s。JuiceFS 的 FUSE 客户端使用 Go 语言实现，Go 运行时的垃圾回收（GC）暂停在极端负载下曾被部分用户报告为延迟抖动的来源之一。
+JuiceFS\cite{juicefs2021} 是国内使用较广的开源 POSIX 文件系统，其架构将元数据和数据完全分离：元数据存储在 Redis、TiKV 或关系型数据库（MySQL、PostgreSQL 等）之中，数据块写入 S3 兼容的对象存储。这种解耦方式允许用户按自身条件选择后端组合；代价是性能和可用性完全取决于外部组件——Redis 的单线程模型在元数据操作超过每秒数万次时会出现瓶颈，TiKV 则引入 Raft 共识协议带来的额外延迟。JuiceFS 官方基准显示，Redis 后端在单客户端下的文件创建吞吐约为 1{,}410\,ops/s，MySQL 后端仅约 350\,ops/s。JuiceFS 的 FUSE 客户端使用 Go 实现，Go 运行时的垃圾回收在极端负载下存在引入延迟抖动的可能。
 
-CubeFS\cite{liu2019cubefs}（最初名为 CFS）于 2019 年在 SIGMOD 上发表，后捐赠给 CNCF 并于 2024 年成为毕业项目。与 JuiceFS 依赖外部数据库不同，CubeFS 自带元数据引擎：每个元数据分区（MetaPartition）使用内存中的 B-tree 维护目录结构，多副本之间通过 Multi-Raft 协议保持一致性。CubeFS 的读路径延迟很低（内存 B-tree 的查找延迟在微秒级），但写路径受 Raft 日志同步所限——每次写操作至少需要等待多数副本确认，典型延迟在毫秒级。内存中的 B-tree 也限制了单节点可管理的元数据量：按每个 inode 约 300 字节内存估算，十亿文件需要约 280~GB 内存。
+CubeFS\cite{liu2019cubefs}（最初名为 CFS）于 2019 年在 SIGMOD 发表，后捐赠给 CNCF 并于 2024 年成为毕业项目。与 JuiceFS 依赖外部数据库不同，CubeFS 自带元数据引擎：每个元数据分区（MetaPartition）使用内存中的 B-tree 维护目录结构，多副本之间通过 Multi-Raft 协议保持一致性。CubeFS 的读路径延迟在微秒级，但写路径受 Raft 日志同步所限，典型延迟在毫秒级；内存 B-tree 也限制了单节点可管理的元数据量——按每个 inode 约 300 字节内存估算，十亿文件需要约 280\,GB 内存。
 
-上述系统的元数据管理方案按技术路线可归为三类：内存驻留型（GFS、HDFS、CubeFS）、外部数据库型（JuiceFS）、嵌入式 KV 型（Ozone、Tectonic）。三类方案各有侧重，一个共同趋势是围绕分布式环境组织元数据服务：要么把一致性和事务交给外部数据库，要么把复制、分片和故障恢复做进文件系统自身。这也带来一个更具体的问题：在已经采用分布式部署的前提下，元数据引擎本身该如何围绕文件操作做定制，而不是完全受制于通用数据库或共识框架的语义与开销。
+上述系统按元数据承载方式可归为三类：内存驻留型（GFS、HDFS、CubeFS）、外部数据库型（JuiceFS）、嵌入式 KV 型（Ozone、Tectonic）。三类方案侧重点不同，但都围绕分布式环境组织元数据服务——要么把一致性和事务交给外部数据库，要么把复制、分片和故障恢复做进文件系统自身。由此引出一个更具体的问题：在已经采用分布式部署的前提下，元数据引擎本身该如何围绕文件操作做定制，而不是完全受制于通用数据库或共识框架的语义与开销。
 
 \subsubsection{元数据引擎的深度优化研究}
 
-与单纯追求分片扩展不同，另一条研究路线更关注元数据引擎本身的执行效率，即先缩短单次操作的关键路径，再讨论系统如何扩展。SingularFS\cite{li2022singularfs}的成果表明，这一路线的性能上限远高于通常的直觉判断。
+与分片扩展路线并行的另一条研究路线更关注元数据引擎本身的执行效率——先缩短单次操作的关键路径，再讨论系统如何扩展。SingularFS\cite{li2022singularfs} 是这一路线的代表。
 
-SingularFS 在 ATC'23 上展示了一个激进的设计选择：仅用单个元数据服务器支撑十亿级文件规模的分布式文件系统。其核心优化包括三个方面：（1）无日志元数据操作（log-free metadata operations），通过精心设计的持久化顺序消除崩溃一致性日志的开销；（2）层次化并发控制，对目录树的不同层级使用不同粒度的锁，避免粗粒度锁的串行化瓶颈；（3）NUMA 感知的 inode 分区，将 inode 地址空间按 NUMA 节点划分，减少跨节点内存访问。在配备 RDMA 网络和持久内存的硬件环境下，SingularFS 的单节点元数据吞吐量远超传统多节点方案。这一结果对本课题的启发不在于“把系统做成单机”，而在于即便系统整体以分布式方式部署，元数据服务内部仍值得围绕关键路径做深度优化。RucksFS 当前正是沿着这条思路，在 MetadataServer 的 RocksDB 事务、增量更新和键编码上做针对性设计，而不是把全部语义都外包给通用分布式 KV。
+SingularFS 在 ATC'23 上展示了一个激进的设计选择：仅用单个元数据服务器支撑十亿级文件规模的分布式文件系统。其核心优化分为三项：其一，无日志元数据操作（log-free metadata operations），通过精心设计的持久化顺序消除崩溃一致性日志的开销；其二，层次化并发控制，对目录树的不同层级使用不同粒度的锁，避免粗粒度锁的串行化瓶颈；其三，NUMA 感知的 inode 分区，将 inode 地址空间按 NUMA 节点划分，减少跨节点内存访问。在配备 RDMA 网络和持久内存的硬件环境下，SingularFS 的单节点元数据吞吐量远超传统多节点方案。这一结果对本课题的参考不在于「把系统做成单机」，而在于即便整体以分布式方式部署，元数据服务内部仍值得围绕关键路径做深度优化。RucksFS 即沿此思路，在 MetadataServer 的 RocksDB 事务、增量更新和键编码上做针对性设计，而不是把全部语义都外包给通用分布式 KV。
 
-Wang 等人\cite{wang2023cfs}在 EuroSys'23 上发表的 CFS 对元数据服务中临界区（critical section）的范围做了精细化分析。传统方案在处理 \texttt{rename} 等涉及多个目录的操作时，往往采用粗粒度的目录级锁，导致不相关的操作被串行化。CFS 通过形式化方法识别出各个 POSIX 操作中真正需要互斥的 key 集合，将临界区缩减到最小。实验表明，这种优化将 \texttt{rename} 密集型工作负载的吞吐量提升了 3.2$\times$。本课题的 PCC 事务设计借鉴了类似思路——只对实际涉及的 key 加排他锁，而非锁定整个目录，从而在保证正确性的同时保留并发度。
+Wang 等人\cite{wang2023cfs} 在 EuroSys'23 上发表的 CFS 对元数据服务中临界区（critical section）的范围做了精细化分析。传统方案处理 \texttt{rename} 等涉及多个目录的操作时多采用粗粒度的目录级锁，导致不相关的操作被串行化。CFS 用形式化方法识别出各个 POSIX 操作中真正需要互斥的 key 集合，将临界区缩减到最小，\texttt{rename} 密集型工作负载的吞吐提升了 3.2$\times$。本课题的 PCC 事务设计借鉴这一思路——只对实际涉及的 key 加排他锁，而非锁定整个目录。
 
-Yang 等人\cite{yang2020batchfile}在 2020 年从实用角度分析了大规模目录中逐个执行 \texttt{stat} 和 \texttt{open} 效率低下的问题，设计了将 \texttt{readdir}+\texttt{stat} 复合操作在内核内合并执行的批量接口，减少了用户态/内核态切换次数。这一批量化思路直接影响了 RucksFS 的 \texttt{readdirplus} 实现——在一次 FUSE 调用中同时返回目录项和完整的 inode 属性，避免后续逐个 \texttt{getattr} 的往返开销。
+Yang 等人\cite{yang2020batchfile} 在 2020 年针对大规模目录中逐个执行 \texttt{stat}、\texttt{open} 效率低下的问题，设计了将 \texttt{readdir}+\texttt{stat} 复合操作在内核内合并执行的批量接口，减少用户态/内核态切换次数。这一批量化思路直接影响了 RucksFS 的 \texttt{readdirplus} 实现——在一次 FUSE 调用中同时返回目录项和完整的 inode 属性，避免后续逐个 \texttt{getattr} 的往返。
 
-操作系统层面也有相关的优化工作。FetchBPF\cite{mishler2024fetchbpf}发表于 ATC'24，利用 eBPF 在 Linux 内核中实现可定制的文件访问预取策略。用户编写的 eBPF 程序由内核在 I/O 路径中直接执行，避免了用户态预取方案的上下文切换开销，在顺序读工作负载上接近理论带宽。同期的 FBMM\cite{tabatabai2024fbmm}则展示了将 Linux VFS 接口用于非传统目的的可能性——将内存管理器实现为文件系统，利用 VFS 的可扩展性在不修改内核核心代码的情况下引入新策略。这种“文件系统即抽象层”的理念与本课题使用 FUSE 将 KV 存储暴露为 POSIX 接口的思路有相似之处。FetchBPF 所展示的 eBPF 预取能力也为 RucksFS 未来的优化方向提供了参考——在 FUSE 的 \texttt{/dev/fuse} 通道上通过 eBPF 预取即将被访问的元数据，有可能降低用户态守护进程的响应延迟。
+操作系统层面也有相关工作。FetchBPF\cite{mishler2024fetchbpf} 发表于 ATC'24，利用 eBPF 在 Linux 内核中实现可定制的文件访问预取策略，在顺序读负载上接近理论带宽。FBMM\cite{tabatabai2024fbmm} 展示了将 Linux VFS 接口用于非传统用途的可能性——把内存管理器实现为文件系统，利用 VFS 的可扩展性在不修改内核核心代码的前提下引入新策略。这两项工作与本课题不直接重合，但都为 RucksFS 的后续优化提供了方向：例如在 FUSE 的 \texttt{/dev/fuse} 通道上通过 eBPF 预取即将被访问的元数据，有可能降低用户态守护进程的响应延迟。
 
-MetaHive\cite{heidari2024metahive}在 2024 年针对 KV 存储引擎在元数据场景下的缓存效率问题展开研究。通用 KV 存储的缓存替换策略（如 LRU）未考虑文件系统的访问局部性——同一目录下的 inode 被连续访问的概率远高于随机 key。MetaHive 据此设计了元数据感知的缓存分区方案。这一发现与 RucksFS 的 InodeFoldedCache 设计动机一致：系统在应用层维护了专门的 LRU 缓存来存储折叠后的 inode 值，而非依赖 RocksDB 的通用块缓存。沿着“为文件系统元数据定制执行路径”这一方向，FUSEE\cite{shen2023fusee}将 KV 元数据服务下沉到内存解耦架构上；Dong 等人\cite{dong2023duplex}在 ICCD 2023 上讨论了完整路径索引下的低延迟元数据服务设计；SwitchFS\cite{xu2026switchfs}则在交换机侧协调元数据异步更新。这些工作的方向与本课题并不完全重合，但都表明元数据引擎本身仍有较大的优化空间。
+MetaHive\cite{heidari2024metahive} 在 2024 年针对 KV 存储引擎在元数据场景下的缓存效率问题展开研究。通用 KV 存储的缓存替换策略（如 LRU）未考虑文件系统的访问局部性——同一目录下的 inode 被连续访问的概率远高于随机 key。MetaHive 据此设计了元数据感知的缓存分区方案。本课题与之方向相近但关注点不同：RucksFS 在应用层维护的 \texttt{InodeFoldedCache} 侧重缓存折叠后的 inode 值，避免读路径反复扫描 \texttt{delta\_entries} 并重复折叠，属于针对 DeltaOp 机制的特化缓存，而非按目录局部性分区。沿「为文件系统元数据定制执行路径」这一方向，FUSEE\cite{shen2023fusee} 将 KV 元数据服务下沉到内存解耦架构上；Dong 等人\cite{dong2023duplex} 在 ICCD 2023 上讨论了完整路径索引下的低延迟元数据服务设计；SwitchFS\cite{xu2026switchfs} 则在交换机侧协调元数据异步更新。这些工作的方向与本课题并不完全重合，但都表明元数据引擎本身仍有较大的优化空间。
 
-在国内，龚拓宇\cite{gong2020rocksmeta}在 2020 年的清华大学硕士论文中结合 RDMA 技术与 RocksDB 设计了分布式元数据服务原型 RocksMeta，在单节点上实现了超过 10 万 IOPS 的元数据操作吞吐量。其键编码方案与本课题有相似之处，但侧重网络传输优化（RDMA 旁路内核协议栈），而本课题侧重存储层的写放大优化。范立衡等人\cite{fan2014kvmetadata}较早探索了键值存储用于元数据集群副本一致性的管理策略。吴雨飞等人\cite{wu2025dfscache}在 2025 年针对基于 TiKV 的分布式文件系统元数据缓存一致性问题，提出了并发广播与惰性删除相结合的轻量级维护机制。
+在国内，龚拓宇\cite{gong2020rocksmeta} 在 2020 年的清华大学硕士论文中结合 RDMA 技术与 RocksDB 设计了分布式元数据服务原型 RocksMeta，在单节点上实现了超过 10 万 IOPS 的元数据操作吞吐量；其键编码方案与本课题有相似之处，但侧重网络传输优化（RDMA 旁路内核协议栈），本课题侧重存储层的写放大优化。范立衡等人\cite{fan2014kvmetadata} 较早探索了 KV 存储用于元数据集群副本一致性的管理策略。吴雨飞等人\cite{wu2025dfscache} 在 2025 年针对基于 TiKV 的分布式文件系统元数据缓存一致性问题，提出了并发广播与惰性删除相结合的轻量级维护机制。
 
-表~\ref{tab:related_contribution} 按“对本课题架构选择的直接影响程度”筛选并汇总了五项最具参考意义的相关工作。其余工作——JuiceFS 作为实验主对比对象，CubeFS 作为技术路线参照，CFS 作为细粒度临界区分析的思想来源，Yang 等人的批量接口对应 \texttt{readdirplus} 实现，FetchBPF 与 FBMM 作为面向操作系统层的周边借鉴——均已在前文正文中展开讨论，此处不再重复罗列，以保持表格清晰可读。
+表~\ref{tab:related_contribution} 按「对本课题架构选择的直接影响程度」筛选并汇总了五项最具参考意义的相关工作。其余工作——JuiceFS 作为实验主对比对象，CubeFS 作为技术路线参照，CFS 作为细粒度临界区分析的思想来源，Yang 等人的批量接口对应 \texttt{readdirplus} 实现，FetchBPF 与 FBMM 作为面向操作系统层的周边借鉴——均已在前文展开，此处不再重复列出。
 
 \begin{table}[!ht]
     \centering
@@ -221,26 +216,26 @@ MetaHive\cite{heidari2024metahive}在 2024 年针对 KV 存储引擎在元数据
         \textbf{工作} & \textbf{类别} & \textbf{对本课题的参考} \\ \midrule
         TableFS\cite{ren2013tablefs} & KV 元数据 & 验证了 KV 存储用于元数据的可行性；暴露键编码、\texttt{readdir} 效率和事务缺失三个问题，本课题逐一改进 \\
         IndexFS\cite{ren2014indexfs} & KV 元数据 & 列式目录布局启发了 \texttt{readdirplus} 设计；其目录分片思路为后续元数据横向扩展提供参考 \\
-        Mantle\cite{li2025mantle} & KV 元数据 & 三列族设计和 Delta Record 机制直接启发本课题的多列族架构和 DeltaOp 懒折叠方案；工业级验证增强可信度 \\
-        SingularFS\cite{li2022singularfs} & 单机 MDS & 证明元数据关键路径的深度优化本身可以显著抬高分布式文件系统的性能上限 \\
+        Mantle\cite{li2025mantle} & KV 元数据 & 三列族设计和 Delta Record 机制直接启发本课题的多列族架构与 DeltaOp 懒折叠方案；工业级验证增强可信度 \\
+        SingularFS\cite{li2022singularfs} & 单机 MDS & 说明元数据关键路径的深度优化本身可以显著抬高分布式文件系统的性能上限 \\
         CFS\cite{wang2023cfs} & 并发控制 & 细粒度临界区分析方法影响本课题的 PCC 事务设计——只锁涉及的 key 而非整个目录 \\
     \bottomrule
     \end{tabular}
 \end{table}
 
-上述工作各自解决了一部分问题；但若要把这些思路组合到一个“Client + MetadataServer + DataServer + FUSE + RocksDB + 完整 POSIX”的最小可用系统中，仍有若干问题需要回答。下一节先把这些空白点明，再给出 RucksFS 与它们的具体定位对比。
+上述工作各自解决了一部分问题；把它们组合到「Client + MetadataServer + DataServer + FUSE + RocksDB + 完整 POSIX」这一最小可用系统中，仍有若干问题需要回答。下一节先把这些空白点明，再给出 RucksFS 与它们的具体定位对比。
 
 \subsubsection{现有研究不足与本课题定位}
 
-综合上述工作，有几个问题并未被完整回答。这些问题并非学术界彻底忽视的盲点，更多是在某些系统中部分解决过，但尚未在“分布式访问路径 + POSIX + 嵌入式 KV”这一完整组合下被系统处理。具体有三点。
+综合上述工作，有三个问题尚未在「分布式访问路径 + POSIX + 嵌入式 KV」这一完整组合下被系统处理。
 
-一是事务和并发控制这一环较为薄弱。TableFS\cite{ren2013tablefs}所用的 LevelDB 没有事务语义，多进程写入只能在上层依靠粗粒度锁保护——单用户基准测试下问题不明显，但在 make 并行构建、rsync 同步、并发日志写入等真实负载下，竞态就会暴露出来。IndexFS\cite{ren2014indexfs}引入了 WriteBatch 来保证单次操作的原子性，但 \texttt{rename} 同时涉及源目录和目标目录的多条记录，WriteBatch 并不覆盖跨操作的一致性约束——跨目录 rename 在 IndexFS 中仍需要上层自行加锁。RocksDB 自 6.0 版起已经提供了成熟的悲观事务（PessimisticTransactionDB），支持行级锁、\texttt{GetForUpdate} 和冲突检测；配合大端键编码的前缀局部性，还能把冲突范围限制在单个父目录内。问题在于，将其系统性地应用到文件系统元数据操作上的公开工作目前尚未见到。
+其一，事务和并发控制这一环较为薄弱。TableFS\cite{ren2013tablefs} 所用的 LevelDB 没有事务语义，多进程写入只能在上层依靠粗粒度锁保护——单用户基准测试下问题不明显，但在 make 并行构建、rsync 同步、并发日志写入等真实负载下竞态会暴露出来。IndexFS\cite{ren2014indexfs} 引入 WriteBatch 保证单次操作的原子性，但 \texttt{rename} 同时涉及源目录和目标目录的多条记录，WriteBatch 并不覆盖跨操作的一致性约束——跨目录 rename 在 IndexFS 中仍需要上层自行加锁。RocksDB 自 6.0 版起已经提供了成熟的悲观事务（PessimisticTransactionDB），支持行级锁、\texttt{GetForUpdate} 和冲突检测；配合大端键编码的前缀局部性，还能把冲突范围限制在单个父目录内。在公开文献中，面向完整 POSIX 语义、围绕 RocksDB 悲观事务组织整套元数据操作的原型较少见。
 
-二是父目录 inode 的写放大问题长期被忽略。TableFS、JuiceFS、CubeFS 处理目录变更时基本采用读-改-写方式：\texttt{create} 和 \texttt{unlink} 需要更新父目录的 \texttt{mtime} 和 \texttt{ctime}，\texttt{mkdir} 和 \texttt{rmdir} 还会进一步更新父目录的 \texttt{nlink}。这些字段每次都被完整读出、修改后再写回。在热点目录下（例如存放了数十万文件的临时目录），这种模式会把所有写入串到同一条父 inode 记录上，LSM-Tree 擅长的顺序追加特性反而无法发挥。Mantle\cite{li2025mantle}的 Delta Record 是目前唯一在生产环境中系统性解决该问题的方案，但它依赖的 TafDB 分布式事务数据库和 IndexNode 缓存一致性协议整体较为复杂，难以直接引入本课题这种轻量的三段式架构。如何在 MetadataServer 本地的 RocksDB 上以较低复杂度实现类似的增量更新语义、同时保证 POSIX 的原子性和读一致性，目前没有现成的答案。
+其二，父目录 inode 的写放大问题长期被忽略。TableFS、JuiceFS、CubeFS 处理目录变更时基本采用读--改--写方式：\texttt{create}/\texttt{unlink} 需更新父目录的 \texttt{mtime} 和 \texttt{ctime}，\texttt{mkdir}/\texttt{rmdir} 还会更新父目录的 \texttt{nlink}。这些字段每次都被完整读出、修改后再写回，在热点目录下（例如存放了数十万文件的临时目录）会把所有写入串到同一条父 inode 记录上，LSM-tree 擅长的顺序追加特性反而无法发挥。Mantle\cite{li2025mantle} 的 Delta Record 是目前唯一在生产环境中系统性解决该问题的方案，但它依赖的 TafDB 分布式事务数据库和 IndexNode 缓存一致性协议整体较为复杂，不便直接引入本课题这种轻量的三段式架构。如何在 MetadataServer 本地的 RocksDB 上以较低复杂度实现类似的增量更新语义、同时保证 POSIX 的原子性和读一致性，目前没有现成的答案。
 
-三是现有系统普遍偏向通用分布式可扩展性，对专用元数据服务器本身的执行路径关注不足。IndexFS、CubeFS、Tectonic 普遍引入 Raft 共识、一致性哈希、分区迁移等重型机制——在 EB 级规模下这些是必要的基础设施，但同时也会使原本可以在专用元数据服务器内部快速完成的简单目录操作，退化为较重的事务流程。SingularFS 的实验数据表明，元数据引擎本身经过深度优化后可达到的吞吐上限相当高；只是学术界更倾向于发表大规模分布式系统，“分布式部署 + 专用元数据引擎 + POSIX 合规”这一组合下的实现细节反而少有公开、完整的原型。毕业设计这类既需要真实分布式访问路径、又要控制系统复杂度的工作，正好对应上述空白。
+其三，现有系统普遍偏向通用分布式可扩展性，对专用元数据服务器本身的执行路径关注不足。IndexFS、CubeFS、Tectonic 普遍引入 Raft 共识、一致性哈希、分区迁移等重型机制——在 EB 级规模下这些是必要的基础设施，但也会让原本可以在专用元数据服务器内部快速完成的简单目录操作退化为较重的事务流程。SingularFS\cite{li2022singularfs} 在 RDMA 网络和持久内存上实现了单节点数百万级 ops/s 的元数据吞吐，说明元数据引擎自身经过关键路径优化后仍有较大空间。但「分布式部署 + 专用元数据引擎 + 完整 POSIX 合规」这一组合下可复现的公开原型相对较少——大规模工业系统多不开源，学术原型多以单机或简化 API 为界。
 
-把上述三点合起来看，本课题的定位就比较清晰：设计并实现一个基于 RocksDB 的分布式文件系统原型 RucksFS，由 FUSE Client、MetadataServer、DataServer 三部分组成，通过 gRPC 连接客户端与服务端；元数据侧以 RocksDB 为基础，采用多列族、悲观事务和前缀迭代器等特性，配合一套适合文件系统访问模式的键编码和增量更新机制。与已有工作的主要区别集中在三处：（1）通过 PCC 事务为所有目录变更操作统一提供原子性保证，而非依赖外部锁或仅使用 WriteBatch；（2）借鉴 Mantle 的 Delta Record 思路，使用 DeltaOp + 懒折叠解决父目录 inode 写放大，但相关逻辑均在 MetadataServer 本地 RocksDB 内完成，不引入外部通用分布式事务数据库和复杂的缓存一致性协议；（3）以 Rust 实现，基于 FUSE 异步运行时和 gRPC 通信构建完整的分布式访问路径，在不修改内核、不依赖特殊硬件的前提下验证该架构的语义和性能表现。表~\ref{tab:system_compare} 从 KV 引擎、事务支持、增量更新、用户态接口这四个维度，将本课题与相关系统并列对比。
+把上述三点合起来看，本课题的定位相对清晰：设计并实现一个基于 RocksDB 的分布式文件系统原型 RucksFS，由 FUSE Client、MetadataServer、DataServer 三部分组成，通过 gRPC 连接客户端与服务端；元数据侧以 RocksDB 为基础，采用多列族、悲观事务和前缀迭代器等特性，配合一套适合文件系统访问模式的键编码和增量更新机制。与已有工作的主要区别集中在三处：其一，通过 PCC 事务为所有目录变更操作统一提供原子性保证，而非依赖外部锁或仅使用 WriteBatch；其二，借鉴 Mantle 的 Delta Record 思路，用 DeltaOp 与懒折叠解决父目录 inode 写放大，但全部逻辑在 MetadataServer 本地 RocksDB 内完成，不引入外部通用分布式事务数据库和复杂的缓存一致性协议；其三，以 Rust 实现，基于 FUSE 异步运行时和 gRPC 通信构建完整的分布式访问路径，在不修改内核、不依赖特殊硬件的前提下验证该架构的语义和性能表现。表~\ref{tab:system_compare} 从 KV 引擎、事务支持、增量更新、用户态接口这四个维度，将本课题与相关系统并列对比。
 
 \begin{table}[!ht]
     \centering
@@ -263,30 +258,32 @@ MetaHive\cite{heidari2024metahive}在 2024 年针对 KV 存储引擎在元数据
 
 \subsubsection{主要工作}
 
-本课题围绕“基于 KV 存储的文件系统元数据管理”这一目标，主要完成了以下工作：
+本课题围绕「基于 KV 存储的文件系统元数据管理」这一目标，主要完成了以下五项工作：
 
-（1）设计并实现了基于 RocksDB 多列族的元数据存储方案。不同类型的元数据（inode 属性、目录项、增量记录）分别放在独立列族中，各自配置压缩策略和缓存参数。目录项列族的键采用“以边为中心”的编码：父 inode 号和子文件名按大端序拼接作为键，每条目录项对应目录树中一条父子边。文件操作由此转化为对边的增删——\texttt{create} 插入一条、\texttt{unlink} 删除一条、\texttt{rename} 删旧插新——均为常数时间。大端序编码使字节序与数值序一致，同一父目录下的子项在键空间中自然相邻，\texttt{readdir} 通过前缀扫描、\texttt{lookup} 通过点查即可完成。
+（1）设计并实现基于 RocksDB 多列族的元数据存储方案。不同类型的元数据（inode 属性、目录项、增量记录、系统元数据）分别放在独立列族中，各自配置压缩策略和缓存参数。目录项列族的键采用「以边为中心」的编码：父 inode 号和子文件名按大端序拼接作为键，每条目录项对应目录树中一条父子边。文件操作由此转化为对边的增删——\texttt{create} 插入一条、\texttt{unlink} 删除一条、\texttt{rename} 删旧插新——均为常数时间。大端序编码使字节序与数值序一致，同一父目录下的子项在键空间中自然相邻，\texttt{readdir} 通过前缀扫描、\texttt{lookup} 通过点查即可完成。
 
-（2）引入了增量更新与懒折叠（lazy folding）机制。文件创建和删除不直接修改父目录 inode，而是以 DeltaOp 形式追加一条增量记录；读路径在 \texttt{getattr} 或 \texttt{readdir} 时将基值与增量在线合并后返回。后台线程在增量数量超过 32 条时将其折叠回基值。由此在高并发写入下，KV 层面的“读-改-写”次数明显减少。
+（2）引入增量更新与懒折叠（lazy folding）机制，并基于 RocksDB 悲观事务统一处理元数据并发。文件创建和删除不直接修改父目录 inode，而是以 DeltaOp 形式追加一条增量记录；读路径在 \texttt{getattr} 或 \texttt{readdir} 时将基值与增量在线合并后返回；后台线程在增量数量超过 32 条时将其折叠回基值，使高并发写入下 KV 层面的读--改--写次数明显减少。所有元数据变更操作（\texttt{create}、\texttt{mkdir}、\texttt{unlink}、\texttt{rmdir}、\texttt{rename}、\texttt{setattr} 等）通过 RocksDB 悲观事务完成加锁和冲突检测，以原子提交保证多键更新的一致性；事务冲突时服务端先自动重试最多 3 次，仍失败后在 FUSE 层映射为 \texttt{EAGAIN} 返回。
 
-（3）实现了相对完整的 POSIX 文件操作集合——\texttt{create}、\texttt{mkdir}、\texttt{unlink}、\texttt{rmdir}、\texttt{rename}、\texttt{readdir}、\texttt{setattr}、\texttt{read}、\texttt{write} 等。所有变更操作通过 RocksDB 悲观事务完成加锁和冲突检测，以原子提交保证多键更新的一致性；事务冲突时服务端先自动重试最多 3 次，仍失败后在 FUSE 层映射为 \texttt{EAGAIN} 返回。
+（3）基于 FUSE 实现覆盖上述目录操作与 \texttt{read}/\texttt{write} 的完整 POSIX 文件操作集合。客户端基于 Rust 的 fuse3 库（0.8 版，启用 \texttt{tokio-runtime} 与 \texttt{unprivileged} 特性）与 tokio 异步运行时实现，按异步模型处理请求；挂载时启用 \texttt{default\_permissions} 与 \texttt{allow\_other}，常规权限检查交由内核 VFS 处理。
 
-（4）FUSE 客户端基于 Rust 的 fuse3 库（0.8 版）与 tokio 异步运行时实现，按异步模型处理请求。挂载时启用 \texttt{default\_permissions} 和 \texttt{allow\_other}，将常规权限检查交由内核 VFS 处理。
+（4）实现由 Client、MetadataServer、DataServer 三段组成的分布式部署形态，三者通过 gRPC（tonic）通信。客户端的 \texttt{VfsCore} 作为协调层，把元数据请求分发给 MetadataServer、数据请求分发给 DataServer；对于 \texttt{open}（需要先从 MetadataServer 获取数据路由再落到 DataServer）、\texttt{release}（触发数据清理）这类跨服务的语义，由 \texttt{VfsCore} 在客户端一侧统一编排。
 
-（5）建立了多层次的测试体系：约 192 个单元测试覆盖核心逻辑，pjdfstest 套件用于验证 POSIX 兼容性，另有一套自定义的元数据基准（\texttt{create}/\texttt{stat}/\texttt{unlink}/\texttt{readdir} 吞吐和延迟）用于跨系统对比；在同一硬件条件下与 JuiceFS、NFS 共同进行了评测。
+（5）完成了两条线的系统评估。正确性方面，在分布式部署下运行 pjdfstest 套件共 398 条用例，按本文实现范围分解后在「实现范围内」用例上全部通过；性能方面，在 1 台 64 核服务器加最多 96 台 2 核客户端的集群上使用 mdtest 压测，中低并发区间（$N \in \{2, 8, 32\}$）将 RucksFS 与 JuiceFS+TiKV、NFS v4.2 作三方横向对比，高并发区间（$N \in \{64, 96\}$）改用 Delta 与 NoDelta 两个构建变体作内部对照，检验 DeltaOp 机制在共享父目录高请求速率下的作用。
 
 上述实现的完整源代码、测试编排脚本、本文所用的原始测量数据以及本论文的 LaTeX 源码均公开在 \url{https://github.com/csjgg/rucksfs}，按第~\ref{sec:experiments}~章的参数即可复现。
 
 \subsubsection{论文结构}
 
-本论文共分为五章，各章安排如下：
+本论文共六章，各章安排如下：
 
-第一章绪论。交代研究背景，分析 KV 存储用于文件系统元数据时需要面对的技术挑战，梳理国内外相关工作，最后给出本课题的目标与定位。
+第一章绪论。交代研究背景，分析 KV 存储用于文件系统元数据时需要面对的技术挑战，梳理国内外相关工作，给出本课题的目标与定位。
 
-第二章相关技术基础。介绍 FUSE 的工作原理和请求处理流程，RocksDB 的 LSM-tree 架构、列族与事务机制，POSIX 文件系统语义的几项关键约束，以及悲观并发控制（PCC）的基本概念。
+第二章相关技术基础。介绍 FUSE 的工作原理与请求处理流程、RocksDB 的 LSM-tree 架构与列族/事务机制、POSIX 文件系统语义的几项关键约束以及悲观并发控制（PCC）的基本概念。
 
-第三章系统设计与实现。展开 RucksFS 的整体架构（Client、MetadataServer、DataServer 与 7 个 crate 组成的 workspace 模块划分），元数据键编码方案，增量更新与懒折叠机制，PCC 事务封装与冲突重试策略，以及各 POSIX 操作的具体实现。
+第三章元数据组织与事务模型。展开 MetadataServer 内部的设计：多列族的命名空间划分、目录项的大端序边键编码、DeltaOp 增量追加与懒折叠机制、PCC 事务封装与冲突重试策略，以及各 POSIX 目录操作在事务层面的具体落实。
 
-第四章测试与结果分析。先交代测试环境和具体的实验方法，然后给出 RucksFS 与 JuiceFS、NFS 在元数据操作吞吐、延迟、POSIX 合规性上的对比数据，并对结果进行分析。
+第四章跨服务协调与系统实现。把视角从 MetadataServer 扩展到整条客户端-服务端路径：\texttt{VfsCore} 的路由与编排、DataServer 的最小实现与数据路径、FUSE 可见语义与缓存策略、gRPC 接口设计，以及错误处理与崩溃恢复边界。
 
-第五章总结与展望。回顾主要成果，讨论当前设计的局限，给出元数据分片、副本容错、RPC 路径优化和智能预取等方向的后续改进思路。
+第五章测试与结果分析。用 pjdfstest 和 mdtest 两条线检验前文设计：前者在分布式部署下运行 398 条用例，按实现范围分解后给出合规性结果；后者在同一套集群上分别作横向对比与 Delta/NoDelta 内部对照，并解读数据形态背后的原因。
+
+第六章总结与展望。回顾主要成果，讨论当前设计的局限，给出客户端缓存放宽、跨服务 RPC 合并以及 DataServer 完整化等方向的后续改进思路。
