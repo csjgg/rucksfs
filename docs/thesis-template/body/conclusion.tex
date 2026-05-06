@@ -2,25 +2,29 @@
 
 \subsection{工作总结}
 
-本文围绕“基于 KV 存储管理文件系统元数据”这一具体问题，设计并实现了 RucksFS——一个以 RocksDB 为元数据引擎、通过 FUSE 对外提供 POSIX 接口的分布式文件系统原型，并完成了较为完整的实验评估。具体完成的工作如下：
+本文围绕基于 KV 存储管理文件系统元数据这一问题，设计并实现了 RucksFS，一个以 RocksDB 为元数据引擎、通过 FUSE 对外提供 POSIX 接口的分布式文件系统原型，并完成了较为完整的实验评估。具体完成的工作如下：
 
 \begin{enumerate}
-    \item 实现了基于 RocksDB 多列族的 FUSE 文件系统 RucksFS，支持 \texttt{create}、\texttt{mkdir}、\texttt{unlink}、\texttt{rmdir}、\texttt{rename}、\texttt{readdir}、\texttt{setattr}、\texttt{read}、\texttt{write} 等常用 POSIX 操作。元数据按访问模式划分到 \texttt{inodes}、\texttt{dir\_entries}、\texttt{delta\_entries}、\texttt{system} 四个列族；目录项键采用“父 inode + 子文件名”的大端序拼接编码，使文件操作基本对应对目录树上一条边的增删。
+    \item 实现了基于 RocksDB 多列族的 FUSE 文件系统 RucksFS，支持 \texttt{create}、\texttt{mkdir}、\texttt{unlink}、\texttt{rmdir}、\texttt{rename}、\texttt{readdir}、\texttt{setattr}、\texttt{read}、\texttt{write} 等常用 POSIX 操作。元数据按访问模式划分到 \texttt{inodes}、\texttt{dir\_entries}、\texttt{delta\_entries}、\texttt{system} 四个列族；目录项键采用父 inode 加子文件名的大端序拼接编码，使文件操作对应目录树上一条边的增删。
+
     \item 引入了增量更新与懒折叠机制（DeltaOp）。父目录属性的修改不再就地重写基值，而是追加一条 DeltaOp，读路径在读取时再将基值和增量合成；后台线程在增量条数超过 32 时执行折叠。该机制借鉴了 Mantle 的 Delta Record 思路，但实现上更为轻量，整个流程都在单个 RocksDB 实例内完成。
+
     \item 基于 RocksDB 悲观事务（PCC）处理元数据并发。所有元数据变更操作通过事务完成加锁与冲突检测，以原子提交保证多键更新的一致性；跨 inode 事务按编号排序加锁以避免死锁；锁等待超时后服务端自动重试最多 3 次（起始退避 50\,\textmu s 并逐次翻倍），失败后才以 \texttt{EAGAIN} 向上层返回。
+
     \item 客户端基于 fuse3 0.8（启用 \texttt{tokio-runtime} 与 \texttt{unprivileged} 特性）与 tokio 异步运行时实现，挂载时启用 \texttt{default\_permissions} 与 \texttt{allow\_other}，常规权限检查交由内核 VFS 完成。
-    \item 在 1 台 64 核服务器加最多 96 台 2 核客户端的腾讯云集群上完成了系统评估。POSIX 合规性方面，pjdfstest 套件共 398 条用例，按本文实现范围分解后剩下 182 条“实现范围内”用例在分布式部署下全部通过，通过率 100\%。性能方面分两段：$N \in \{2, 8, 32\}$ 三档下进行三方对比，RucksFS 相对 JuiceFS+TiKV 在 \texttt{create}/\texttt{remove}/\texttt{stat} 三项上分别领先约 1.5--1.7 倍、1.8--2.2 倍与 1.2 倍；相对 NFS 在 $N=2$ 处因关闭客户端缓存、单次 \texttt{create} 多走两次 RPC 而略低于 NFS，但到 $N=32$ 时 ext4 的 \texttt{i\_rwsem} 锁开始主导，RucksFS 在 \texttt{create} 上反超 NFS 约 4.6 倍；\texttt{stat} 方向 NFS 始终领先 RucksFS，原因是 ext4 B+ 树点查与内核 NFS 路径在读取上更为直接。$N \geq 64$ 时 NFS 和 JuiceFS+TiKV 均无法给出稳定的数据，此时转用 Delta 与 NoDelta 两个构建变体互相对照，沿 $\mathrm{np} = N \times r$ 两个维度扫描——$\mathrm{np}$ 超过 96 后 NoDelta 进入事务冲突循环、稳态吞吐保持在 12\,000\,ops/s 附近，Delta 则继续扩展至 38\,000\,ops/s，$\mathrm{np}=384$ 时 \texttt{create} 比值 2.96、\texttt{remove} 比值 2.63；easy 模式下两者基本一致。
+
+    \item 在 1 台 64 核服务器加最多 96 台 2 核客户端的腾讯云集群上完成了系统评估。正确性方面，pjdfstest 套件 182 条实现范围内用例在分布式部署下全部通过。性能方面，$N \in \{2, 8, 32\}$ 三档横向对比中，RucksFS 相对 JuiceFS+TiKV 在 \texttt{create} 上领先 1.5--1.7 倍，相对 NFS 在 $N=32$ 时反超约 4.6 倍；Delta 与 NoDelta 的内部对照中，$\mathrm{np}$ 超过 96 后 NoDelta 稳态吞吐停在约 12\,000\,ops/s，Delta 则继续扩展到 38\,000\,ops/s。
 \end{enumerate}
 
 \subsection{不足与展望}
 
-前述数据说明 RucksFS 在元数据关键路径上已经达到了当初设定的目标，但作为毕业设计阶段的原型，系统仍有几项明显不足。下列几项按优先级由高到低列出。
+RucksFS 在元数据关键路径上达到了预期目标，但作为毕业设计阶段的原型，系统仍有几项明显不足，按优先级由高到低列出。
 
 \begin{enumerate}
-    \item \textbf{DataServer 仍是最小实现}。当前 \texttt{RawDiskDataStore} 使用固定偏移公式直接映射 inode，\texttt{delete\_data} 是空操作，不做空间回收，单文件存在 64\,MiB 的逻辑上限。实验中使用 mdtest 的空文件负载可以跑通，但要作为真实可用的文件系统，还需要补上块分配、空间回收以及对大文件的支持。
+    \item \textbf{DataServer 仍是最小实现。} 当前 \texttt{RawDiskDataStore} 使用固定偏移公式映射 inode，\texttt{delete\_data} 是空操作，不做空间回收，单文件存在 64\,MiB 的逻辑上限。要作为真实可用的文件系统，还需要补上块分配、空间回收以及对大文件的支持。
 
-    \item \textbf{客户端缓存策略偏保守}。本文为了对元数据路径做纯粹测量，把 FUSE 的 entry/attr TTL 设为 0，使每次 \texttt{lookup} 和 \texttt{getattr} 都穿透到服务端。这一选择的代价在第~\ref{sec:perf-horizontal}~节已有体现：$N=2$ 时 RucksFS 对 NFS 的 \texttt{create} 比值只有 0.52，主要原因就是每次 \texttt{create} 多走了一次 \texttt{lookup} 和一次 \texttt{release}，而其中 \texttt{lookup} 的结果在大多数应用访问模式下是稳定的，本可缓存。后续可以从三个方向展开：其一，把 TTL 放宽到秒级以吸收重复的 \texttt{getattr}；其二，为“名字不存在”的结果维护客户端负缓存，避免 create-before-check 这类语义反复触达服务端；其三，补一个目录失效协议——客户端缓存在目录发生 \texttt{rename}、\texttt{unlink} 时能够收到服务端主动推送的失效通知，而不是依赖 TTL 被动超时。前两项可通过调参实现，第三项需要协议层面的设计，工程量相对较大，但在共享目录场景下价值明显。
+    \item \textbf{客户端缓存策略偏保守。} 本文为了对元数据路径做纯粹测量，把 FUSE 的 entry/attr TTL 设为 0，使每次 \texttt{lookup} 和 \texttt{getattr} 都穿透到服务端。后续可以从三个方向改进：一是把 TTL 放宽到秒级以吸收重复的 \texttt{getattr}；二是为名字不存在的结果维护负缓存，避免反复触达服务端；三是补一个目录失效协议，客户端缓存在目录发生变更时能收到服务端推送的失效通知。前两项可通过调参实现，第三项需要协议层面的设计。
 
-    \item \textbf{跨服务 RPC 合并尚不充分}。一次 \texttt{create} 目前产生三次跨节点 RPC：一次 \texttt{lookup} 确认名字不冲突、一次 \texttt{create} 执行元数据事务、一次 \texttt{release} 释放句柄。NFS v4 通过 COMPOUND 请求把 \texttt{LOOKUP} 与 \texttt{CREATE} 打包到一次往返中，这也是低并发下 NFS 领先 RucksFS 的主要原因。本文已将 \texttt{create} 与 \texttt{open} 合并为 \texttt{create\_and\_open} 一次 RPC，下一步还可以从三个方向继续推进：一是把 \texttt{lookup} 合入 \texttt{create}，客户端在 \texttt{open(O\_CREAT)} 语义下本就允许“先检查后创建”在一次请求中完成；二是引入批量 \texttt{create} 接口，一次 RPC 创建 $K$ 个文件，均摊网络开销，对编译产物、日志归档等大批量写入场景意义直接；三是把 \texttt{readdirplus} 之后常见的批量 \texttt{setattr}、\texttt{unlink} 同样做成批量接口。这些改动都不触及元数据存储模型本身，只在客户端与服务端之间的协议层面做工程重构，收益相对确定。
+    \item \textbf{跨服务 RPC 合并尚不充分。} 一次 \texttt{create} 目前产生三次跨节点 RPC（\texttt{lookup}、\texttt{create}、\texttt{release}），而 NFS v4 通过 COMPOUND 请求可以把多个操作打包到一次往返中，这也是低并发下 NFS 领先的主要原因。下一步可以把 \texttt{lookup} 合入 \texttt{create}，或引入批量接口均摊网络开销。这些改动不触及元数据存储模型本身，只在协议层面做工程重构。
 \end{enumerate}
 
