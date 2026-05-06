@@ -14,11 +14,13 @@
 
 \subsection{不足与展望}
 
-前述数据说明 RucksFS 在元数据关键路径上已经达到了当初设定的目标，但作为毕业设计阶段的原型，系统仍有若干明显不足。下列几项按优先级由高到低列出。
+前述数据说明 RucksFS 在元数据关键路径上已经达到了当初设定的目标，但作为毕业设计阶段的原型，系统仍有几项明显不足。下列几项按优先级由高到低列出。
 
 \begin{enumerate}
-    \item \textbf{gRPC 网络往返开销}。这是目前最直接的性能短板。分布式模式下，一次 create 需要多次跨节点 RPC，网络延迟占了相当大的比重。后续可以通过合并相邻 RPC 调用、引入客户端元数据缓存等方式加以缓解。
     \item \textbf{DataServer 仍是最小实现}。当前 \texttt{RawDiskDataStore} 使用固定偏移公式直接映射 inode，\texttt{delete\_data} 是空操作，不做空间回收，单文件存在 128\,MiB 的逻辑上限。实验中使用 mdtest 的空文件负载可以跑通，但要作为真实可用的文件系统，还需要补上块分配、空间回收以及对大文件的支持。
-    \item \textbf{多节点扩展尚未实现}。当前实现虽然已经将 Client、MetadataServer、DataServer 分开部署，但主实现仍是单 MetadataServer 加单默认 DataServer，多节点元数据分片、数据副本以及故障切换均未实现。对应的架构预留（例如 \texttt{DataLocation} 中的路由字段）已经具备，但仍需后续完善。
-    \item \textbf{元数据预取与智能调度}。目前对所有元数据请求一视同仁，未区分冷热路径。实际负载中“readdir 完后立即批量 stat”较为常见，这类序列其实可以提前预取。后续可以探索利用 eBPF 在内核中采集访问模式，并据此实施预取。该方向的工程复杂度较高，建议排在前两项之后。
+
+    \item \textbf{客户端缓存策略偏保守}。本文为了对元数据路径做纯粹测量，把 FUSE 的 entry/attr TTL 设为 0，使每次 \texttt{lookup} 和 \texttt{getattr} 都穿透到服务端。这一选择的代价在第~\ref{sec:perf-horizontal}~节已有体现：$N=2$ 时 RucksFS 对 NFS 的 \texttt{create} 比值只有 0.52，主要原因就是每次 \texttt{create} 多走了一次 \texttt{lookup} 和一次 \texttt{release}，而其中 \texttt{lookup} 的结果在大多数应用访问模式下是稳定的，本可缓存。后续可以从三个方向展开：其一，把 TTL 放宽到秒级以吸收重复的 \texttt{getattr}；其二，为「名字不存在」的结果维护客户端负缓存，避免 create-before-check 这类语义反复触达服务端；其三，补一个目录失效协议——客户端缓存在目录发生 \texttt{rename}、\texttt{unlink} 时能够收到服务端主动推送的失效通知，而不是依赖 TTL 被动超时。前两项可通过调参实现，第三项需要协议层面的设计，工程量相对较大，但在共享目录场景下价值明显。
+
+    \item \textbf{跨服务 RPC 合并尚不充分}。一次 \texttt{create} 目前产生三次跨节点 RPC：一次 \texttt{lookup} 确认名字不冲突、一次 \texttt{create} 执行元数据事务、一次 \texttt{release} 释放句柄。NFS v4 通过 COMPOUND 请求把 \texttt{LOOKUP} 与 \texttt{CREATE} 打包到一次往返中，这也是低并发下 NFS 领先 RucksFS 的主要原因。本文已将 \texttt{create} 与 \texttt{open} 合并为 \texttt{create\_and\_open} 一次 RPC，下一步还可以从三个方向继续推进：一是把 \texttt{lookup} 合入 \texttt{create}，客户端在 \texttt{open(O\_CREAT)} 语义下本就允许「先检查后创建」在一次请求中完成；二是引入批量 \texttt{create} 接口，一次 RPC 创建 $K$ 个文件，均摊网络开销，对编译产物、日志归档等大批量写入场景意义直接；三是把 \texttt{readdirplus} 之后常见的批量 \texttt{setattr}、\texttt{unlink} 同样做成批量接口。这些改动都不触及元数据存储模型本身，只在客户端与服务端之间的协议层面做工程重构，收益相对确定。
 \end{enumerate}
+
