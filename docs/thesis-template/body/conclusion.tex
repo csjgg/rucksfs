@@ -5,11 +5,11 @@
 本文围绕“基于 KV 存储管理文件系统元数据”这一具体问题，设计并实现了 RucksFS——一个以 RocksDB 为元数据引擎、通过 FUSE 对外提供 POSIX 接口的分布式文件系统原型，并完成了较为完整的实验评估。具体完成的工作如下：
 
 \begin{enumerate}
-    \item 实现了基于 RocksDB 多列族的 FUSE 文件系统 RucksFS，支持 create、mkdir、unlink、rmdir、rename、readdir 等常用 POSIX 操作。元数据按访问模式划分到 inodes、dir\_entries、delta\_entries、system 四个列族；目录项键采用“父 inode + 子文件名”的大端序拼接编码，使文件操作基本对应于对目录树上一条边的增删。
+    \item 实现了基于 RocksDB 多列族的 FUSE 文件系统 RucksFS，支持 \texttt{create}、\texttt{mkdir}、\texttt{unlink}、\texttt{rmdir}、\texttt{rename}、\texttt{readdir}、\texttt{setattr}、\texttt{read}、\texttt{write} 等常用 POSIX 操作。元数据按访问模式划分到 \texttt{inodes}、\texttt{dir\_entries}、\texttt{delta\_entries}、\texttt{system} 四个列族；目录项键采用「父 inode + 子文件名」的大端序拼接编码，使文件操作基本对应对目录树上一条边的增删。
     \item 引入了增量更新与懒折叠机制（DeltaOp）。父目录属性的修改不再就地重写基值，而是追加一条 DeltaOp，读路径在读取时再将基值和增量合成；后台线程在增量条数超过 32 时执行折叠。该机制借鉴了 Mantle 的 Delta Record 思路，但实现上更为轻量，整个流程都在单个 RocksDB 实例内完成。
-    \item 基于 RocksDB 悲观事务（PCC）处理并发。所有跨键的目录操作通过事务完成加锁与冲突检测；跨 inode 操作按编号排序加锁以避免死锁；临时冲突时服务端自动重试最多 3 次，失败后才向上层返回 EAGAIN。
-    \item 客户端基于 fuse3 + tokio 异步实现，挂载时启用 default\_permissions 与 AllowOther，常规权限检查交由内核 VFS 完成。
-    \item 在 1 台 64 核服务器加最多 96 台 2 核客户端的腾讯云集群上完成了系统评估。POSIX 合规性方面，将 pjdfstest 398 个用例按实现范围分解后，本文明确不实现的 mknod/mkfifo 相关用例（167 条）、DataServer 单文件大小用例（1 条）和框架自身跳过项（48 条）合计 216 条；剩下 182 条“实现范围内”用例在分布式部署下全部通过，通过率 100\%。性能方面分两段：$N \in \{2, 8, 32\}$ 三档下进行三方对比，RucksFS 相对 JuiceFS+TiKV 在 create/remove/stat 三项上分别领先约 1.5--1.7 倍、1.8--2.2 倍与 1.2 倍；相对 NFS 在 $N=2$ 处因关闭客户端缓存、单次 create 多走两次 RPC 而略低于 NFS，但到 $N=32$ 时 ext4 的 \texttt{i\_rwsem} 锁开始主导，RucksFS 在 create 上反超 NFS 约 4.6 倍；stat 方向 NFS 始终领先 RucksFS，原因是 ext4 B+ 树点查与内核 NFS 路径在读取上更为直接。$N \geq 64$ 时 NFS 和 JuiceFS+TiKV 均无法给出稳定的数据，此时转用 Delta 与 NoDelta 两个构建变体互相对照，沿 $\mathrm{np} = N \times r$ 两个维度扫描——$\mathrm{np}$ 跨过 96 后 NoDelta 进入事务冲突循环、稳态吞吐停在 12\,000\,ops/s 附近，Delta 则继续扩展至 38\,000\,ops/s，$\mathrm{np}=384$ 时 create 比值 2.96、remove 比值 2.63；easy 模式下两者基本一致。
+    \item 基于 RocksDB 悲观事务（PCC）处理元数据并发。所有元数据变更操作通过事务完成加锁与冲突检测，以原子提交保证多键更新的一致性；跨 inode 事务按编号排序加锁以避免死锁；锁等待超时后服务端自动重试最多 3 次（起始退避 50\,\textmu s 并逐次翻倍），失败后才以 \texttt{EAGAIN} 向上层返回。
+    \item 客户端基于 fuse3 0.8（启用 \texttt{tokio-runtime} 与 \texttt{unprivileged} 特性）与 tokio 异步运行时实现，挂载时启用 \texttt{default\_permissions} 与 \texttt{allow\_other}，常规权限检查交由内核 VFS 完成。
+    \item 在 1 台 64 核服务器加最多 96 台 2 核客户端的腾讯云集群上完成了系统评估。POSIX 合规性方面，pjdfstest 套件共 398 条用例，按本文实现范围分解后剩下 182 条「实现范围内」用例在分布式部署下全部通过，通过率 100\%。性能方面分两段：$N \in \{2, 8, 32\}$ 三档下进行三方对比，RucksFS 相对 JuiceFS+TiKV 在 \texttt{create}/\texttt{remove}/\texttt{stat} 三项上分别领先约 1.5--1.7 倍、1.8--2.2 倍与 1.2 倍；相对 NFS 在 $N=2$ 处因关闭客户端缓存、单次 \texttt{create} 多走两次 RPC 而略低于 NFS，但到 $N=32$ 时 ext4 的 \texttt{i\_rwsem} 锁开始主导，RucksFS 在 \texttt{create} 上反超 NFS 约 4.6 倍；\texttt{stat} 方向 NFS 始终领先 RucksFS，原因是 ext4 B+ 树点查与内核 NFS 路径在读取上更为直接。$N \geq 64$ 时 NFS 和 JuiceFS+TiKV 均无法给出稳定的数据，此时转用 Delta 与 NoDelta 两个构建变体互相对照，沿 $\mathrm{np} = N \times r$ 两个维度扫描——$\mathrm{np}$ 超过 96 后 NoDelta 进入事务冲突循环、稳态吞吐保持在 12\,000\,ops/s 附近，Delta 则继续扩展至 38\,000\,ops/s，$\mathrm{np}=384$ 时 \texttt{create} 比值 2.96、\texttt{remove} 比值 2.63；easy 模式下两者基本一致。
 \end{enumerate}
 
 \subsection{不足与展望}
