@@ -17,7 +17,7 @@
 前述数据说明 RucksFS 在元数据关键路径上已经达到了当初设定的目标，但作为毕业设计阶段的原型，系统仍有几项明显不足。下列几项按优先级由高到低列出。
 
 \begin{enumerate}
-    \item \textbf{DataServer 仍是最小实现}。当前 \texttt{RawDiskDataStore} 使用固定偏移公式直接映射 inode，\texttt{delete\_data} 是空操作，不做空间回收，单文件存在 128\,MiB 的逻辑上限。实验中使用 mdtest 的空文件负载可以跑通，但要作为真实可用的文件系统，还需要补上块分配、空间回收以及对大文件的支持。
+    \item \textbf{DataServer 仍是最小实现}。当前 \texttt{RawDiskDataStore} 使用固定偏移公式直接映射 inode，\texttt{delete\_data} 是空操作，不做空间回收，单文件存在 64\,MiB 的逻辑上限。实验中使用 mdtest 的空文件负载可以跑通，但要作为真实可用的文件系统，还需要补上块分配、空间回收以及对大文件的支持。
 
     \item \textbf{客户端缓存策略偏保守}。本文为了对元数据路径做纯粹测量，把 FUSE 的 entry/attr TTL 设为 0，使每次 \texttt{lookup} 和 \texttt{getattr} 都穿透到服务端。这一选择的代价在第~\ref{sec:perf-horizontal}~节已有体现：$N=2$ 时 RucksFS 对 NFS 的 \texttt{create} 比值只有 0.52，主要原因就是每次 \texttt{create} 多走了一次 \texttt{lookup} 和一次 \texttt{release}，而其中 \texttt{lookup} 的结果在大多数应用访问模式下是稳定的，本可缓存。后续可以从三个方向展开：其一，把 TTL 放宽到秒级以吸收重复的 \texttt{getattr}；其二，为「名字不存在」的结果维护客户端负缓存，避免 create-before-check 这类语义反复触达服务端；其三，补一个目录失效协议——客户端缓存在目录发生 \texttt{rename}、\texttt{unlink} 时能够收到服务端主动推送的失效通知，而不是依赖 TTL 被动超时。前两项可通过调参实现，第三项需要协议层面的设计，工程量相对较大，但在共享目录场景下价值明显。
 
