@@ -1,20 +1,20 @@
 \abstractch
 
-文件系统中元数据操作（创建、删除、重命名等）通常占到 I/O 负载的 60\%--80\%，元数据的组织方式对系统整体吞吐有直接影响。传统文件系统使用 B+ 树管理目录项和 inode 索引，操作粒度为磁盘页——即便只增删一条目录项，也需要将整页读出、修改后再写回。在高并发小文件负载下，这种就地修改还会与目录级的锁竞争叠加，写放大和并发受限两个问题同时出现。键值（Key-Value, KV）存储把操作粒度从页降到单条记录，每条目录项独立保存为一个键值对，增删只需一次写入，不再涉及页结构的维护。在此基础上，基于 LSM-tree（Log-Structured Merge-tree）的 KV 引擎把分散的小写聚集到内存 MemTable 中，待其写满后再顺序批量刷盘，将元数据常见的随机小写转为顺序写入。
+文件系统中元数据操作（创建、删除、重命名等）通常占到 I/O 负载的 60\%--80\%，其组织方式对系统整体吞吐有直接影响。传统文件系统使用 B+ 树管理目录项和 inode 索引，操作粒度为磁盘页，这使得即便只增删一条目录项，也需要把整页读出、修改后再写回，在元数据密集的场景下，这种就地修改会和目录级的锁竞争，写放大和并发受限同时出现。基于 LSM-tree（Log-Structured Merge-tree）的键值（Key-Value, KV）存储在这方面体现出优势：操作粒度从页降到单条记录，每条目录项保存为一个独立键值对，增删只需一次追加写入；分散的小写入先汇入内存 MemTable，待其写满后顺序批量刷盘，把元数据常见的随机小写整理为顺序写入。
 
-基于上述思路，本课题设计并实现了 RucksFS——一个以 RocksDB 为存储引擎、通过 FUSE 提供 POSIX 接口的用户态文件系统，覆盖 \texttt{create}、\texttt{mkdir}、\texttt{unlink}、\texttt{rmdir}、\texttt{rename}、\texttt{readdir}、\texttt{setattr}、\texttt{read}、\texttt{write} 等常见文件操作。在键值存储上实现这些操作需要回答三个设计问题：元数据如何建模为键值结构、父目录的写放大如何控制、并发访问下的语义正确性如何保证。
+基于上述思路，本课题设计并实现了 RucksFS——一个以 RocksDB 为存储引擎、通过 FUSE 提供 POSIX 接口的用户态文件系统，覆盖 \texttt{create}、\texttt{mkdir}、\texttt{unlink}、\texttt{rmdir}、\texttt{rename}、\texttt{readdir}、\texttt{setattr}、\texttt{read}、\texttt{write} 等常见文件操作。实现过程中，本课题重点解决了三个核心问题：元数据如何建模为键值结构、并发访问下的语义正确性如何保证、共享父目录的并发竞争如何缓解。
 
-存储建模上，系统按列族（Column Family, CF）划分数据：inode 属性和目录项各占一个独立列族，配以不同的布隆过滤器和压缩策略。目录项列族的键以「父目录 inode 号 + 子文件名」大端序拼接构成，每条目录项对应目录树中的一条父子边。文件操作由此转化为对边的增删——\texttt{create} 插入一条边，\texttt{unlink} 删除一条边，\texttt{rename} 删除旧边后再插入新边——复杂度均为常数时间。相比之下，以全路径作为键的方案在执行 \texttt{rename} 时需要递归改写子树中的每一条键，代价随子树规模线性增长。同一父目录下的所有子项在键空间中相邻，目录遍历与单项查找可分别通过前缀扫描和点查完成。
+存储建模上，系统按列族（Column Family, CF）划分数据：inode 属性和目录项各占一个独立列族，配以不同的布隆过滤器和压缩策略。其中目录项列族的键以 “父目录 inode 号 + 子文件名” 大端序拼接构成，每条目录项对应目录树中的一条父子边。\texttt{create}、\texttt{unlink} 各对应一次目录项的插入或删除，\texttt{rename} 则是一删一插，三者代价都是常数级。这种建模也使得同一父目录下的所有子项在键空间中相邻，目录遍历与单项查找就可以分别使用前缀扫描和点查完成。
 
-写放大方面，POSIX 语义要求 \texttt{create} 和 \texttt{unlink} 同步更新父目录的时间戳与链接计数。高并发下同一父目录会反复成为写热点，沿用读-改-写的方式难以避免长时间的锁等待。本课题的做法是引入增量更新与懒折叠机制（DeltaOp）：写入时追加一条属性增量记录，不改动基础 inode 值，将就地改写转为追加写入；读取时把基础值与未合并的增量实时叠加后返回，保证调用方看到的是最新状态；后台线程定期扫描累积的增量，当条数超过阈值时一次折叠回基础值，从而在控制读路径开销的同时消除父目录的写竞争。
+并发安全方面，本课题使用 RocksDB 的悲观并发控制（Pessimistic Concurrency Control, PCC）事务：把 \texttt{create}、\texttt{rmdir}、\texttt{rename} 等操作中的 “检查与修改” 步骤封装在同一原子事务中，由键级加锁消除多线程下的竞态。
 
-并发安全方面，多线程对同一目录执行 \texttt{create}、\texttt{rmdir}、\texttt{rename} 等操作时，检查与修改之间存在天然的竞态窗口：\texttt{create} 需先确认无同名项再插入，\texttt{rmdir} 需先确认目录为空再删除，\texttt{rename} 还涉及跨目录的多键原子修改。本课题采用 RocksDB 的悲观并发控制（Pessimistic Concurrency Control, PCC）事务，对涉及的键逐一加锁，将检查与修改封装在同一原子操作中，消除上述竞态。
+事务保证了正确性，但 POSIX 语义要求 \texttt{create} 和 \texttt{unlink} 同步更新父目录的时间戳与链接计数，同一父目录在高并发下会成为写竞争热点。本课题为此引入增量更新与懒折叠机制（DeltaOp）：写入时不改动 inode 基值，只追加一条属性增量记录，将就地改写转为追加写入；读取时把基值与未折叠的增量实时叠加后返回，保证调用方看到的是最新状态；后台线程定期扫描累积的增量，超过阈值时一次折叠回基值。该机制在路径上消除了父目录的写锁争用。
 
-在分布式部署（客户端与 MetadataServer 位于不同节点）下运行 pjdfstest 全部 398 个用例。其中，167 个用例依赖本文明确不实现的 \texttt{mknod} 和 \texttt{mkfifo} 接口，1 个用例超出 DataServer 当前 64\,MiB 的单文件开发上限，另有 48 个用例被 pjdfstest 框架自身跳过（如 \texttt{utimensat}、\texttt{remount} 等，与元数据设计无关）。余下 182 个用例构成本文的实现范围，全部通过，通过率 100\%。
+分布式部署下运行 pjdfstest 套件共 398 个用例，排除依赖 \texttt{mknod}、\texttt{mkfifo} 等本文不支持接口的用例后，实现范围内的 182 个用例全部通过，通过率 100\%。
 
-性能方面，测试集群由 1 台 64 核服务器与最多 96 台 2 核客户端组成，使用 mdtest 压测。在 $N \in \{2, 8, 32\}$ 三档并发下对 RucksFS、NFS v4.2 与 JuiceFS+TiKV 作三方对比。相对 JuiceFS+TiKV，RucksFS 在 \texttt{create}、\texttt{remove}、\texttt{stat} 上分别领先约 1.5--1.7、1.8--2.2 和 1.2 倍，原因一是单机直连 RocksDB 不需承担 TiKV 的 Raft 与两阶段提交开销，二是 DeltaOp 缓解了共享父目录的写竞争。相对 NFS v4.2，$N=2$ 时 RucksFS 因关闭属性缓存而每次 \texttt{create} 多走两次 lookup RPC，略慢于 NFS；$N=32$ 时 NFS 受限于 ext4 的 \texttt{i\_rwsem} 锁，RucksFS 在 \texttt{create} 上反超约 4.6 倍。
+性能方面，使用 mdtest 在 1 台 64 核服务器与最多 96 台 2 核客户端构成的集群上压测元数据操作，并和 NFS、Juicefs进行对比。相对基于 ext4 的 NFS v4.2，RucksFS 在低并发下略慢，并发上升到 32 个客户端时 \texttt{create} 反超约 4.6 倍，印证了 KV + LSM 路线在高并发元数据负载下相较传统方案的优势；相对同为 KV 元数据方案的 JuiceFS+TiKV，RucksFS 在 \texttt{create}、\texttt{remove}、\texttt{stat} 上分别稳定领先约 1.5--1.7、1.8--2.2 和 1.2 倍，说明本课题在 KV 路线内部也做到了不错的实现水平。
 
-$N \geq 64$ 时，NFS 和 JuiceFS+TiKV 均无法稳定给出数据。在此区间内，对比对象转为 RucksFS 自身的 Delta 和 NoDelta 两个构建变体，按 $\mathrm{np} = N \times r$ 扫描并发。当 $\mathrm{np}$ 超过 96 后，NoDelta 因反复的事务冲突无法继续增长，稳态吞吐保持在 12\,000\,ops/s 附近；Delta 则继续扩展至 38\,000\,ops/s，$\mathrm{np}=384$ 时 \texttt{create} 与 \texttt{remove} 的比值分别为 2.96 和 2.63。在 easy 模式（每个进程使用独立父目录）下两个变体基本一致，说明上述收益来自消除共享父目录的写冲突。
+同时为了在更高并发下进一步考察 DeltaOp 的实际作用，本文编译了两个仅在是否启用 DeltaOp 上有差别的 RucksFS 版本，做并发消融对照。两个版本在每个进程使用独立父目录、彼此不产生冲突时表现基本一致，而一旦落到共享父目录场景，启用 DeltaOp 的版本表现出明显更好的可扩展性：并发数超过 96 后，不启用版本因反复的事务冲突无法继续增长，稳态吞吐保持在 12\,000\,ops/s 附近；启用版本则继续扩展至 38\,000\,ops/s，在 384 并发下 \texttt{create} 与 \texttt{remove} 吞吐分别达到前者的 2.96 倍和 2.63 倍。这证明了 DeltaOp 在高并发场景下的实际价值。
 
 \vspace{5pt}
 
