@@ -1,0 +1,155 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="620" viewBox="0 0 1000 620" role="img" aria-labelledby="desc">
+  <desc id="desc">RucksFS 系统架构图。展示 FUSE 客户端、元数据服务器(MDS)和数据服务器(DS)的内部结构及交互关系。</desc>
+
+  <defs>
+    <style>
+      .frame { fill: #ffffff; stroke: #b8b8b8; stroke-width: 1px; }
+      .component {
+        fill: #f6f6f6;
+        stroke: #111111;
+        stroke-width: 1.8px;
+        rx: 8px;
+      }
+      .inner {
+        fill: #ffffff;
+        stroke: #111111;
+        stroke-width: 1.4px;
+        rx: 6px;
+      }
+      .inner-dark {
+        fill: #e8e8e8;
+        stroke: #111111;
+        stroke-width: 1.4px;
+        rx: 6px;
+      }
+      .title, .mid, .small, .tiny, .mono {
+        font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+      }
+      .title { font-size: 19px; font-weight: 700; fill: #111111; }
+      .mid { font-size: 15px; fill: #111111; font-weight: 700; }
+      .small { font-size: 14px; fill: #333333; }
+      .tiny { font-size: 12px; fill: #555555; }
+      .mono {
+        font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+        font-size: 11px;
+        fill: #333333;
+      }
+      .arrow {
+        fill: none;
+        stroke: #111111;
+        stroke-width: 1.8px;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        marker-end: url(#arr);
+      }
+      .arrow-both {
+        fill: none;
+        stroke: #111111;
+        stroke-width: 1.8px;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        marker-start: url(#arr-rev);
+        marker-end: url(#arr);
+      }
+    </style>
+
+    <marker id="arr" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#111111" />
+    </marker>
+    <marker id="arr-rev" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M10,0 L0,5 L10,10 Z" fill="#111111" />
+    </marker>
+  </defs>
+
+  <rect x="5" y="5" width="990" height="610" class="frame" />
+
+  <!-- ===== 顶部：用户层 ===== -->
+  <rect x="280" y="22" width="440" height="34" class="inner-dark" />
+  <text x="500" y="44" text-anchor="middle" class="small">用户应用 / VFS</text>
+
+  <path d="M500 56 V72" class="arrow" />
+
+  <!-- ===== FUSE 客户端 ===== -->
+  <rect x="280" y="74" width="440" height="110" class="component" />
+  <text x="500" y="100" text-anchor="middle" class="title">FUSE 客户端</text>
+
+  <rect x="310" y="112" width="120" height="32" class="inner" />
+  <text x="370" y="133" text-anchor="middle" class="small">FUSE 协议层</text>
+
+  <rect x="440" y="112" width="100" height="32" class="inner" />
+  <text x="490" y="133" text-anchor="middle" class="small">VFS Core</text>
+
+  <rect x="550" y="112" width="140" height="32" class="inner" />
+  <text x="620" y="133" text-anchor="middle" class="small">gRPC Client</text>
+
+  <rect x="310" y="154" width="380" height="22" class="inner-dark" />
+  <text x="500" y="170" text-anchor="middle" class="tiny">TLS 1.3 + Bearer Token</text>
+
+  <!-- ===== 分叉箭头 ===== -->
+  <path d="M360 184 V218" class="arrow" />
+  <text x="360" y="210" text-anchor="middle" class="tiny">metadata RPC</text>
+
+  <path d="M640 184 V218" class="arrow" />
+  <text x="640" y="210" text-anchor="middle" class="tiny">data RPC</text>
+
+  <!-- ===== MDS 元数据服务器 ===== -->
+  <rect x="40" y="230" width="460" height="350" class="component" />
+  <text x="270" y="258" text-anchor="middle" class="title">MDS 元数据服务器</text>
+
+  <!-- 顶层：gRPC 服务 -->
+  <rect x="66" y="272" width="408" height="34" class="inner" />
+  <text x="270" y="294" text-anchor="middle" class="small">MetadataService (gRPC)</text>
+
+  <!-- 中间：核心设计模块横排 -->
+  <rect x="66" y="324" width="124" height="50" class="inner" />
+  <text x="128" y="346" text-anchor="middle" class="small">Delta</text>
+  <text x="128" y="364" text-anchor="middle" class="small">懒折叠</text>
+
+  <rect x="202" y="324" width="124" height="50" class="inner" />
+  <text x="264" y="346" text-anchor="middle" class="small">Inode</text>
+  <text x="264" y="364" text-anchor="middle" class="small">FoldedCache</text>
+
+  <rect x="338" y="324" width="136" height="50" class="inner" />
+  <text x="406" y="346" text-anchor="middle" class="small">目录锁 /</text>
+  <text x="406" y="364" text-anchor="middle" class="small">Rename 锁序</text>
+
+  <!-- 中间：Compaction -->
+  <rect x="66" y="390" width="408" height="34" class="inner" />
+  <text x="270" y="412" text-anchor="middle" class="small">DeltaCompactionWorker</text>
+
+  <!-- 底层：RocksDB -->
+  <rect x="66" y="440" width="408" height="120" class="inner-dark" />
+  <text x="270" y="470" text-anchor="middle" class="mid">RocksDB</text>
+  <text x="270" y="500" text-anchor="middle" class="small">多列族存储</text>
+  <text x="270" y="524" text-anchor="middle" class="tiny">inodes / dir_entries / delta_entries / allocator</text>
+
+  <!-- ===== DS 数据服务器 ===== -->
+  <rect x="540" y="230" width="420" height="350" class="component" />
+  <text x="750" y="258" text-anchor="middle" class="title">DS 数据服务器</text>
+
+  <!-- 顶层：gRPC 服务 -->
+  <rect x="566" y="272" width="368" height="34" class="inner" />
+  <text x="750" y="294" text-anchor="middle" class="small">DataService (gRPC)</text>
+
+  <!-- 中间：操作模块横排 -->
+  <rect x="566" y="324" width="108" height="50" class="inner" />
+  <text x="620" y="354" text-anchor="middle" class="small">Read</text>
+
+  <rect x="686" y="324" width="108" height="50" class="inner" />
+  <text x="740" y="354" text-anchor="middle" class="small">Write</text>
+
+  <rect x="806" y="324" width="128" height="50" class="inner" />
+  <text x="870" y="346" text-anchor="middle" class="small">Truncate /</text>
+  <text x="870" y="364" text-anchor="middle" class="small">Delete</text>
+
+  <!-- 底层：RawDisk Store -->
+  <rect x="566" y="392" width="368" height="168" class="inner-dark" />
+  <text x="750" y="430" text-anchor="middle" class="mid">RawDisk Store</text>
+  <text x="750" y="462" text-anchor="middle" class="small">基于 inode 的偏移寻址</text>
+  <text x="750" y="490" text-anchor="middle" class="tiny">offset = inode × block_size + byte_offset</text>
+  <text x="750" y="516" text-anchor="middle" class="tiny">直接磁盘 I/O，无文件系统开销</text>
+
+  <!-- ===== 标注 ===== -->
+  <text x="270" y="226" text-anchor="middle" class="mono">lookup / readdir / create / rename / unlink</text>
+  <text x="750" y="226" text-anchor="middle" class="mono">read / write / truncate / flush</text>
+</svg>

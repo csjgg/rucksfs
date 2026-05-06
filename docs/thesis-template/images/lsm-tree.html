@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LSM-tree</title>
+  <style>
+    :root {
+      --font: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+      --ink: #111111;
+      --muted: #333333;
+      --light: #f1f1f1;
+      --panel: #fafafa;
+      --paper: #ffffff;
+      --line: #111111;
+      --soft: #f6f6f6;
+      --key-fill: #9ca3af;
+      --key-text: #ffffff;
+      --dash: 8 7;
+      --stroke: 1.8px;
+      --radius: 8px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      width: 1600px;
+      height: 1000px;
+      overflow: hidden;
+      background: var(--paper);
+      font-family: var(--font);
+    }
+
+    .capture-frame {
+      width: 1600px;
+      height: 1000px;
+      border: 1px solid #b8b8b8;
+      background: var(--paper);
+    }
+
+    svg {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+
+    .box,
+    .level,
+    .sst,
+    .key,
+    .legend {
+      fill: var(--paper);
+      stroke: var(--line);
+      stroke-width: var(--stroke);
+    }
+
+    .box { fill: var(--panel); }
+
+    .memory-box,
+    .wal-box,
+    .read-box,
+    .level,
+    .compact-box {
+      fill: var(--soft);
+      stroke: var(--line);
+    }
+
+    .sst {
+      fill: #ffffff;
+      stroke: var(--line);
+    }
+
+    .box,
+    .level,
+    .legend {
+      rx: var(--radius);
+    }
+
+    .key {
+      fill: var(--key-fill);
+    }
+
+    .key-text,
+    .mid.key-text,
+    .tiny.key-text {
+      fill: var(--key-text);
+    }
+
+    .dashed-box {
+      fill: var(--paper);
+      stroke: var(--line);
+      stroke-width: var(--stroke);
+      stroke-dasharray: var(--dash);
+      rx: var(--radius);
+    }
+
+    .dashed-box.read-box,
+    .dashed-box.compact-box {
+      fill: var(--soft);
+      stroke: var(--line);
+    }
+
+    .label {
+      font-size: 22px;
+      font-weight: 700;
+      fill: var(--ink);
+    }
+
+    .mid {
+      font-size: 17px;
+      fill: var(--ink);
+    }
+
+    .small {
+      font-size: 14px;
+      fill: var(--muted);
+    }
+
+    .tiny {
+      font-size: 12px;
+      fill: var(--muted);
+    }
+
+    .note {
+      font-size: 16px;
+      fill: var(--muted);
+    }
+
+    .note-strong {
+      font-size: 18px;
+      fill: var(--ink);
+    }
+
+    .read-note {
+      font-size: 18px;
+      fill: var(--ink);
+    }
+
+    .level-title {
+      font-size: 18px;
+      font-weight: 700;
+      fill: var(--ink);
+    }
+
+    .arrow {
+      fill: none;
+      stroke: var(--line);
+      stroke-width: 2px;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      marker-end: url(#arrow);
+    }
+
+    .dash-line {
+      fill: none;
+      stroke: var(--line);
+      stroke-width: 1.5px;
+      stroke-dasharray: var(--dash);
+    }
+
+    .dash-arrow {
+      fill: none;
+      stroke: var(--line);
+      stroke-width: 1.8px;
+      stroke-dasharray: var(--dash);
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      marker-end: url(#arrow);
+    }
+
+    .bracket {
+      fill: none;
+      stroke: var(--line);
+      stroke-width: 2px;
+      marker-end: url(#arrow);
+    }
+  </style>
+</head>
+<body>
+  <main class="capture-frame" aria-label="LSM-tree 原理图截图区域">
+    <svg viewBox="0 0 1600 1000" role="img" aria-labelledby="desc">
+      <desc id="desc">LSM-tree 原理图。左侧显示写入路径，中间显示 MemTable 与多层 SSTable，右侧显示读取路径，底部显示 Compaction 过程。</desc>
+
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,0 L10,5 L0,10 Z" fill="#111111"></path>
+        </marker>
+      </defs>
+
+      <rect x="110" y="42" width="110" height="38" class="box memory-box"></rect>
+      <text x="165" y="68" text-anchor="middle" class="mid" font-weight="700">写入路径</text>
+
+      <rect x="60" y="110" width="210" height="76" class="box memory-box"></rect>
+      <text x="165" y="142" text-anchor="middle" class="label">写入</text>
+      <text x="165" y="166" text-anchor="middle" class="mid">Insert / Delete</text>
+
+      <rect x="60" y="250" width="210" height="72" class="box wal-box"></rect>
+      <text x="165" y="281" text-anchor="middle" class="label">WAL</text>
+      <text x="165" y="305" text-anchor="middle" class="mid">(顺序追加)</text>
+
+      <rect x="60" y="390" width="210" height="82" class="box memory-box"></rect>
+      <text x="165" y="423" text-anchor="middle" class="label">内存表</text>
+      <text x="165" y="448" text-anchor="middle" class="mid">(MemTable)</text>
+
+      <rect x="90" y="548" width="150" height="52" class="dashed-box read-box"></rect>
+      <text x="165" y="581" text-anchor="middle" class="mid">查询可见</text>
+
+      <path d="M165 186 V242" class="arrow"></path>
+      <path d="M165 322 V382" class="arrow"></path>
+      <path d="M165 548 V480" class="dash-arrow"></path>
+
+      <text x="302" y="352" text-anchor="middle" class="note">达到阈值</text>
+      <path d="M330 356 H292 V431 H270" class="dash-arrow"></path>
+
+      <rect x="430" y="54" width="560" height="100" class="box memory-box"></rect>
+      <text x="710" y="84" text-anchor="middle" class="label">内存表 (MemTable)</text>
+      <rect x="470" y="100" width="86" height="38" class="key"></rect>
+      <rect x="556" y="100" width="100" height="38" class="key"></rect>
+      <rect x="656" y="100" width="86" height="38" class="key"></rect>
+      <rect x="742" y="100" width="100" height="38" class="key"></rect>
+      <rect x="842" y="100" width="100" height="38" class="key"></rect>
+      <text x="513" y="125" text-anchor="middle" class="mid key-text">K1</text>
+      <text x="606" y="125" text-anchor="middle" class="mid key-text">K3</text>
+      <text x="699" y="125" text-anchor="middle" class="mid key-text">K4</text>
+      <text x="792" y="125" text-anchor="middle" class="mid key-text">...</text>
+      <text x="892" y="125" text-anchor="middle" class="mid key-text">Kn</text>
+
+      <line x1="350" y1="174" x2="1190" y2="174" class="dash-line"></line>
+      <text x="1150" y="150" text-anchor="middle" class="note-strong">内存</text>
+      <text x="1150" y="240" text-anchor="middle" class="note-strong">磁盘</text>
+
+      <path d="M710 154 V207" class="arrow"></path>
+      <rect x="732" y="173" width="64" height="24" fill="#ffffff"></rect>
+      <text x="742" y="184" class="note">Flush</text>
+
+      <rect x="390" y="207" width="650" height="110" class="level"></rect>
+      <text x="420" y="235" class="level-title">Level 0 (L0)</text>
+      <rect x="430" y="245" width="150" height="54" class="sst"></rect>
+      <rect x="610" y="245" width="150" height="54" class="sst"></rect>
+      <rect x="790" y="245" width="150" height="54" class="sst"></rect>
+      <text x="505" y="270" text-anchor="middle" class="small">SSTable 1</text>
+      <text x="505" y="291" text-anchor="middle" class="small">[A, F]</text>
+      <text x="685" y="270" text-anchor="middle" class="small">SSTable 2</text>
+      <text x="685" y="291" text-anchor="middle" class="small">[D, K]</text>
+      <text x="865" y="270" text-anchor="middle" class="small">SSTable 3</text>
+      <text x="865" y="291" text-anchor="middle" class="small">[H, N]</text>
+      <text x="980" y="288" text-anchor="middle" class="label">...</text>
+
+      <line x1="350" y1="333" x2="1040" y2="333" class="dash-line"></line>
+
+      <rect x="390" y="345" width="650" height="110" class="level"></rect>
+      <text x="420" y="373" class="level-title">Level 1 (L1)</text>
+      <rect x="430" y="385" width="150" height="48" class="sst"></rect>
+      <rect x="610" y="385" width="150" height="48" class="sst"></rect>
+      <rect x="790" y="385" width="150" height="48" class="sst"></rect>
+      <text x="505" y="407" text-anchor="middle" class="small">SSTable 1</text>
+      <text x="505" y="427" text-anchor="middle" class="small">[A, D]</text>
+      <text x="685" y="407" text-anchor="middle" class="small">SSTable 2</text>
+      <text x="685" y="427" text-anchor="middle" class="small">[D, G]</text>
+      <text x="865" y="407" text-anchor="middle" class="small">SSTable 3</text>
+      <text x="865" y="427" text-anchor="middle" class="small">[G, K]</text>
+      <text x="980" y="424" text-anchor="middle" class="label">...</text>
+
+      <line x1="350" y1="463" x2="1040" y2="463" class="dash-line"></line>
+
+      <rect x="390" y="485" width="650" height="110" class="level"></rect>
+      <text x="420" y="515" class="level-title">Level i (Li)</text>
+      <rect x="430" y="523" width="150" height="54" class="sst"></rect>
+      <rect x="610" y="523" width="150" height="54" class="sst"></rect>
+      <rect x="790" y="523" width="150" height="54" class="sst"></rect>
+      <text x="505" y="548" text-anchor="middle" class="small">SSTable 1</text>
+      <text x="505" y="566" text-anchor="middle" class="small">[A, Xᵢ]</text>
+      <text x="685" y="548" text-anchor="middle" class="small">SSTable 2</text>
+      <text x="685" y="566" text-anchor="middle" class="small">[Xᵢ, Yᵢ]</text>
+      <text x="865" y="548" text-anchor="middle" class="small">SSTable 3</text>
+      <text x="865" y="566" text-anchor="middle" class="small">[Yᵢ, Z]</text>
+      <text x="980" y="558" text-anchor="middle" class="label">...</text>
+
+      <line x1="350" y1="609" x2="1040" y2="609" class="dash-line"></line>
+      <text x="710" y="632" text-anchor="middle" class="label">⋮</text>
+
+      <rect x="390" y="639" width="650" height="110" class="level"></rect>
+      <text x="420" y="669" class="level-title">Level N (LN)</text>
+      <rect x="430" y="677" width="150" height="54" class="sst"></rect>
+      <rect x="610" y="677" width="150" height="54" class="sst"></rect>
+      <rect x="790" y="677" width="150" height="54" class="sst"></rect>
+      <text x="505" y="709" text-anchor="middle" class="small">SSTable 1</text>
+      <text x="685" y="709" text-anchor="middle" class="small">SSTable 2</text>
+      <text x="865" y="709" text-anchor="middle" class="small">SSTable k</text>
+      <text x="980" y="712" text-anchor="middle" class="label">...</text>
+
+      <path d="M1085 297 H1108 V695" class="bracket"></path>
+      <text x="1158" y="423" text-anchor="middle" class="label">合并</text>
+      <text x="1168" y="451" text-anchor="middle" class="note">Compaction</text>
+
+      <rect x="1345" y="42" width="110" height="38" class="box read-box"></rect>
+      <text x="1400" y="68" text-anchor="middle" class="mid" font-weight="700">读取路径</text>
+
+      <rect x="1285" y="110" width="230" height="76" class="box read-box"></rect>
+      <text x="1400" y="154" text-anchor="middle" class="label">查询 Key</text>
+      <rect x="1258" y="286" width="288" height="404" class="dashed-box read-box"></rect>
+      <path d="M1400 186 V286" class="arrow"></path>
+      <text x="1402" y="330" text-anchor="middle" class="read-note">按顺序查找：</text>
+      <text x="1402" y="381" text-anchor="middle" class="read-note">1. MemTable</text>
+      <text x="1402" y="432" text-anchor="middle" class="read-note">2. Level 0</text>
+      <text x="1402" y="458" text-anchor="middle" class="read-note">多个 SSTable</text>
+      <text x="1402" y="510" text-anchor="middle" class="read-note">3. Level 1</text>
+      <text x="1402" y="559" text-anchor="middle" class="read-note">...</text>
+      <text x="1402" y="608" text-anchor="middle" class="read-note">N. Level N</text>
+      <text x="1402" y="654" text-anchor="middle" class="read-note">未找到：返回不存在</text>
+
+      <line x1="70" y1="770" x2="1230" y2="770" class="dash-line"></line>
+      <text x="650" y="810" text-anchor="middle" class="label">合并（Compaction）</text>
+
+      <text x="292" y="840" text-anchor="middle" class="note">输入（来自较高层）</text>
+      <rect x="150" y="856" width="120" height="52" class="sst"></rect>
+      <rect x="290" y="856" width="120" height="52" class="sst"></rect>
+      <rect x="470" y="856" width="120" height="52" class="sst"></rect>
+      <text x="210" y="878" text-anchor="middle" class="mid">Li</text>
+      <text x="210" y="900" text-anchor="middle" class="small">SSTable 1</text>
+      <text x="350" y="878" text-anchor="middle" class="mid">Li</text>
+      <text x="350" y="900" text-anchor="middle" class="small">SSTable 2</text>
+      <text x="530" y="878" text-anchor="middle" class="mid">Li</text>
+      <text x="530" y="900" text-anchor="middle" class="small">SSTable k</text>
+      <text x="430" y="886" text-anchor="middle" class="label">...</text>
+
+      <path d="M610 882 H760" class="arrow"></path>
+      <text x="685" y="860" text-anchor="middle" class="note">合并 + 去重</text>
+
+      <text x="940" y="840" text-anchor="middle" class="note">输出（写入下一层）</text>
+      <rect x="785" y="856" width="120" height="52" class="sst"></rect>
+      <rect x="920" y="856" width="120" height="52" class="sst"></rect>
+      <rect x="1090" y="856" width="120" height="52" class="sst"></rect>
+      <text x="845" y="878" text-anchor="middle" class="mid">Li+1</text>
+      <text x="845" y="900" text-anchor="middle" class="small">SSTable 1</text>
+      <text x="980" y="878" text-anchor="middle" class="mid">Li+1</text>
+      <text x="980" y="900" text-anchor="middle" class="small">SSTable 2</text>
+      <text x="1150" y="878" text-anchor="middle" class="mid">Li+1</text>
+      <text x="1150" y="900" text-anchor="middle" class="small">SSTable m</text>
+      <text x="1060" y="886" text-anchor="middle" class="label">...</text>
+
+      <rect x="1265" y="770" width="300" height="135" class="dashed-box compact-box"></rect>
+      <rect x="1295" y="793" width="52" height="30" class="key"></rect>
+      <text x="1321" y="813" text-anchor="middle" class="tiny key-text">Key</text>
+      <text x="1370" y="814" class="mid">Key（查询键）</text>
+      <rect x="1295" y="842" width="52" height="34" class="sst"></rect>
+      <text x="1370" y="860" class="mid">SSTable</text>
+      <text x="1370" y="884" class="small">[A, C] 表示键范围示例</text>
+    </svg>
+  </main>
+</body>
+</html>

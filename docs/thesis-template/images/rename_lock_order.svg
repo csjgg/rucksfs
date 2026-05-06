@@ -1,0 +1,161 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1060" height="380" viewBox="0 0 1060 380" role="img" aria-labelledby="desc">
+  <desc id="desc">rename 操作的统一加锁顺序图。展示按 inode 编号升序加锁如何避免死锁。</desc>
+
+  <defs>
+    <style>
+      .frame { fill: #ffffff; stroke: #b8b8b8; stroke-width: 1px; }
+      .box, .card, .key, .flow-box, .note-box {
+        fill: #ffffff;
+        stroke: #111111;
+        stroke-width: 1.8px;
+        rx: 8px;
+      }
+      .box, .flow-box { fill: #f6f6f6; }
+      .key { fill: #9ca3af; }
+      .blocked {
+        fill: #e5e7eb;
+        stroke: #111111;
+        stroke-width: 1.8px;
+        stroke-dasharray: 8 7;
+        rx: 8px;
+      }
+      .group-box {
+        fill: #f9fafb;
+        stroke: #111111;
+        stroke-width: 1.4px;
+        stroke-dasharray: 8 7;
+        rx: 8px;
+      }
+      .note-box {
+        fill: #f9fafb;
+        stroke: #111111;
+        stroke-width: 1.4px;
+        stroke-dasharray: 8 7;
+        rx: 8px;
+      }
+      .title, .mid, .small, .tiny, .strong, .white {
+        font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+      }
+      .title { font-size: 21px; font-weight: 700; fill: #111111; }
+      .mid { font-size: 18px; fill: #111111; }
+      .small { font-size: 15px; fill: #333333; }
+      .tiny { font-size: 13px; fill: #333333; }
+      .strong { font-size: 16px; font-weight: 700; fill: #111111; }
+      .white { fill: #ffffff; }
+      .arrow {
+        fill: none;
+        stroke: #111111;
+        stroke-width: 1.8px;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        marker-end: url(#arrow);
+      }
+      .dot-arrow {
+        fill: none;
+        stroke: #111111;
+        stroke-width: 1.6px;
+        stroke-dasharray: 4 4;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        marker-end: url(#arrow);
+      }
+      .timeline {
+        fill: none;
+        stroke: #111111;
+        stroke-width: 1.4px;
+      }
+    </style>
+
+    <marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.8" markerHeight="6.8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#111111" />
+    </marker>
+  </defs>
+
+  <rect x="10" y="10" width="1040" height="360" class="frame" />
+
+  <!-- ===== 顶部：两个事务的锁集合 ===== -->
+
+  <!-- T₁ 锁集合 -->
+  <text x="68" y="52" text-anchor="middle" class="strong">T₁</text>
+  <rect x="100" y="34" width="120" height="42" class="key" />
+  <text x="160" y="61" text-anchor="middle" class="mid white">inode 5</text>
+  <path d="M220 55 H246" class="arrow" />
+  <rect x="246" y="34" width="120" height="42" class="key" />
+  <text x="306" y="61" text-anchor="middle" class="mid white">inode 17</text>
+  <path d="M366 55 H392" class="arrow" />
+  <rect x="392" y="34" width="120" height="42" class="key" />
+  <text x="452" y="61" text-anchor="middle" class="mid white">inode 42</text>
+
+  <!-- T₂ 锁集合 -->
+  <text x="538" y="52" text-anchor="middle" class="strong">T₂</text>
+  <rect x="570" y="34" width="120" height="42" class="key" />
+  <text x="630" y="61" text-anchor="middle" class="mid white">inode 5</text>
+  <path d="M690 55 H716" class="arrow" />
+  <rect x="716" y="34" width="120" height="42" class="key" />
+  <text x="776" y="61" text-anchor="middle" class="mid white">inode 17</text>
+  <path d="M836 55 H862" class="arrow" />
+  <rect x="862" y="34" width="120" height="42" class="key" />
+  <text x="922" y="61" text-anchor="middle" class="mid white">inode 99</text>
+
+  <!-- ===== 时间线 T₁ ===== -->
+  <text x="56" y="136" text-anchor="middle" class="strong">T₁</text>
+  <text x="56" y="156" text-anchor="middle" class="tiny">先到</text>
+  <line x1="90" y1="142" x2="1000" y2="142" class="timeline" />
+
+  <rect x="110" y="114" width="150" height="56" class="card" />
+  <text x="185" y="146" text-anchor="middle" class="mid">lock(5)</text>
+
+  <path d="M260 142 H310" class="arrow" />
+
+  <rect x="310" y="114" width="150" height="56" class="card" />
+  <text x="385" y="146" text-anchor="middle" class="mid">lock(17)</text>
+
+  <path d="M460 142 H510" class="arrow" />
+
+  <rect x="510" y="114" width="150" height="56" class="card" />
+  <text x="585" y="146" text-anchor="middle" class="mid">lock(42)</text>
+
+  <path d="M660 142 H710" class="arrow" />
+
+  <rect x="710" y="114" width="200" height="56" class="card" />
+  <text x="810" y="146" text-anchor="middle" class="mid">commit</text>
+
+  <!-- ===== 时间线 T₂ ===== -->
+  <text x="56" y="296" text-anchor="middle" class="strong">T₂</text>
+  <text x="56" y="316" text-anchor="middle" class="tiny">后到</text>
+  <line x1="90" y1="302" x2="1000" y2="302" class="timeline" />
+
+  <!-- 阻塞框 -->
+  <rect x="110" y="274" width="200" height="56" class="blocked" />
+  <text x="210" y="306" text-anchor="middle" class="mid">lock(5) 阻塞</text>
+
+  <path d="M310 302 H370" class="arrow" />
+
+  <!-- T₂ 获得锁后的流程，用虚线框包裹 -->
+  <rect x="370" y="264" width="560" height="76" class="group-box" />
+
+  <rect x="394" y="274" width="150" height="56" class="card" />
+  <text x="469" y="306" text-anchor="middle" class="mid">lock(5)</text>
+
+  <path d="M544 302 H584" class="arrow" />
+
+  <rect x="584" y="274" width="150" height="56" class="card" />
+  <text x="659" y="306" text-anchor="middle" class="mid">lock(17)</text>
+
+  <path d="M734 302 H774" class="arrow" />
+
+  <rect x="774" y="274" width="150" height="56" class="card" />
+  <text x="849" y="306" text-anchor="middle" class="mid">lock(99)</text>
+
+  <!-- ===== 跨时间线的点线箭头 ===== -->
+  <!-- T₁ lock(5) 持有导致 T₂ 阻塞 -->
+  <path d="M185 170 V268" class="dot-arrow" />
+  <text x="199" y="228" text-anchor="start" class="small">持有，T₂ 阻塞</text>
+
+  <!-- T₁ commit 释放后唤醒 T₂ 进入虚线框 -->
+  <path d="M810 170 V258" class="dot-arrow" />
+  <text x="824" y="212" text-anchor="start" class="small">释放全部锁</text>
+  <text x="824" y="232" text-anchor="start" class="small">唤醒 T₂</text>
+
+  <!-- ===== 底部：说明框 ===== -->
+</svg>

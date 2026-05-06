@@ -1,0 +1,191 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1348" height="590" viewBox="0 0 1348 590" role="img" aria-labelledby="desc">
+  <desc id="desc">Delta 懒折叠机制图。中间展示 InodeFoldedCache、inodes 列族与 delta_entries 列族；左侧为读路径，右侧为写路径，下方为后台折叠线程。</desc>
+
+  <defs>
+    <style>
+      .frame { fill: #ffffff; stroke: #b8b8b8; stroke-width: 1px; }
+      .box, .panel, .card, .key, .flow-box {
+        fill: #ffffff;
+        stroke: #111111;
+        stroke-width: 1.8px;
+        rx: 8px;
+      }
+      .box, .panel, .flow-box { fill: #f6f6f6; }
+      .key { fill: #9ca3af; }
+      .title, .mid, .small, .tiny, .strong, .white {
+        font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+      }
+      .title { font-size: 21px; font-weight: 700; fill: #111111; }
+      .mid { font-size: 18px; fill: #111111; }
+      .small { font-size: 15px; fill: #333333; }
+      .tiny { font-size: 13px; fill: #333333; }
+      .strong { font-size: 16px; font-weight: 700; fill: #111111; }
+      .white { fill: #ffffff; }
+      .arrow {
+        fill: none;
+        stroke: #111111;
+        stroke-width: 1.8px;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        marker-end: url(#arrow);
+      }
+      .separator {
+        fill: none;
+        stroke: #111111;
+        stroke-width: 1.4px;
+        stroke-dasharray: 8 7;
+      }
+      .soft-line {
+        fill: none;
+        stroke: #111111;
+        stroke-width: 1.4px;
+        stroke-dasharray: 5 6;
+      }
+    </style>
+
+    <marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.8" markerHeight="6.8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#111111" />
+    </marker>
+  </defs>
+
+  <rect x="10" y="10" width="1328" height="570" class="frame" />
+
+  <!-- ===== 中间：结构示意 ===== -->
+  <rect x="310" y="26" width="728" height="400" class="box" />
+  <text x="674" y="52" text-anchor="middle" class="title">结构示意</text>
+
+  <!-- 内存层 · InodeFoldedCache -->
+  <rect x="354" y="66" width="640" height="82" class="box" />
+  <text x="674" y="90" text-anchor="middle" class="title">内存层 · InodeFoldedCache</text>
+
+  <rect x="374" y="106" width="110" height="32" class="key" />
+  <rect x="484" y="106" width="90" height="32" class="card" />
+  <text x="429" y="127" text-anchor="middle" class="small white">inode:42</text>
+  <text x="529" y="127" text-anchor="middle" class="small">完整属性</text>
+
+  <rect x="592" y="106" width="110" height="32" class="key" />
+  <rect x="702" y="106" width="90" height="32" class="card" />
+  <text x="647" y="127" text-anchor="middle" class="small white">inode:57</text>
+  <text x="747" y="127" text-anchor="middle" class="small">完整属性</text>
+
+  <rect x="810" y="106" width="110" height="32" class="key" />
+  <rect x="920" y="106" width="60" height="32" class="card" />
+  <text x="865" y="127" text-anchor="middle" class="small white">inode:99</text>
+  <text x="950" y="127" text-anchor="middle" class="small">…</text>
+
+  <!-- 分隔线 -->
+  <line x1="340" y1="184" x2="1008" y2="184" class="separator" />
+  <text x="366" y="174" text-anchor="start" class="strong">内存层</text>
+  <text x="366" y="204" text-anchor="start" class="strong">列族层</text>
+
+  <!-- inodes 列族 -->
+  <rect x="344" y="214" width="270" height="186" class="panel" />
+  <text x="479" y="240" text-anchor="middle" class="title">inodes 列族</text>
+
+  <rect x="378" y="258" width="130" height="36" class="key" />
+  <rect x="508" y="258" width="80" height="36" class="card" />
+  <text x="443" y="281" text-anchor="middle" class="small white">inode:42</text>
+  <text x="548" y="281" text-anchor="middle" class="small">基值</text>
+
+  <rect x="378" y="302" width="130" height="36" class="key" />
+  <rect x="508" y="302" width="80" height="36" class="card" />
+  <text x="443" y="325" text-anchor="middle" class="small white">inode:57</text>
+  <text x="548" y="325" text-anchor="middle" class="small">基值</text>
+
+  <rect x="378" y="346" width="130" height="36" class="key" />
+  <rect x="508" y="346" width="80" height="36" class="card" />
+  <text x="443" y="369" text-anchor="middle" class="small white">inode:99</text>
+  <text x="548" y="369" text-anchor="middle" class="small">基值</text>
+
+  <!-- delta_entries 列族 -->
+  <rect x="654" y="214" width="350" height="186" class="panel" />
+  <text x="829" y="240" text-anchor="middle" class="title">delta_entries 列族</text>
+
+  <rect x="736" y="258" width="140" height="36" class="key" />
+  <rect x="876" y="258" width="102" height="36" class="card" />
+  <text x="806" y="281" text-anchor="middle" class="small white">42 | seq:0</text>
+  <text x="927" y="281" text-anchor="middle" class="small">nlink +1</text>
+
+  <rect x="736" y="302" width="140" height="36" class="key" />
+  <rect x="876" y="302" width="102" height="36" class="card" />
+  <text x="806" y="325" text-anchor="middle" class="small white">42 | seq:1</text>
+  <text x="927" y="325" text-anchor="middle" class="small">mtime</text>
+
+  <rect x="736" y="346" width="140" height="36" class="key" />
+  <rect x="876" y="346" width="102" height="36" class="card" />
+  <text x="806" y="369" text-anchor="middle" class="small white">42 | seq:2</text>
+  <text x="927" y="369" text-anchor="middle" class="small">ctime</text>
+
+  <!-- 竖排"同前缀递增序号" -->
+  <path d="M722 258 H712 V382 H722" class="soft-line" />
+  <text x="694" y="320" text-anchor="middle" class="tiny" writing-mode="tb">同前缀递增序号</text>
+
+  <!-- ===== 左侧：读路径 ===== -->
+  <rect x="30" y="26" width="260" height="400" class="box flow-box" />
+  <text x="160" y="52" text-anchor="middle" class="title">读路径</text>
+
+  <rect x="54" y="76" width="212" height="48" class="card" />
+  <text x="160" y="106" text-anchor="middle" class="mid">查询请求</text>
+  <path d="M160 124 V144" class="arrow" />
+
+  <rect x="54" y="144" width="212" height="48" class="card" />
+  <text x="160" y="174" text-anchor="middle" class="mid">查缓存</text>
+  <path d="M160 192 V212" class="arrow" />
+
+  <rect x="54" y="212" width="212" height="48" class="card" />
+  <text x="160" y="242" text-anchor="middle" class="mid">读取基值</text>
+  <path d="M160 260 V280" class="arrow" />
+
+  <rect x="54" y="280" width="212" height="48" class="card" />
+  <text x="160" y="310" text-anchor="middle" class="mid">扫描增量</text>
+  <path d="M160 328 V348" class="arrow" />
+
+  <rect x="54" y="348" width="212" height="48" class="card" />
+  <text x="160" y="378" text-anchor="middle" class="mid">折叠并回填缓存</text>
+
+  <!-- ===== 右侧：写路径 ===== -->
+  <rect x="1058" y="26" width="260" height="400" class="box flow-box" />
+  <text x="1188" y="52" text-anchor="middle" class="title">写路径</text>
+
+  <rect x="1082" y="76" width="212" height="48" class="card" />
+  <text x="1188" y="106" text-anchor="middle" class="mid">目录修改</text>
+  <path d="M1188 124 V144" class="arrow" />
+
+  <rect x="1082" y="144" width="212" height="48" class="card" />
+  <text x="1188" y="174" text-anchor="middle" class="mid">生成 DeltaOp</text>
+  <path d="M1188 192 V212" class="arrow" />
+
+  <rect x="1082" y="212" width="212" height="48" class="card" />
+  <text x="1188" y="242" text-anchor="middle" class="mid">追加到日志列族</text>
+  <path d="M1188 260 V280" class="arrow" />
+
+  <rect x="1082" y="280" width="212" height="48" class="card" />
+  <text x="1188" y="310" text-anchor="middle" class="mid">叠加到缓存</text>
+  <path d="M1188 328 V348" class="arrow" />
+
+  <rect x="1082" y="348" width="212" height="48" class="card" />
+  <text x="1188" y="378" text-anchor="middle" class="mid">标记 dirty inode</text>
+
+  <!-- ===== 下方：后台折叠线程 ===== -->
+  <rect x="30" y="444" width="1288" height="120" class="box flow-box" />
+  <text x="674" y="470" text-anchor="middle" class="title">后台折叠线程</text>
+
+  <rect x="86" y="486" width="196" height="52" class="card" />
+  <text x="184" y="518" text-anchor="middle" class="mid">扫描 dirty inode</text>
+  <path d="M282 512 H322" class="arrow" />
+
+  <rect x="322" y="486" width="196" height="52" class="card" />
+  <text x="420" y="518" text-anchor="middle" class="mid">未达阈值，跳过</text>
+  <path d="M518 512 H558" class="arrow" />
+
+  <rect x="558" y="486" width="210" height="52" class="card" />
+  <text x="663" y="518" text-anchor="middle" class="mid">达到阈值，读取</text>
+  <path d="M768 512 H808" class="arrow" />
+
+  <rect x="808" y="486" width="210" height="52" class="card" />
+  <text x="913" y="518" text-anchor="middle" class="mid">折叠写回基值</text>
+  <path d="M1018 512 H1058" class="arrow" />
+
+  <rect x="1058" y="486" width="210" height="52" class="card" />
+  <text x="1163" y="518" text-anchor="middle" class="mid">清理增量</text>
+</svg>
