@@ -77,7 +77,7 @@
     \IfStrEqCase{\HGP@mode}{
         {proposal}{}
         {translation}{{\noindent\bf\zihao{4}摘要：}}
-        {thesis}{\sectionUnnumbered{摘\hspace{1em}要}}
+        {thesis}{\sectionUnnumbered{\texorpdfstring{摘\hspace{1em}要}{摘要}}}
     }
 }
 
@@ -91,8 +91,8 @@
 }
 
 % 致谢标题
-\newcommand{\acknowledgement}{\sectionUnnumbered{\ifdefstring
-    {\HGP@mode}{thesis}{致\hspace{1em}谢}{致谢}
+\newcommand{\acknowledgement}{\sectionUnnumbered{\texorpdfstring{\ifdefstring
+    {\HGP@mode}{thesis}{致\hspace{1em}谢}{致谢}}{致谢}
 }}
 
 % 文献翻译结尾插入原文
