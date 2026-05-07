@@ -33,7 +33,7 @@
     BoldFont=FandolHei-Regular.otf,
     ItalicFont=FandolKai-Regular.otf
 ]{FandolSong-Regular.otf}
-\setmainfont{Liberation Serif}
+\setmainfont{Times New Roman}
 
 %====================== 参数 ======================%
 \def\HGP@mode{thesis}
