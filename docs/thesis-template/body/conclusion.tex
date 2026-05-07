@@ -2,7 +2,7 @@
 
 \subsection{工作总结}
 
-本文围绕基于 KV 存储管理文件系统元数据这一问题，设计并实现了 RucksFS，一个以 RocksDB 为元数据引擎、通过 FUSE 对外提供 POSIX 接口的分布式文件系统原型，并完成了较为完整的实验评估。具体完成的工作如下：
+本课题围绕基于 KV 存储管理文件系统元数据这一问题，设计并实现了 RucksFS，一个以 RocksDB 为元数据引擎、通过 FUSE 对外提供 POSIX 接口的分布式文件系统原型，并完成了较为完整的实验评估。具体完成的工作如下：
 
 \begin{enumerate}
     \item 实现了基于 RocksDB 多列族的 FUSE 文件系统 RucksFS，支持 \texttt{create}、\texttt{mkdir}、\texttt{unlink}、\texttt{rmdir}、\texttt{rename}、\texttt{readdir}、\texttt{setattr}、\texttt{read}、\texttt{write} 等常用 POSIX 操作。元数据按访问模式划分到 \texttt{inodes}、\texttt{dir\_entries}、\texttt{delta\_entries}、\texttt{system} 四个列族；目录项键采用父 inode 加子文件名的大端序拼接编码，使文件操作对应目录树上一条边的增删。
@@ -23,10 +23,10 @@ RucksFS 在元数据关键路径上达到了预期目标，但作为毕业设计
 \begin{enumerate}
     \item \textbf{DataServer 仍是最小实现。} 当前 \texttt{RawDiskDataStore} 使用固定偏移公式映射 inode，\texttt{delete\_data} 是空操作，不做空间回收，单文件存在 64\,MiB 的逻辑上限。要作为真实可用的文件系统，还需要补上块分配、空间回收以及对大文件的支持。
 
-    \item \textbf{客户端缓存策略偏保守。} 本文为了对元数据路径做纯粹测量，把 FUSE 的 entry/attr TTL 设为 0，使每次 \texttt{lookup} 和 \texttt{getattr} 都穿透到服务端。后续可以从三个方向改进：一是把 TTL 放宽到秒级以吸收重复的 \texttt{getattr}；二是为名字不存在的结果维护负缓存，避免反复触达服务端；三是补一个目录失效协议，客户端缓存在目录发生变更时能收到服务端推送的失效通知。前两项可通过调参实现，第三项需要协议层面的设计。
+    \item \textbf{客户端缓存策略偏保守。} 本课题为了对元数据路径做纯粹测量，把 FUSE 的 entry/attr TTL 设为 0，使每次 \texttt{lookup} 和 \texttt{getattr} 都穿透到服务端。后续可以从三个方向改进：一是把 TTL 放宽到秒级以吸收重复的 \texttt{getattr}；二是为名字不存在的结果维护负缓存，避免反复触达服务端；三是补一个目录失效协议，客户端缓存在目录发生变更时能收到服务端推送的失效通知。前两项可通过调参实现，第三项需要协议层面的设计。
 
     \item \textbf{跨服务 RPC 合并尚不充分。} 一次 \texttt{create} 目前产生三次跨节点 RPC（\texttt{lookup}、\texttt{create}、\texttt{release}），而 NFS v4 通过 COMPOUND 请求可以把多个操作打包到一次往返中，这也是低并发下 NFS 领先的主要原因。下一步可以把 \texttt{lookup} 合入 \texttt{create}，或引入批量接口均摊网络开销。这些改动不触及元数据存储模型本身，只在协议层面做工程重构。
 \end{enumerate}
 
-需要指出的是，上述三项不足均属于工程完善层面的问题，与本文的核心研究目标并不矛盾。本文要回答的问题是：针对元数据访问模式定制的 KV 方案能否在共享父目录高并发场景下带来实质性的性能提升，以及 DeltaOp 增量更新机制能否有效消除父目录写冲突。第~\ref{sec:experiments}~章的实验数据已经对这两个问题给出了肯定的回答。DataServer 的块管理、客户端缓存策略和 RPC 合并属于系统走向生产部署时需要补齐的工程能力，不影响本文在元数据设计层面所得出的结论。
+需要指出的是，上述三项不足均属于工程完善层面的问题，与本课题的核心研究目标并不矛盾。本课题要回答的问题是：针对元数据访问模式定制的 KV 方案能否在共享父目录高并发场景下带来实质性的性能提升，以及 DeltaOp 增量更新机制能否有效消除父目录写冲突。第~\ref{sec:experiments}~章的实验数据已经对这两个问题给出了肯定的回答。DataServer 的块管理、客户端缓存策略和 RPC 合并属于系统走向生产部署时需要补齐的工程能力，不影响本课题在元数据设计层面所得出的结论。
 

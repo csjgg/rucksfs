@@ -13,11 +13,11 @@ FUSE（Filesystem in Userspace）\cite{szeredi2005fuse} 把文件系统逻辑从
 
 \subsubsection{回调模型与异步实现}
 
-FUSE 暴露的接口是一组与 VFS 操作一一对应的回调。表~\ref{tab:fuse_callbacks} 列出本文直接涉及的核心回调。
+FUSE 暴露的接口是一组与 VFS 操作一一对应的回调。表~\ref{tab:fuse_callbacks} 列出本课题直接涉及的核心回调。
 
 \begin{table}[htbp]
     \centering
-    \caption{FUSE 核心回调接口（本文涉及部分）}
+    \caption{FUSE 核心回调接口（本课题涉及部分）}
     \label{tab:fuse_callbacks}
     \begin{tabular}{llp{6.5cm}}
     \toprule
@@ -78,7 +78,7 @@ Bloom 过滤器用于快速判断某个键是否不存在于某个 SST 文件中
 
 \subsection{POSIX 文件系统语义}
 
-一个文件系统只要对外暴露 POSIX 接口，就需要遵守一整套关于 inode、目录结构、权限位和错误码的约定。本文聚焦普通文件、目录和常用元数据操作，使其与 Linux 用户空间程序的预期一致。
+一个文件系统只要对外暴露 POSIX 接口，就需要遵守一整套关于 inode、目录结构、权限位和错误码的约定。本课题聚焦普通文件、目录和常用元数据操作，使其与 Linux 用户空间程序的预期一致。
 
 \subsubsection{inode 模型与目录结构}
 
@@ -86,7 +86,7 @@ POSIX 文件系统以 inode 作为对象的持久标识。目录是名字到 ino
 
 \subsubsection{核心文件操作语义}
 
-\texttt{create}、\texttt{mkdir}、\texttt{unlink}、\texttt{rmdir} 和 \texttt{rename} 是本文最关心的 POSIX 操作。它们共同的难点不在于写几条记录，而在于必须同时满足若干一致性条件。表~\ref{tab:posix_ops} 对这些操作的核心约束做了归纳。
+\texttt{create}、\texttt{mkdir}、\texttt{unlink}、\texttt{rmdir} 和 \texttt{rename} 是本课题最关心的 POSIX 操作。它们共同的难点不在于写几条记录，而在于必须同时满足若干一致性条件。表~\ref{tab:posix_ops} 对这些操作的核心约束做了归纳。
 
 \begin{table}[htbp]
     \centering
