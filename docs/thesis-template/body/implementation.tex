@@ -1,7 +1,7 @@
 \section{系统实现}
 \label{sec:impl}
 
-第~\ref{sec:design}~章集中讨论了核心的元数据设计和文件操作。但一次完整的用户请求还需要 FUSE 客户端、MetadataServer 与 DataServer 三个组件协同才能完成，本章从系统实现角度对这三部分进行阐述。内容涵盖整体架构与语言选择、客户端到两个服务的请求分发与编排、MetadataServer 与 DataServer 各自的实现、跨服务的 gRPC 协议与连接层优化，以及正常路径之外的错误处理与恢复边界。
+第~\ref{sec:design}~章集中讨论了核心的元数据设计和文件操作。但一次完整的用户请求还需要 FUSE 客户端、MetadataServer 与 DataServer 三个组件协同才能完成，本章从系统实现角度对这三部分进行阐述。内容涵盖整体架构与语言选择、客户端到两个服务的请求分发与编排、MetadataServer 与 DataServer 各自的实现、跨服务的 gRPC（Google Remote Procedure Call）协议与连接层优化，以及正常路径之外的错误处理与恢复边界。
 
 \subsection{实现概览}
 \label{sec:impl_overview}
@@ -28,7 +28,7 @@ RucksFS 的整体架构如图~\ref{fig:architecture} 所示，由 FUSE 客户端
 
 FUSE 客户端使用 fuse3 0.8 库实现，启用 \texttt{tokio-runtime} 与 \texttt{unprivileged} 两个特性。前者让 FUSE 回调直接运行在 tokio 异步运行时之上，当一次回调需要等待后端 RPC 返回时可以让出协程、让执行器推进其他请求；后者则允许以普通用户身份挂载 FUSE，不依赖 setuid 的 \texttt{fusermount} 帮助程序，便于在受限容器环境里部署。
 
-挂载阶段的两项关键配置是 \texttt{default\_permissions} 和 \texttt{allow\_other}。前者让内核 VFS 在请求进入 FUSE 客户端前完成标准的 owner/group/other 权限检查，客户端拿到的请求都已经过内核过滤，不需要重复实现 POSIX 权限语义；后者让挂载点对其他 uid 可见，便于多用户或多进程访问。目录项与属性缓存的 TTL 由客户端根据场景配置：生产部署下 TTL 通常设为秒级以吸收重复查询；第~\ref{sec:experiments}~章的性能测试把 TTL 设为 0 以测量 MDS 纯路径的吞吐。
+挂载阶段的两项关键配置是 \texttt{default\_permissions} 和 \texttt{allow\_other}。前者让内核 VFS 在请求进入 FUSE 客户端前完成标准的 owner/group/other 权限检查，客户端拿到的请求都已经过内核过滤，不需要重复实现 POSIX 权限语义；后者让挂载点对其他 uid 可见，便于多用户或多进程访问。目录项与属性缓存的 TTL（Time-To-Live）由客户端根据场景配置：生产部署下 TTL 通常设为秒级以吸收重复查询；第~\ref{sec:experiments}~章的性能测试把 TTL 设为 0 以测量 MDS 纯路径的吞吐。
 
 \subsubsection{请求分发与缓存}
 

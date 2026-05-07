@@ -41,7 +41,7 @@ FUSE 暴露的接口是一组与 VFS 操作一一对应的回调。表~\ref{tab:
     \end{tabular}
 \end{table}
 
-RucksFS 客户端使用 Rust 的 \texttt{fuse3}\cite{fuse3crate}（0.8 版，启用 \texttt{tokio-runtime} 与 \texttt{unprivileged} 特性）。\texttt{fuse3} 是围绕 tokio 异步运行时封装的 FUSE 绑定，回调以异步函数形式提供。当某个回调等待 RPC 或其他异步 I/O 时，运行时可以把它挂起、转去推进其他已就绪的任务，事件完成后再恢复执行，实际占用的操作系统线程数不会随并发请求线性增长。这种模式在网络 I/O 占主导的元数据密集负载下可以明显提高并发度。
+RucksFS 客户端使用 Rust 的 \texttt{fuse3}\cite{fuse3crate}（0.8 版，启用 \texttt{tokio-runtime} 与 \texttt{unprivileged} 特性）。\texttt{fuse3} 是围绕 tokio 异步运行时封装的 FUSE 绑定，回调以异步函数形式提供。当某个回调等待 RPC（Remote Procedure Call）或其他异步 I/O 时，运行时可以把它挂起、转去推进其他已就绪的任务，事件完成后再恢复执行，实际占用的操作系统线程数不会随并发请求线性增长。这种模式在网络 I/O 占主导的元数据密集负载下可以明显提高并发度。
 
 \subsubsection{性能开销特征}
 
