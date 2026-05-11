@@ -6,16 +6,16 @@
 \subsection{实现概览}
 \label{sec:impl_overview}
 
-RucksFS 的整体架构如图~\ref{fig:architecture} 所示，由 FUSE 客户端、MetadataServer（MDS）、DataServer（DS）三个组件组成，三者之间通过 gRPC 通信。客户端是整条路径的入口，负责接收来自 Linux 内核的 FUSE 请求，通过内部的请求分发层把每类调用转发到 MDS 或 DS；MDS 承担全部元数据操作，包括命名空间管理、inode 状态维护、PCC 事务、DeltaOp 懒折叠等在第~\ref{sec:design}~章详述的内容；DS 承担实际文件数据的读写，内部把每个 inode 映射到磁盘上同一个大文件的固定偏移区段，直接走裸磁盘 I/O，不再经过本地文件系统这一层抽象。
+RucksFS 的整体架构如图~\ref{fig:architecture} 所示，由 FUSE 客户端、MetadataServer（MDS）、DataServer（DS）三个组件组成，三者之间通过 gRPC 通信。客户端是整条路径的入口，负责接收来自 Linux 内核的 FUSE 请求，通过内部的文件操作路由（请求分发层）把每类调用转发到 MDS 或 DS，并通过多通道连接池维持到两类服务的 gRPC 连接；MDS 承担全部元数据操作，包括命名空间管理、inode 状态维护、PCC 事务、DeltaOp 懒折叠等在第~\ref{sec:design}~章详述的内容；DS 承担实际文件数据的读写，内部把每个 inode 映射到磁盘上同一个大文件的固定偏移区段，直接走裸磁盘 I/O，不再经过本地文件系统这一层抽象。
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=\textwidth]{images/architecture.png}
+    \includegraphics[width=\textwidth]{images/architecture.pdf}
     \caption{RucksFS 系统整体架构}
     \label{fig:architecture}
 \end{figure}
 
-这种架构把”命名空间与 inode 语义”和”字节读写”两类职责分开：前者集中在 MDS，后者集中在 DS，跨两者的语义（例如 \texttt{open} 先拿数据路由再走数据路径、\texttt{unlink} 后触发数据清理）由客户端显式编排。这样每个服务内部的状态相对独立，有利于展示本课题的实现，且排查问题时也更容易定位到具体组件。
+这种架构把 “命名空间与 inode 语义” 和 “字节读写”两类职责分开：前者集中在 MDS，后者集中在 DS，跨两者的语义（例如 \texttt{open} 先拿数据路由再走数据路径、\texttt{unlink} 后触发数据清理）由客户端显式编排。这样每个服务内部的状态相对独立，有利于展示本课题的实现，且排查问题时也更容易定位到具体组件。
 
 实现语言选择 Rust，主要基于两点考虑。第一，文件系统作为基础设施对内存安全要求较高，Rust 的所有权与生命周期模型使得并发共享状态的管理可以在编译期完成检查，避免运行时出现内存错误。第二，Rust 的异步生态与 FUSE 的回调模型契合度较好：一次 FUSE 请求往往要跨越 FUSE、gRPC、RocksDB 三层 I/O 边界，协程加阻塞等待的实现方式在这种多阶段 I/O 场景下可以在固定线程资源下维持较高并发度。
 
@@ -164,7 +164,7 @@ RucksFS 的 gRPC 接口遵循两条原则。
 
 第一条是\textbf{元数据操作与数据操作严格分离}。MetadataServer 的 RPC 接口按职责分成四类：命名空间操作（\texttt{Lookup}、\texttt{Create}、\texttt{Mkdir}、\texttt{Unlink}、\texttt{Rmdir}、\texttt{Rename}、\texttt{Readdir}）、属性操作（\texttt{GetAttr}、\texttt{SetAttr}）、句柄操作（\texttt{Open}、\texttt{Release}、\texttt{CreateAndOpen}）以及写入后的元数据协调（\texttt{ReportWrite}）；DataServer 的接口刻意精简，只包含 \texttt{Read}、\texttt{Write}、\texttt{Truncate}、\texttt{DeleteData}、\texttt{Flush} 五个直接面向字节内容的调用。两套服务定义互不交叉，从接口层面就能清楚谁负责对象语义、谁负责数据字节，客户端对一个请求也一眼就能看出走的是元数据链路还是数据链路。
 
-第二条是\textbf{让一次 RPC 尽量返回下一阶段所需的全部信息}，避免把简单操作拆成多轮往返。具体落点有三处：\texttt{Open} 的响应里既有 \texttt{FileHandle} 又有 \texttt{DataLocation}，客户端不必再发一次问路由的调用；\texttt{Unlink} 的响应里携带 \texttt{purged\_inodes}，让客户端直接知道哪些 inode 需要到 DataServer 侧清理；\texttt{SetAttr} 的响应里有 \texttt{needs\_truncate} 指示客户端是否需要补一个截断请求。\texttt{CreateAndOpen} 把这一原则再推进一步。典型的 \texttt{open(O\_CREAT)} 在客户端层面会先 \texttt{Lookup} 判断路径是否存在、若不存在再 \texttt{Create} 插入记录、最后 \texttt{Open} 获取句柄；把这三步合并到一次 RPC 之后，当客户端明确希望”没有则新建、有则直接打开”时，可以减少两次中间往返。
+第二条是\textbf{让一次 RPC 尽量返回下一阶段所需的全部信息}，避免把简单操作拆成多轮往返。具体落点有三处：\texttt{Open} 的响应里既有 \texttt{FileHandle} 又有 \texttt{DataLocation}，客户端不必再发一次问路由的调用；\texttt{Unlink} 的响应里携带 \texttt{purged\_inodes}，让客户端直接知道哪些 inode 需要到 DataServer 侧清理；\texttt{SetAttr} 的响应里有 \texttt{needs\_truncate} 指示客户端是否需要补一个截断请求。\texttt{CreateAndOpen} 把这一原则再推进一步。典型的 \texttt{open(O\_CREAT)} 在客户端层面会先 \texttt{Lookup} 判断路径是否存在、若不存在再 \texttt{Create} 插入记录、最后 \texttt{Open} 获取句柄；把这三步合并到一次 RPC 之后，当客户端明确希望 “没有则新建、有则直接打开”时，可以减少两次中间往返。
 
 \subsubsection{多通道连接池}
 

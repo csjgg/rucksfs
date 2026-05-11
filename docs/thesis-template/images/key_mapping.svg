@@ -3,7 +3,7 @@
 
   <defs>
     <style>
-      .frame { fill: #ffffff; stroke: #b8b8b8; stroke-width: 1px; }
+      .frame { fill: #ffffff; stroke: none; }
       .tree-node {
         fill: #f0f0f0;
         stroke: #111111;
@@ -43,14 +43,14 @@
         rx: 4px;
       }
       .title, .mid, .small, .tiny, .mono {
-        font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+        font-family: "Noto Sans CJK SC", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", "DejaVu Sans", Arial, sans-serif;
       }
       .title { font-size: 18px; font-weight: 700; fill: #111111; }
       .mid { font-size: 16px; fill: #111111; }
       .small { font-size: 14px; fill: #333333; }
       .tiny { font-size: 12px; fill: #555555; }
       .mono {
-        font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+        font-family: "DejaVu Sans Mono", "JetBrains Mono", "SF Mono", "Menlo", monospace;
         font-size: 13px;
         fill: #111111;
       }

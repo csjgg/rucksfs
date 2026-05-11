@@ -3,7 +3,7 @@
 
       <defs><style>
     :root {
-      --font: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+      --font: "Noto Sans CJK SC", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", "DejaVu Sans", Arial, sans-serif;
       --ink: #111111;
       --muted: #333333;
       --light: #f1f1f1;
@@ -27,15 +27,15 @@
       width: 1600px;
       height: 1000px;
       overflow: hidden;
-      background: var(--paper);
-      font-family: var(--font);
+      background: #ffffff;
+      font-family: "Noto Sans CJK SC", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", "DejaVu Sans", Arial, sans-serif;
     }
 
     .capture-frame {
       width: 1600px;
       height: 1000px;
-      border: 1px solid #b8b8b8;
-      background: var(--paper);
+      border: none;
+      background: #ffffff;
     }
 
     svg {
@@ -49,102 +49,102 @@
     .sst,
     .key,
     .legend {
-      fill: var(--paper);
-      stroke: var(--line);
-      stroke-width: var(--stroke);
+      fill: #ffffff;
+      stroke: #111111;
+      stroke-width: 1.8px;
     }
 
-    .box { fill: var(--panel); }
+    .box { fill: #fafafa; }
 
     .memory-box,
     .wal-box,
     .read-box,
     .level,
     .compact-box {
-      fill: var(--soft);
-      stroke: var(--line);
+      fill: #f6f6f6;
+      stroke: #111111;
     }
 
     .sst {
       fill: #ffffff;
-      stroke: var(--line);
+      stroke: #111111;
     }
 
     .box,
     .level,
     .legend {
-      rx: var(--radius);
+      rx: 8px;
     }
 
     .key {
-      fill: var(--key-fill);
+      fill: #9ca3af;
     }
 
     .key-text,
     .mid.key-text,
     .tiny.key-text {
-      fill: var(--key-text);
+      fill: #ffffff;
     }
 
     .dashed-box {
-      fill: var(--paper);
-      stroke: var(--line);
-      stroke-width: var(--stroke);
-      stroke-dasharray: var(--dash);
-      rx: var(--radius);
+      fill: #ffffff;
+      stroke: #111111;
+      stroke-width: 1.8px;
+      stroke-dasharray: 8 7;
+      rx: 8px;
     }
 
     .dashed-box.read-box,
     .dashed-box.compact-box {
-      fill: var(--soft);
-      stroke: var(--line);
+      fill: #f6f6f6;
+      stroke: #111111;
     }
 
     .label {
       font-size: 22px;
       font-weight: 700;
-      fill: var(--ink);
+      fill: #111111;
     }
 
     .mid {
       font-size: 17px;
-      fill: var(--ink);
+      fill: #111111;
     }
 
     .small {
       font-size: 14px;
-      fill: var(--muted);
+      fill: #333333;
     }
 
     .tiny {
       font-size: 12px;
-      fill: var(--muted);
+      fill: #333333;
     }
 
     .note {
       font-size: 16px;
-      fill: var(--muted);
+      fill: #333333;
     }
 
     .note-strong {
       font-size: 18px;
-      fill: var(--ink);
+      fill: #111111;
     }
 
     .read-note {
       font-size: 18px;
-      fill: var(--ink);
+      fill: #111111;
     }
 
     .level-title {
       font-size: 18px;
       font-weight: 700;
-      fill: var(--ink);
+      fill: #111111;
     }
 
     .arrow {
       fill: none;
-      stroke: var(--line);
+      stroke: #111111;
       stroke-width: 2px;
       stroke-linecap: round;
       stroke-linejoin: round;
@@ -153,16 +153,16 @@
 
     .dash-line {
       fill: none;
-      stroke: var(--line);
+      stroke: #111111;
       stroke-width: 1.5px;
-      stroke-dasharray: var(--dash);
+      stroke-dasharray: 8 7;
     }
 
     .dash-arrow {
       fill: none;
-      stroke: var(--line);
+      stroke: #111111;
       stroke-width: 1.8px;
-      stroke-dasharray: var(--dash);
+      stroke-dasharray: 8 7;
       stroke-linecap: round;
       stroke-linejoin: round;
       marker-end: url(#arrow);
@@ -170,7 +170,7 @@
 
     .bracket {
       fill: none;
-      stroke: var(--line);
+      stroke: #111111;
       stroke-width: 2px;
       marker-end: url(#arrow);
     }

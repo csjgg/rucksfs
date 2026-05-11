@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="600" viewBox="0 0 1100 600" role="img" aria-labelledby="title desc">
+  <title id="title">RucksFS 系统架构图（预览版）</title>
+  <desc id="desc">保持三模块排布：上方客户端、下方元数据服务器和数据服务器。优化为统一黑白灰风格、简化箭头与文案。</desc>
+
+  <defs>
+    <style>
+      .bg { fill: #ffffff; }
+      .frame { fill: #ffffff; stroke: #b8b8b8; stroke-width: 1px; }
+
+      .module { fill: #f6f6f6; stroke: #111111; stroke-width: 1.8px; rx: 10px; }
+      .sub { fill: #ffffff; stroke: #111111; stroke-width: 1.3px; rx: 7px; }
+      .sub-dark { fill: #ececec; stroke: #111111; stroke-width: 1.3px; rx: 7px; }
+      .chip { fill: #e5e7eb; stroke: #4b5563; stroke-width: 1px; rx: 5px; }
+
+      .title { font: 700 20px "Noto Sans CJK SC", "Microsoft YaHei", "DejaVu Sans", sans-serif; fill: #111111; }
+      .m-title { font: 700 16px "Noto Sans CJK SC", "Microsoft YaHei", "DejaVu Sans", sans-serif; fill: #111111; }
+      .txt { font: 500 13px "Noto Sans CJK SC", "Microsoft YaHei", "DejaVu Sans", sans-serif; fill: #222222; }
+      .txt-sm { font: 500 12px "Noto Sans CJK SC", "Microsoft YaHei", "DejaVu Sans", sans-serif; fill: #333333; }
+      .mono { font: 500 11px "DejaVu Sans Mono", monospace; fill: #222222; }
+
+      .arrow { fill: none; stroke: #111111; stroke-width: 2.2px; marker-end: url(#arr); }
+      .arrow-dash { fill: none; stroke: #111111; stroke-width: 2px; stroke-dasharray: 6 5; marker-end: url(#arr); }
+      .label { font: 500 12px "Noto Sans CJK SC", "Microsoft YaHei", "DejaVu Sans", sans-serif; fill: #333333; }
+    </style>
+
+    <marker id="arr" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#111111"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1100" height="600"/>
+  <rect class="frame" x="10" y="10" width="1080" height="580"/>
+
+  <!-- 顶部入口 -->
+  <rect class="sub-dark" x="390" y="28" width="320" height="38"/>
+  <text class="txt" x="550" y="53" text-anchor="middle">用户应用 / Linux VFS</text>
+
+  <!-- 客户端模块（上） -->
+  <rect class="module" x="280" y="82" width="540" height="170"/>
+  <text class="m-title" x="550" y="115" text-anchor="middle">RucksFS 客户端</text>
+
+  <rect class="sub" x="305" y="130" width="155" height="42"/>
+  <text class="txt" x="382" y="157" text-anchor="middle">FUSE 适配层</text>
+
+  <rect class="sub" x="472" y="130" width="156" height="42"/>
+  <text class="txt" x="550" y="157" text-anchor="middle">请求分发</text>
+
+  <rect class="sub" x="640" y="130" width="155" height="42"/>
+  <text class="txt" x="717" y="157" text-anchor="middle">RPC 客户端</text>
+
+  <rect class="sub" x="305" y="184" width="490" height="48"/>
+  <text class="txt-sm" x="550" y="213" text-anchor="middle">句柄缓存：fh → (server_id, inode)</text>
+
+  <!-- MDS 模块（左下） -->
+  <rect class="module" x="60" y="292" width="470" height="270"/>
+  <text class="m-title" x="295" y="325" text-anchor="middle">元数据服务器（MetadataServer）</text>
+
+  <rect class="sub" x="86" y="342" width="418" height="42"/>
+  <text class="txt" x="295" y="369" text-anchor="middle">元数据服务（MetadataService / RPC）</text>
+
+  <rect class="sub" x="86" y="396" width="418" height="42"/>
+  <text class="txt" x="295" y="423" text-anchor="middle">命名空间管理 + 悲观事务 + DeltaOp</text>
+
+  <rect class="sub-dark" x="86" y="450" width="418" height="92"/>
+  <text class="txt" x="295" y="478" text-anchor="middle">RocksDB（TransactionDB + WAL）</text>
+
+  <rect class="chip" x="105" y="492" width="92" height="26"/>
+  <text class="mono" x="151" y="509" text-anchor="middle">inodes</text>
+
+  <rect class="chip" x="208" y="492" width="114" height="26"/>
+  <text class="mono" x="265" y="509" text-anchor="middle">dir_entries</text>
+
+  <rect class="chip" x="333" y="492" width="114" height="26"/>
+  <text class="mono" x="390" y="509" text-anchor="middle">delta_entries</text>
+
+  <rect class="chip" x="458" y="492" width="42" height="26"/>
+  <text class="mono" x="479" y="509" text-anchor="middle">system</text>
+
+  <text class="txt-sm" x="295" y="536" text-anchor="middle">后台折叠线程：DeltaCompactionWorker</text>
+
+  <!-- DS 模块（右下） -->
+  <rect class="module" x="570" y="292" width="470" height="270"/>
+  <text class="m-title" x="805" y="325" text-anchor="middle">数据服务器（DataServer）</text>
+
+  <rect class="sub" x="596" y="342" width="418" height="42"/>
+  <text class="txt" x="805" y="369" text-anchor="middle">数据服务（DataService / RPC）</text>
+
+  <rect class="sub" x="596" y="396" width="418" height="42"/>
+  <text class="txt" x="805" y="423" text-anchor="middle">读 / 写 / 截断 / 删除</text>
+
+  <rect class="sub-dark" x="596" y="450" width="418" height="92"/>
+  <text class="txt" x="805" y="478" text-anchor="middle">原始数据文件（RawDisk / data.raw）</text>
+  <text class="mono" x="805" y="504" text-anchor="middle">offset = inode × max_file_size + file_offset</text>
+  <text class="txt-sm" x="805" y="528" text-anchor="middle">直接 I/O：pread / pwrite</text>
+
+  <!-- 箭头：对称分流 -->
+  <path class="arrow" d="M550 66 L550 80"/>
+
+  <path class="arrow" d="M550 252 L550 272 L335 272 L335 292"/>
+  <text class="label" x="430" y="265" text-anchor="middle">元数据 RPC</text>
+
+  <path class="arrow" d="M550 252 L550 272 L765 272 L765 292"/>
+  <text class="label" x="670" y="265" text-anchor="middle">数据 RPC</text>
+
+  <path class="arrow" d="M295 438 L295 448"/>
+  <path class="arrow-dash" d="M330 536 L330 520"/>
+  <text class="label" x="372" y="534" text-anchor="start">折叠写回</text>
+
+  <path class="arrow" d="M805 438 L805 448"/>
+
+  <text class="txt-sm" x="930" y="578" text-anchor="middle">预览版（未接入论文）</text>
+</svg>

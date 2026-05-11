@@ -3,7 +3,7 @@
 
   <defs>
     <style>
-      .frame { fill: #ffffff; stroke: #b8b8b8; stroke-width: 1px; }
+      .frame { fill: #ffffff; stroke: none; }
       .box, .panel, .card, .key, .flow-box {
         fill: #ffffff;
         stroke: #111111;
@@ -13,7 +13,7 @@
       .box, .panel, .flow-box { fill: #f6f6f6; }
       .key { fill: #9ca3af; }
       .title, .mid, .small, .tiny, .strong, .white {
-        font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+        font-family: "Noto Sans CJK SC", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", "DejaVu Sans", Arial, sans-serif;
       }
       .title { font-size: 21px; font-weight: 700; fill: #111111; }
       .mid { font-size: 18px; fill: #111111; }
@@ -118,7 +118,15 @@
 
   <!-- 竖排"同前缀递增序号" -->
   <path d="M722 258 H712 V382 H722" class="soft-line" />
-  <text x="694" y="320" text-anchor="middle" class="tiny" writing-mode="tb">同前缀递增序号</text>
+  <text x="694" y="274" text-anchor="middle" class="tiny">
+    <tspan x="694" dy="0">同</tspan>
+    <tspan x="694" dy="16">前</tspan>
+    <tspan x="694" dy="16">缀</tspan>
+    <tspan x="694" dy="16">递</tspan>
+    <tspan x="694" dy="16">增</tspan>
+    <tspan x="694" dy="16">序</tspan>
+    <tspan x="694" dy="16">号</tspan>
+  </text>
 
   <!-- ===== 左侧：读路径 ===== -->
   <rect x="30" y="26" width="260" height="400" class="box flow-box" />
