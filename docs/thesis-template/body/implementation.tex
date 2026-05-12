@@ -42,6 +42,12 @@ FUSE 客户端使用 fuse3 0.8 库实现，启用 \texttt{tokio-runtime} 与 \te
 
 这样划分之后，命名空间与 inode 状态的语义约束全部留在 MetadataServer 内、字节读写与清理留在 DataServer 内，跨两者的复合语义由客户端显式编排。边界清楚的直接好处是出问题时更容易定位。代价是客户端比本地文件系统中只做请求转发的客户端更复杂，这是分离式架构必然要承担的一层成本。
 
+\subsubsection{以 \texttt{open} 为例的跨服务编排}
+
+三类操作中第三类最能体现跨服务编排。以打开一个已存在的文件 \texttt{/a/b} 为例，完整流程见图~\ref{fig:open_seq}。
+
+应用发起 \texttt{open("/a/b")} 后，FUSE 客户端需要先把路径解析到目标 inode，具体做法是向 MetadataServer 发两次 \texttt{Lookup}，第一次取 \texttt{a}、第二次取 \texttt{b}，每次都拿回 inode 和完整属性。拿到目标 inode 后再发一次 \texttt{Open}，服务端为此 inode 创建一个文件句柄，并连同对应的 \texttt{DataLocation}（其中包含 DataServer 编号和 inode）一起返回。客户端在本地维护句柄表 $\{fh \to (server\_id, inode)\}$，后续对该句柄的 \texttt{read}/\texttt{write} 直接按 \texttt{server\_id} 路由到 DataServer，不再需要经过 MetadataServer。这样数据 I/O 的稳态路径只涉及一次 gRPC 往返，\texttt{open} 阶段一次性付清的路由代价换来了后续每次 I/O 的快路径。
+
 \begin{figure}[htbp]
     \centering
     \begin{tikzpicture}[>=stealth]
@@ -103,20 +109,6 @@ FUSE 客户端使用 fuse3 0.8 库实现，启用 \texttt{tokio-runtime} 与 \te
     \caption{open 跨服务编排的请求时序}
     \label{fig:open_seq}
 \end{figure}
-
-\subsubsection{以 \texttt{open} 为例的跨服务编排}
-
-三类操作中第三类最能体现跨服务编排。以打开一个已存在的文件 \texttt{/a/b} 为例，完整流程见图~\ref{fig:open_seq}。
-
-% \begin{figure}[htbp]
-%     \centering
-%     \includegraphics[width=\textwidth]{images/open_sequence_diagram.png}
-%     \caption{open 跨服务编排的请求时序}
-%     \label{fig:open_seq}
-% \end{figure}
-
-
-应用发起 \texttt{open("/a/b")} 后，FUSE 客户端需要先把路径解析到目标 inode，具体做法是向 MetadataServer 发两次 \texttt{Lookup}，第一次取 \texttt{a}、第二次取 \texttt{b}，每次都拿回 inode 和完整属性。拿到目标 inode 后再发一次 \texttt{Open}，服务端为此 inode 创建一个文件句柄，并连同对应的 \texttt{DataLocation}（其中包含 DataServer 编号和 inode）一起返回。客户端在本地维护句柄表 $\{fh \to (server\_id, inode)\}$，后续对该句柄的 \texttt{read}/\texttt{write} 直接按 \texttt{server\_id} 路由到 DataServer，不再需要经过 MetadataServer。这样数据 I/O 的稳态路径只涉及一次 gRPC 往返，\texttt{open} 阶段一次性付清的路由代价换来了后续每次 I/O 的快路径。
 
 \subsection{MetadataServer 实现}
 \label{sec:impl_mds}
