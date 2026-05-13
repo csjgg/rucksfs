@@ -262,15 +262,18 @@
       <rect x="610" y="523" width="150" height="54" class="sst"></rect>
       <rect x="790" y="523" width="150" height="54" class="sst"></rect>
       <text x="505" y="548" text-anchor="middle" class="small">SSTable 1</text>
-      <text x="505" y="566" text-anchor="middle" class="small">[A, Xᵢ]</text>
+      <text x="505" y="566" text-anchor="middle" class="small">[A, X<tspan font-size="9" baseline-shift="sub">i</tspan>]</text>
       <text x="685" y="548" text-anchor="middle" class="small">SSTable 2</text>
-      <text x="685" y="566" text-anchor="middle" class="small">[Xᵢ, Yᵢ]</text>
+      <text x="685" y="566" text-anchor="middle" class="small">[X<tspan font-size="9" baseline-shift="sub">i</tspan>, Y<tspan font-size="9" baseline-shift="sub">i</tspan>]</text>
       <text x="865" y="548" text-anchor="middle" class="small">SSTable 3</text>
-      <text x="865" y="566" text-anchor="middle" class="small">[Yᵢ, Z]</text>
+      <text x="865" y="566" text-anchor="middle" class="small">[Y<tspan font-size="9" baseline-shift="sub">i</tspan>, Z]</text>
       <text x="980" y="558" text-anchor="middle" class="label">...</text>
 
       <line x1="350" y1="609" x2="1040" y2="609" class="dash-line"></line>
-      <text x="710" y="632" text-anchor="middle" class="label">⋮</text>
+      <!-- Vertical ellipsis: draw 3 dots instead of unicode ⋮ (U+22EE) which many CJK fonts lack -->
+      <circle cx="710" cy="622" r="2.5" fill="#111111"></circle>
+      <circle cx="710" cy="630" r="2.5" fill="#111111"></circle>
+      <circle cx="710" cy="638" r="2.5" fill="#111111"></circle>
 
       <rect x="390" y="639" width="650" height="110" class="level"></rect>
       <text x="420" y="669" class="level-title">Level N (LN)</text>
